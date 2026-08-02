@@ -1,0 +1,36 @@
+# agent-bridge gateway config. Copy to config.toml and edit.
+# Any value can be overridden by an env var AGENT_BRIDGE_<SECTION>_<KEY> (upper-case),
+# e.g. AGENT_BRIDGE_AUTH_TOKEN, AGENT_BRIDGE_SERVER_PORT.
+
+[server]
+host = "127.0.0.1"   # keep localhost; reach it via `ssh -L 8787:localhost:8787 midway5`
+port = 8787
+
+[auth]
+# Shared bearer token. Leave empty to auto-generate one on first start
+# (it is printed to the log and written to .token in the data dir).
+token = ""
+
+[worker]
+concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
+
+[db]
+path = "gateway.db"  # relative paths resolve against the data dir
+
+[agents.claude]
+bin = "claude"
+# Dispatch mode:
+#   "agent_exec"       -> the model finds the right session, forks it, and runs the
+#                         task itself (via its own Bash tool). Matches the spec.
+#   "select_then_exec" -> the model only returns a session id; the worker forks+execs
+#                         it directly (cleaner streaming, more deterministic).
+dispatch_mode = "agent_exec"
+permission_mode = "bypassPermissions"
+model = ""                 # empty = account default
+default_cwd = "/project/jevans/tzhang3/agent-bridge"
+allowed_dirs = [
+    "/project/jevans/tzhang3",
+    "/home/tzhang3",
+]
+timeout_sec = 0            # 0 (or negative) = no wall-clock limit; jobs run unbounded
+max_sessions_in_index = 40 # how many recent sessions to show the dispatcher

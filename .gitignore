@@ -1,0 +1,8 @@
+config.toml
+.token
+*.db
+*.db-wal
+*.db-shm
+jobs/
+__pycache__/
+*.pyc

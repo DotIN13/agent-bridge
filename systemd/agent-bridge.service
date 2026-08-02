@@ -1,0 +1,27 @@
+# User systemd unit. Install with:
+#   loginctl enable-linger $USER
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/agent-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agent-bridge
+#
+# Note: this restarts across a node reboot (with linger) but the gateway is
+# login5-specific. It does NOT re-authenticate Claude; make sure `claude` has a
+# valid credential (OAuth token in ~/.claude) that survives non-interactively.
+[Unit]
+Description=agent-bridge gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/agent-bridge
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AGENT_BRIDGE_CONFIG=%h/agent-bridge/config.toml
+ExecStart=/usr/bin/python3 -m gateway --config %h/agent-bridge/config.toml
+Restart=on-failure
+RestartSec=10
+MemoryMax=4G
+RuntimeDirectory=agent-bridge
+
+[Install]
+WantedBy=default.target
