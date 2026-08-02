@@ -200,31 +200,16 @@ def load(path: str | os.PathLike | None) -> Config:
 
 
 def _resolve_files_dir(cfg_dir: str, data_dir: Path) -> str:
-    """Where uploads live, in priority order:
-        1. [files].dir from config (absolute, or relative to the data dir)
-        2. $SCRATCH   (per-user dir beneath it)
-        3. $TMPDIR    "
-        4. /tmp       (final fallback)
-    A candidate that isn't writable (e.g. $SCRATCH pointing at a root-owned base)
-    is skipped for the next one. The store is locked to 0700 — it may be
-    world-accessible and uploads can be sensitive."""
+    """Where uploads live:
+        - [files].dir from config if set (absolute, or relative to the data dir)
+        - otherwise a per-user dir under tempfile.gettempdir()
+    The store is locked to 0700 — it may be world-accessible and uploads can be
+    sensitive."""
     if cfg_dir:
         d = Path(cfg_dir) if Path(cfg_dir).is_absolute() else data_dir / cfg_dir
-        return _prepare_store(d)   # explicit config: no fallback, surface errors
-
-    roots, seen = [], set()
-    for root in (os.environ.get("SCRATCH"), os.environ.get("TMPDIR"),
-                 tempfile.gettempdir()):
-        if root and root not in seen:
-            seen.add(root)
-            roots.append(root)
-    last_err: Exception | None = None
-    for root in roots:
-        try:
-            return _prepare_store(Path(root) / f"agent-bridge-{os.getuid()}" / "files")
-        except OSError as e:
-            last_err = e
-    raise RuntimeError(f"no writable file store in $SCRATCH/$TMPDIR/tmp: {last_err}")
+    else:
+        d = Path(tempfile.gettempdir()) / f"agent-bridge-{os.getuid()}" / "files"
+    return _prepare_store(d)
 
 
 def _prepare_store(d: Path) -> str:
