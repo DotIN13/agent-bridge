@@ -16,6 +16,8 @@ def render_llms_txt(cfg: Config) -> str:
         f"{n}={c.dispatch_mode}" for n, c in cfg.agents.items()
     )
     base = f"http://{cfg.host}:{cfg.port}"
+    _def = cfg.agents.get(cfg.default_agent) if cfg.agents else None
+    tiers = "/".join(_def.tiers()) if _def and _def.tiers() else "none configured"
     return f"""\
 # agent-bridge — how to use this API (for LLM agents)
 
@@ -46,6 +48,11 @@ Terminal statuses: succeeded, failed, canceled. Non-terminal: queued, running.
 GET  /health                 -> {{"ok": true}}                        (no auth)
 GET  /llms.txt | /v1/help     -> this document                        (no auth)
 GET  /v1/agents               -> {{"configured":[...],"default":"..."}}
+GET  /v1/models[?agent=]      -> models offered, each tagged with the task
+                                 complexity it suits, plus context window and
+                                 $/Mtok. Read before setting `model` on a job;
+                                 the `tiers` map gives complexity -> id.
+                                 Tiers here: {tiers}.
 GET  /v1/info[?refresh=1]  -> this machine's capabilities (host/CPU/RAM,
                                  local GPUs, Slurm partitions + GPU inventory,
                                  allocation balance). Cached; read before choosing

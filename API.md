@@ -40,6 +40,30 @@ Which backends exist.
 { "configured": ["claude"], "known": ["claude"], "default": "claude" }
 ```
 
+### `GET /v1/models`  ·  `?agent=<name>`
+Models this agent offers, so a caller can choose by task complexity rather than
+by guessing an id. Config-driven — `[[agents.<name>.models]]` in the gateway's
+config.toml — so what's listed is what that agent is set up to accept.
+```json
+{
+  "agent": "claude",
+  "models": [
+    { "id": "claude-sonnet-5", "alias": "sonnet", "tier": "standard",
+      "context": "1M", "input_per_mtok": 2.0, "output_per_mtok": 10.0,
+      "use": "Most coding, analysis, and multi-step work.",
+      "note": "introductory pricing through 2026-08-31" }
+  ],
+  "tiers":   { "standard": "claude-sonnet-5" },
+  "default": ""
+}
+```
+`id` is the only required field per entry; the rest is advertising copy and may
+be absent. There is no built-in catalog — an agent with no `models` configured
+returns an empty list, and `model` on a job is passed through unchecked. `tiers` maps a complexity to an id (first model declared for a tier
+wins) so clients don't reimplement the choice — `default` is what the agent uses
+when a job omits `model`. Prefer a full id over an alias: `opus`/`sonnet`/`haiku`
+track the newest model in each tier, so an alias makes a run non-reproducible.
+
 ### `GET /v1/info`  ·  `?refresh=1`
 This machine's capabilities, probed once on startup (concurrently, in the
 background) and **cached** — reads are instant (~1 ms). Add `?refresh=1` to
@@ -96,7 +120,7 @@ Request body:
 | `cwd` | string | no | absolute dir; must be within an allowed dir or `400`. Defaults to the agent's `default_cwd` |
 | `agent` | string | no | one of `/v1/agents`; defaults to `default` |
 | `session` | string | no | session_id hint to prefer forking |
-| `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id |
+| `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id. See [`/v1/models`](#get-v1models--agentname) for what this agent offers |
 | `permission_mode` | string | no | e.g. `bypassPermissions`, `acceptEdits` |
 | `files` | array | no | attachments — see [Files](#files) |
 

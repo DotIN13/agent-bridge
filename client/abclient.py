@@ -104,6 +104,14 @@ def _parse(raw: bytes):
         return (raw or b"").decode(errors="replace")
 
 
+def _unreachable(base: str, path: str, e: OSError) -> "GatewayError":
+    """A transport-level failure. Covers both a refused connect (URLError, which
+    carries .reason) and a connection dropped mid-response — the signature of a
+    live `ssh -L` whose far end has died, which raises a bare OSError."""
+    return GatewayError(f"cannot reach {base}{path}: {getattr(e, 'reason', e)} "
+                        f"(is the SSH port-forward up, and the gateway running?)")
+
+
 def http(method: str, base: str, path: str, token: str, body: dict | None = None,
          timeout: float = 60.0, accept: str = "application/json"):
     data = json.dumps(body).encode() if body is not None else None
@@ -117,9 +125,8 @@ def http(method: str, base: str, path: str, token: str, body: dict | None = None
             return r.status, _parse(r.read())
     except urllib.error.HTTPError as e:
         return e.code, _parse(e.read())
-    except urllib.error.URLError as e:
-        raise GatewayError(f"cannot reach {base}{path}: {e.reason} "
-                           f"(is the SSH port-forward up?)") from e
+    except OSError as e:
+        raise _unreachable(base, path, e) from e
 
 
 def http_multipart(base: str, path: str, token: str, payload: dict,
@@ -152,8 +159,8 @@ def http_multipart(base: str, path: str, token: str, payload: dict,
             return r.status, _parse(r.read())
     except urllib.error.HTTPError as e:
         return e.code, _parse(e.read())
-    except urllib.error.URLError as e:
-        raise GatewayError(f"cannot reach {base}{path}: {e.reason}") from e
+    except OSError as e:
+        raise _unreachable(base, path, e) from e
 
 
 def http_download(base: str, token: str, remote_path: str, local_path: str,
@@ -175,6 +182,8 @@ def http_download(base: str, token: str, remote_path: str, local_path: str,
     except urllib.error.HTTPError as e:
         raise GatewayError(f"download {remote_path} failed: "
                            f"{e.code} {_parse(e.read())}") from e
+    except OSError as e:
+        raise _unreachable(base, "/v1/files/content", e) from e
     return total
 
 
@@ -199,6 +208,10 @@ class Client:
     def sessions(self, cwd: str | None = None) -> dict:
         q = ("?" + urllib.parse.urlencode({"cwd": cwd})) if cwd else ""
         return self._get("/v1/sessions" + q)
+
+    def models(self, agent: str | None = None) -> dict:
+        q = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
+        return self._get("/v1/models" + q)
 
     # -- jobs --
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
@@ -303,5 +316,11 @@ def _collect_local(paths, dir) -> list[tuple[str, str]]:
 
 def _raise(code: int, data) -> None:
     if code >= 400:
-        msg = data.get("error") if isinstance(data, dict) else str(data)
+        # FastAPI's HTTPException serialises to {"detail": ...}; a few handlers
+        # return {"error": ...}. Fall back to the raw body so a message is never
+        # swallowed into "None".
+        if isinstance(data, dict):
+            msg = data.get("detail") or data.get("error") or json.dumps(data)
+        else:
+            msg = str(data)
         raise GatewayError(f"gateway returned {code}: {msg}")

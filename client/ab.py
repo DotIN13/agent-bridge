@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from abclient import (Client, ConfigError, GatewayError, load_gateways,  # noqa: E402
@@ -61,6 +62,50 @@ def cmd_gateways(args):
 def cmd_info(args):
     d = _client(args).info(refresh=args.refresh)
     _out(args, d, lambda x: print(x.get("summary") or json.dumps(x, indent=2)))
+
+
+def cmd_models(args):
+    """Models the gateway advertises, or one complexity tier resolved to an id.
+
+    The catalog is the gateway's ([[agents.<name>.models]] in its config.toml),
+    so what you see is what that agent will actually accept for `--model`.
+    """
+    d = _client(args).models(agent=args.agent)
+
+    if args.pick:
+        model_id = d.get("tiers", {}).get(args.pick)
+        if not model_id:
+            known = ", ".join(d.get("tiers", {})) or "none"
+            _err(f"gateway advertises no '{args.pick}' model (has: {known})")
+        chosen = next((m for m in d["models"] if m["id"] == model_id), {"id": model_id})
+        _out(args, chosen, lambda x: print(x["id"]))
+        return
+
+    def human(x):
+        if not x.get("models"):
+            print(f"agent '{x['agent']}' advertises no models; --model accepts "
+                  f"any id\nthe agent itself supports. Configure them under "
+                  f"[[agents.{x['agent']}.models]].")
+            return
+        print(f"Models offered by agent '{x['agent']}' — pass the id to --model\n")
+        print(f"  {'TIER':<9} {'--model':<18} {'CTX':>5} {'$/MTOK IN/OUT':>15}")
+        for m in x["models"]:
+            price = (f"{m['input_per_mtok']:.2f} / {m['output_per_mtok']:.2f}"
+                     if m.get("input_per_mtok") is not None else "")
+            print(f"  {m.get('tier',''):<9} {m['id']:<18} "
+                  f"{m.get('context',''):>5} {price:>15}")
+            blurb = (m.get("use", "") +
+                     (f" ({m['note']})" if m.get("note") else "")).strip()
+            if blurb:
+                print(textwrap.fill(blurb, width=78, initial_indent=" " * 12,
+                                    subsequent_indent=" " * 12))
+        if x.get("default"):
+            print(f"\nThis agent's default when --model is omitted: {x['default']}")
+        print("\nPick by task complexity — prints one id, for scripting:")
+        print(f"  ab models --pick {next(iter(x.get('tiers', {'hard': 1})))}")
+        print("  ab submit -F task.md --model \"$(ab models --pick hard)\"")
+
+    _out(args, d, human)
 
 
 def cmd_sessions(args):
@@ -233,6 +278,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("info"); sp.add_argument("--refresh", action="store_true")
     sp.set_defaults(func=cmd_info)
+
+    sp = sub.add_parser("models", help="models this gateway offers, by complexity")
+    sp.add_argument("--pick", metavar="COMPLEXITY",
+                    help="print just the id for one task complexity tier "
+                         "(tiers are whatever the gateway advertises, "
+                         "typically simple|standard|hard|frontier)")
+    sp.add_argument("--agent", help="which agent's models (default: the gateway's)")
+    sp.set_defaults(func=cmd_models)
 
     sp = sub.add_parser("sessions"); sp.add_argument("--cwd")
     sp.set_defaults(func=cmd_sessions)

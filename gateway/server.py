@@ -5,6 +5,7 @@ Routes:
   GET  /health                       -> {"ok": true}                    (no auth)
   GET  /llms.txt | /v1/help          -> agent usage doc                 (no auth)
   GET  /v1/agents                    -> configured/known agents
+  GET  /v1/models[?agent=]           -> models this agent offers, by complexity
   GET  /v1/info[?refresh=1]          -> cluster capabilities (cached)
   GET  /v1/sessions?cwd=&agent=      -> session index the dispatcher sees
   POST /v1/jobs                      -> enqueue a job. JSON body, OR multipart
@@ -103,6 +104,17 @@ def create_app(gw: Gateway) -> FastAPI:
     async def agents():
         return {"configured": sorted(cfg.agents), "known": known_agents(),
                 "default": cfg.default_agent}
+
+    @app.get("/v1/models", dependencies=[auth])
+    async def models(agent: str | None = None):
+        """Models this agent advertises, so a caller can pick one by task
+        complexity. Config-driven ([[agents.<name>.models]]); `tiers` maps a
+        complexity to an id so clients don't reimplement the choice."""
+        acfg = cfg.agents.get(agent or cfg.default_agent)
+        if not acfg:
+            raise HTTPException(400, f"unknown agent '{agent}'")
+        return {"agent": acfg.name, "models": list(acfg.models),
+                "tiers": acfg.tiers(), "default": acfg.model}
 
     @app.get("/v1/info", dependencies=[auth])
     async def info(refresh: bool = False):

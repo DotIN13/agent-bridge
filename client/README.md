@@ -45,6 +45,7 @@ python3 client/ab.py <command> [flags]     # or: ln -s .../client/ab.py ~/bin/ab
 | Command | What it does |
 |---|---|
 | `ab gateways` | list configured gateways + default |
+| `ab models [--pick TIER] [--agent A]` | models the gateway offers, by task complexity; `--pick` prints one id |
 | `ab info [--refresh]` | a gateway's cluster capabilities |
 | `ab sessions [--cwd DIR]` | sessions a gateway can fork |
 | `ab run PROMPT [...]` | submit **and wait**; prints the result |
@@ -68,7 +69,20 @@ ab run "run the tests and summarize failures" --cwd /project/jevans/tzhang3/myre
 ab run "profile this dataset" --upload ./train.csv --stream
 ab submit "long job"; ab events <id> --follow; ab job <id>
 ab download --dir /project/jevans/tzhang3/myrepo/out --glob '*.csv' --to ./results
+ab submit -F task.md --model "$(ab models --pick hard)"   # pin by complexity
 ```
+
+**Choosing a model.** `ab models` lists what the gateway advertises at
+`/v1/models`, ordered by the task complexity each model is the right default
+for — typically `simple` / `standard` / `hard` / `frontier` — with context
+window and per-MTok cost, so the capability/cost tradeoff is visible at the
+point of choosing. `--pick TIER` emits just the id, for `--model "$(...)"`.
+
+The catalog lives in the **gateway's** config (`[[agents.<name>.models]]` in its
+config.toml), not in this client, so it reflects what that agent is actually set
+up to accept and an operator can change it without redeploying clients. Prefer
+the full id over `opus`/`sonnet`/`haiku` — the aliases track the newest model in
+each tier, so a run pinned to one isn't reproducible.
 
 **Long / multiline prompts.** Avoid shell-quoting and `ARG_MAX` by passing the
 prompt on stdin or from a file instead of as an argument:
