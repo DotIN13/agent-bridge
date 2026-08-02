@@ -61,14 +61,15 @@ systemctl --user enable --now agent-bridge
 
 Full reference: **[API.md](API.md)**. Quick tour below.
 
-All routes except `/healthz`, `/llms.txt`, and `/v1/help` require
+All routes except `/health`, `/llms.txt`, and `/v1/help` require
 `Authorization: Bearer <token>`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET  | `/healthz` | liveness (no auth) |
+| GET  | `/health` | liveness (no auth) |
 | GET  | `/llms.txt` · `/v1/help` | agent-facing usage doc, rendered from live config (no auth) |
 | GET  | `/v1/agents` | configured & known agent backends |
+| GET  | `/v1/info?refresh=1` | this machine's capabilities (host/CPU/RAM, GPUs, Slurm partitions + GPU inventory, allocation balance), cached |
 | GET  | `/v1/sessions?cwd=&agent=` | the session index the dispatcher sees |
 | POST | `/v1/jobs` | enqueue a prompt → `202 {id}` |
 | GET  | `/v1/jobs` | recent jobs |

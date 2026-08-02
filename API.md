@@ -3,7 +3,7 @@
 Base URL is wherever the gateway is reachable — over the SSH port-forward that is
 `http://localhost:8787`. All responses are JSON unless noted.
 
-- **Auth:** every endpoint except `/healthz`, `/llms.txt`, and `/v1/help`
+- **Auth:** every endpoint except `/health`, `/llms.txt`, and `/v1/help`
   requires `Authorization: Bearer <token>`. Missing/wrong token → `401`.
 - **Agent discovery:** `GET /llms.txt` returns a compact, instance-specific
   usage guide written for an LLM agent to read and then drive the API. Same
@@ -27,7 +27,7 @@ one prompt, run by one agent, in one directory, in a forked session.
 
 ## Endpoints
 
-### `GET /healthz`  (no auth)
+### `GET /health`  (no auth)
 Liveness. `200 {"ok": true, "version": "0.1.0"}`.
 
 ### `GET /llms.txt`  ·  `GET /v1/help`  (no auth)
@@ -39,6 +39,39 @@ Which backends exist.
 ```json
 { "configured": ["claude"], "known": ["claude"], "default": "claude" }
 ```
+
+### `GET /v1/info`  ·  `?refresh=1`
+This machine's capabilities, probed once on startup (concurrently, in the
+background) and **cached** — reads are instant (~1 ms). Add `?refresh=1` to
+trigger a background re-probe (hardware rarely changes, so you rarely need it).
+The probe set is generic (`hostname`, `nvidia-smi`, `sinfo`, an
+allocation-balance command); values are whatever this cluster reports. Only
+read-only commands run; env vars are reported **presence-only** (never values).
+
+```json
+{
+  "ready": true,
+  "collected_at": 1785633000.1,
+  "took_ms": 472,
+  "summary": "midway3-login5.rcc.local · RHEL 8.10 · 64 CPU/251GB · no local GPU · slurm 20.11.8 · GPU nodes: a100×124, h200×28, h100×22 · balance pi-jevans 964932 SU",
+  "host": { "hostname": "…", "os": "…", "kernel": "…", "cpu_model": "…",
+            "cpus": 64, "sockets": 2, "cores_per_socket": 16, "mem_gb": 251 },
+  "gpu_local": "NONE",
+  "scheduler": { "type": "slurm", "version": "slurm 20.11.8" },
+  "partitions": [ { "partition": "gpu", "avail": "up", "nodes_aiot": "11/0/0/11" } ],
+  "gpus": [ { "type": "a100", "nodes": 31, "gpus": 124, "idle_nodes": 4 } ],
+  "accounts": [ { "account": "pi-jevans", "allocation": 1510000,
+                  "usage": 544871, "balance": 964932 } ],
+  "env_present": { "ANTHROPIC_API_KEY": false, "OPENAI_API_KEY": true },
+  "_probes": { "gpus": { "took_ms": 270, "error": null } }
+}
+```
+
+Before the first probe finishes (sub-second), returns `{"ready": false,
+"status": "probing"}`. `gpus` aggregates all GPU nodes by accelerator type
+(parsed from Slurm `Gres`/`Features`) — total GPUs and idle node counts, not a
+per-node dump. Configure via `[cluster]` in `config.toml` (`enabled`,
+`probe_timeout_sec`, `env_presence`).
 
 ### `GET /v1/sessions?cwd=<dir>&agent=<name>`
 The session index the dispatcher chooses from. `cwd` (optional) sorts sessions

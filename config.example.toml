@@ -17,6 +17,15 @@ concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 
+[cluster]
+# /v1/info advertises this machine's capabilities (host/CPU/RAM, local GPUs,
+# Slurm partitions + GPU inventory, allocation balance). Probed once on startup
+# (concurrently, in the background) and cached, so reads are instant.
+enabled = true
+probe_timeout_sec = 15
+# env vars reported presence-only (yes/no) — values are NEVER exposed
+env_presence = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+
 [agents.claude]
 bin = "claude"
 # Dispatch mode:

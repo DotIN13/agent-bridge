@@ -12,6 +12,12 @@ _DEFAULTS: dict = {
     "auth": {"token": ""},
     "worker": {"concurrency": 2},
     "db": {"path": "gateway.db"},
+    "cluster": {
+        "enabled": True,
+        "probe_timeout_sec": 15,
+        # env vars reported presence-only (never their values) at /v1/info
+        "env_presence": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+    },
     "agents": {
         "claude": {
             "bin": "claude",
@@ -60,6 +66,9 @@ class Config:
     concurrency: int
     db_path: str          # absolute
     data_dir: str         # absolute
+    cluster_enabled: bool = True
+    cluster_probe_timeout: int = 15
+    cluster_env_presence: tuple[str, ...] = ()
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @property
@@ -135,6 +144,7 @@ def load(path: str | os.PathLike | None) -> Config:
             max_sessions_in_index=int(a.get("max_sessions_in_index", 40)),
         )
 
+    cl = raw.get("cluster", {})
     return Config(
         host=raw["server"]["host"],
         port=int(raw["server"]["port"]),
@@ -142,6 +152,9 @@ def load(path: str | os.PathLike | None) -> Config:
         concurrency=int(raw["worker"]["concurrency"]),
         db_path=str(db_path),
         data_dir=str(data_dir),
+        cluster_enabled=bool(cl.get("enabled", True)),
+        cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),
+        cluster_env_presence=tuple(cl.get("env_presence", [])),
         agents=agents,
     )
 

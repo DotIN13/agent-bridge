@@ -1,7 +1,7 @@
 """HTTP surface: bearer-authed JSON API + SSE.
 
 Routes:
-  GET  /healthz                      -> {"ok": true}                (no auth)
+  GET  /health                      -> {"ok": true}                (no auth)
   GET  /v1/agents                    -> configured/known agents
   GET  /v1/sessions?cwd=&agent=      -> session index the dispatcher sees
   POST /v1/jobs                      -> enqueue {prompt, agent?, cwd?, session?,
@@ -25,6 +25,7 @@ from urllib.parse import urlparse, parse_qs
 from . import __version__
 from .adapters import build as build_adapter, known_agents
 from .bus import Bus, is_end
+from .cluster import ClusterInfo
 from .docs import render_llms_txt
 from .config import Config
 from .db import Database, TERMINAL
@@ -39,9 +40,13 @@ class Gateway:
         self.db = Database(cfg.db_path)
         self.bus = Bus()
         self.pool = WorkerPool(cfg, self.db, self.bus)
+        self.cluster = ClusterInfo(cfg.cluster_probe_timeout,
+                                   cfg.cluster_env_presence) if cfg.cluster_enabled else None
 
     def serve_forever(self) -> None:
         self.pool.start()
+        if self.cluster:
+            self.cluster.start_async()  # probe once, in background; reads are cached
         handler = _make_handler(self)
         httpd = ThreadingHTTPServer((self.cfg.host, self.cfg.port), handler)
         httpd.daemon_threads = True
@@ -104,7 +109,7 @@ def _make_handler(gw: Gateway):
         def do_GET(self):
             u = urlparse(self.path)
             path, qs = u.path, parse_qs(u.query)
-            if path == "/healthz":
+            if path == "/health":
                 return self._json(200, {"ok": True, "version": __version__})
             if path in ("/llms.txt", "/v1/help"):
                 return self._text(200, render_llms_txt(gw.cfg))
@@ -117,6 +122,8 @@ def _make_handler(gw: Gateway):
                     "known": known_agents(),
                     "default": gw.cfg.default_agent,
                 })
+            if path == "/v1/info":
+                return self._info(qs)
             if path == "/v1/sessions":
                 return self._sessions(qs)
             if path == "/v1/jobs":
@@ -136,6 +143,13 @@ def _make_handler(gw: Gateway):
             return self._json(404, {"error": "not found"})
 
         # -- handlers -----------------------------------------------------
+        def _info(self, qs):
+            if not gw.cluster:
+                return self._json(404, {"error": "cluster probing disabled"})
+            if (qs.get("refresh") or ["0"])[0] in ("1", "true", "yes"):
+                gw.cluster.refresh_async()
+            return self._json(200, gw.cluster.get())
+
         def _sessions(self, qs):
             agent = (qs.get("agent") or [gw.cfg.default_agent])[0]
             cfg = gw.cfg.agents.get(agent)

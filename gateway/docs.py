@@ -28,7 +28,7 @@ terminal status. One job = one prompt executed by one agent in one directory.
 
 ## Base URL & auth
 - Base URL: {base} (this is where you fetched this document).
-- All endpoints EXCEPT `/healthz`, `/llms.txt`, `/v1/help` require a header:
+- All endpoints EXCEPT `/health`, `/llms.txt`, `/v1/help` require a header:
       Authorization: Bearer <TOKEN>
   You must already have the token (it is NOT served here). It is typically in
   the env var AGENT_BRIDGE_TOKEN. If you get 401, you are missing/using a bad token.
@@ -43,9 +43,14 @@ terminal status. One job = one prompt executed by one agent in one directory.
 Terminal statuses: succeeded, failed, canceled. Non-terminal: queued, running.
 
 ## Endpoints
-GET  /healthz                 -> {{"ok": true}}                        (no auth)
+GET  /health                 -> {{"ok": true}}                        (no auth)
 GET  /llms.txt | /v1/help     -> this document                        (no auth)
 GET  /v1/agents               -> {{"configured":[...],"default":"..."}}
+GET  /v1/info[?refresh=1]  -> this machine's capabilities (host/CPU/RAM,
+                                 local GPUs, Slurm partitions + GPU inventory,
+                                 allocation balance). Cached; read before choosing
+                                 where/how to run heavy work. `summary` is a
+                                 one-line human digest.
 GET  /v1/sessions?cwd=&agent= -> {{"sessions":[{{session_id,cwd,title,summary,
                                   git_branch,last_active,messages}}]}}
 POST /v1/jobs                 -> 202 {{"id","status","agent","cwd"}}
