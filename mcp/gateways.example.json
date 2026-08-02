@@ -1,0 +1,17 @@
+{
+  "default": "midway5",
+  "gateways": {
+    "midway5": {
+      "base_url": "http://localhost:8787",
+      "token_env": "AGENT_BRIDGE_TOKEN"
+    },
+    "midway5-alt": {
+      "base_url": "http://localhost:8788",
+      "token_file": "~/.config/agent-bridge/midway5-alt.token"
+    },
+    "other-cluster": {
+      "base_url": "http://localhost:8789",
+      "token": "paste-a-raw-token-here-if-you-must"
+    }
+  }
+}

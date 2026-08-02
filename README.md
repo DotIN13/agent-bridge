@@ -142,6 +142,21 @@ allowlist — the gateway refuses jobs outside it), `permission_mode`
 Any scalar is overridable via
 `AGENT_BRIDGE_<SECTION>_<KEY>` env vars.
 
+## Local MCP client
+
+To drive one or more gateways from a **local** Claude Code, use the stdio MCP
+server in [`mcp/`](mcp/README.md). It runs on your laptop, connects over the SSH
+port-forward(s), and exposes tools (`run_prompt`, `submit_job`, `get_job`,
+`list_sessions`, `cluster_info`, `list_gateways`) routed to whichever gateway you
+name in `gateways.json`. Stdlib-only, single file — copy it over and:
+
+```bash
+claude mcp add agent-bridge -- \
+    python3 /path/to/mcp/agent_bridge_mcp.py --config ~/.config/agent-bridge/gateways.json
+```
+
+See [mcp/README.md](mcp/README.md) for config and tool details.
+
 ## Adding an agent backend
 
 Implement `list_sessions()` and `run(spec, emit)` in a new

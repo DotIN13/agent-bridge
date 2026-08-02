@@ -1,5 +1,8 @@
 config.toml
 .token
+*.token
+gateways.json
+mcp/gateways.json
 *.db
 *.db-wal
 *.db-shm
