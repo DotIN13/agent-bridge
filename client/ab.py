@@ -71,10 +71,31 @@ def cmd_sessions(args):
     _out(args, d, human)
 
 
+def _resolve_prompt(args) -> str:
+    """Prompt from --prompt-file, else stdin (positional '-' or piped), else the
+    positional arg. Files/stdin avoid shell-quoting and ARG_MAX for long inputs."""
+    if getattr(args, "prompt_file", None):
+        try:
+            text = open(os.path.expanduser(args.prompt_file), encoding="utf-8").read()
+        except OSError as e:
+            _err(f"cannot read --prompt-file: {e}")
+    elif args.prompt == "-" or (args.prompt is None and not sys.stdin.isatty()):
+        text = sys.stdin.read()
+    elif args.prompt:
+        text = args.prompt
+    else:
+        _err("no prompt: pass it as an argument, via --prompt-file, or on stdin "
+             "(e.g. ab run - <<'EOF' ... EOF)")
+    if not text.strip():
+        _err("prompt is empty")
+    return text
+
+
 def cmd_run(args):
     c = _client(args)
+    prompt = _resolve_prompt(args)
     on_event = _stream_printer() if args.stream else None
-    job = c.run(args.prompt, cwd=args.cwd, agent=args.agent, model=args.model,
+    job = c.run(prompt, cwd=args.cwd, agent=args.agent, model=args.model,
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=args.upload,
                 timeout=args.timeout, on_event=on_event)
@@ -93,7 +114,8 @@ def cmd_run(args):
 
 def cmd_submit(args):
     c = _client(args)
-    job = c.submit(args.prompt, cwd=args.cwd, agent=args.agent, model=args.model,
+    prompt = _resolve_prompt(args)
+    job = c.submit(prompt, cwd=args.cwd, agent=args.agent, model=args.model,
                    session=args.session, permission_mode=args.permission_mode,
                    files=args.file, upload=args.upload)
     _out(args, job, lambda j: print(j["id"]))
@@ -215,12 +237,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("sessions"); sp.add_argument("--cwd")
     sp.set_defaults(func=cmd_sessions)
 
-    sp = sub.add_parser("run"); sp.add_argument("prompt"); job_flags(sp)
+    sp = sub.add_parser("run")
+    sp.add_argument("prompt", nargs="?",
+                    help="prompt text; or '-' / omit to read stdin (heredoc/pipe)")
+    sp.add_argument("--prompt-file", "-F", help="read the prompt from a file")
+    job_flags(sp)
     sp.add_argument("--stream", action="store_true", help="stream events live")
     sp.add_argument("--timeout", type=float, default=900.0)
     sp.set_defaults(func=cmd_run)
 
-    sp = sub.add_parser("submit"); sp.add_argument("prompt"); job_flags(sp)
+    sp = sub.add_parser("submit")
+    sp.add_argument("prompt", nargs="?",
+                    help="prompt text; or '-' / omit to read stdin (heredoc/pipe)")
+    sp.add_argument("--prompt-file", "-F", help="read the prompt from a file")
+    job_flags(sp)
     sp.set_defaults(func=cmd_submit)
 
     sp = sub.add_parser("job"); sp.add_argument("id"); sp.set_defaults(func=cmd_job)

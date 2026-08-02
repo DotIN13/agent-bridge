@@ -70,6 +70,21 @@ ab submit "long job"; ab events <id> --follow; ab job <id>
 ab download --dir /project/jevans/tzhang3/myrepo/out --glob '*.csv' --to ./results
 ```
 
+**Long / multiline prompts.** Avoid shell-quoting and `ARG_MAX` by passing the
+prompt on stdin or from a file instead of as an argument:
+
+```bash
+ab run --prompt-file ./task.md --cwd /project/...     # from a file (best for agents)
+ab run - <<'EOF'                                       # heredoc; literal, no expansion
+Multi-line prompt with "quotes", $vars, and `backticks` — all safe.
+EOF
+cat task.md | ab run -                                 # piped
+```
+
+`run`/`submit` accept the prompt as a positional arg, `-F/--prompt-file PATH`, or
+stdin (`-` or piped). An LLM agent should prefer `--prompt-file` — write the
+prompt to a file, then reference it (zero quoting).
+
 Using it from Claude Code: it already has Bash — just run `ab ...` (add a line to
 your CLAUDE.md so the agent reaches for it, and `--json` for reliable parsing).
 
