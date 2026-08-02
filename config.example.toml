@@ -17,6 +17,15 @@ concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 
+[files]
+# File upload/download surface (/v1/files, and files attached to jobs).
+# Uploads land under <data_dir>/dir (must be inside an allowed_dir so agents can
+# read them). Downloads/uploads are sandboxed to the agents' allowed_dirs.
+enabled = true
+dir = "files"              # relative -> under the data dir
+max_file_mb = 100          # per-file cap
+max_request_mb = 512       # whole-request cap; larger data -> scp + pass {path}
+
 [cluster]
 # /v1/info advertises this machine's capabilities (host/CPU/RAM, local GPUs,
 # Slurm partitions + GPU inventory, allocation balance). Probed once on startup

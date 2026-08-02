@@ -7,6 +7,7 @@ written back to the job row.
 """
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import traceback
@@ -100,6 +101,7 @@ class WorkerPool:
                 permission_mode=job["permission_mode"],
                 model=job["model"],
                 cancel=cancel,
+                files=tuple(json.loads(job["files"]) if job["files"] else ()),
             )
             adapter = build_adapter(agent_cfg)
 

@@ -23,7 +23,10 @@ HTTP client ──POST /v1/jobs──▶ queue ──▶ worker ──▶ Claude
   forwarded port is the portable answer.)
 - **Localhost bind + bearer token.** The node is multi-user; nothing listens on
   a public interface. Reach it over the SSH tunnel.
-- **No node/npm, unreliable outbound.** Pure Python 3.11 stdlib, no pip install.
+- **Server is FastAPI/uvicorn in a venv; the MCP client is stdlib.** The gateway
+  deps (`fastapi`, `uvicorn`, `python-multipart`) install into `.venv` via `uv`
+  (`run.sh` does it on first launch). The local MCP client (`mcp/`) stays
+  dependency-free.
 
 ## Run it
 
@@ -76,6 +79,9 @@ All routes except `/health`, `/llms.txt`, and `/v1/help` require
 | GET  | `/v1/jobs/{id}` | job row (status, result, session ids, cost) |
 | POST | `/v1/jobs/{id}/cancel` | cancel a queued/running job (kills the agent) |
 | GET  | `/v1/jobs/{id}/events?after=N` | **SSE** stream, or one-shot JSON poll |
+| POST | `/v1/files` | upload files (JSON inline or multipart) → remote paths |
+| GET  | `/v1/files/list?dir=&glob=&recursive=` | list files within an allowed dir |
+| GET  | `/v1/files/content?path=` | stream a file back (artifacts, result CSVs) |
 
 **Driving it from an LLM agent:** point the agent at `GET /llms.txt` first — it
 returns the whole contract (endpoints, body schema, event types, this instance's
@@ -142,6 +148,22 @@ allowlist — the gateway refuses jobs outside it), `permission_mode`
 `dispatch_mode`, `model`, `timeout_sec` (`0` = no wall-clock limit; default).
 Any scalar is overridable via
 `AGENT_BRIDGE_<SECTION>_<KEY>` env vars.
+
+## Files (inputs & artifacts)
+
+Send inputs with a job and pull results back — all sandboxed to `allowed_dirs`:
+
+- **Upload + submit in one call.** `POST /v1/jobs` accepts a `files` array (JSON
+  inline: `{name, content_b64|text}` or `{path}` reference) **or** multipart
+  (`payload` JSON field + file parts). Uploaded files land in the job's input dir
+  and their absolute paths are surfaced to the agent as *ATTACHED FILES*.
+- **Fetch artifacts.** `GET /v1/files/list?dir=&glob=` to discover, then
+  `GET /v1/files/content?path=` to stream a file back (result CSVs, etc.).
+- **Large data** → `scp`/`rsync` into an allowed dir over your SSH session and
+  pass `{"path": ...}`; caps (`max_file_mb`, `max_request_mb`) bound HTTP uploads.
+
+From the MCP: `upload`/`files` on `run_prompt`, plus `upload_files`,
+`download_files`, `list_remote_files`.
 
 ## Local MCP client
 

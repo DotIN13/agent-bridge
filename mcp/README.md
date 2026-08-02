@@ -83,6 +83,13 @@ Then in Claude Code the tools appear as `agent-bridge:*`.
 | `job_events` | fetch a job's event log incrementally (`after` = last seq seen) — poll for progress/streaming |
 | `cancel_job` | cancel a queued/running job (kills the agent on the gateway) |
 | `run_prompt` | submit **and wait** for the result (polls to completion) — the usual one |
+| `upload_files` | upload local files (`paths` or a `dir`) → remote paths for reuse |
+| `download_files` | fetch remote files (`paths`, or `dir`+`glob`) to a local dir |
+| `list_remote_files` | list files under a remote dir (discover artifacts) |
+
+`run_prompt`/`submit_job` also take `upload` (local paths to send with the job)
+and `files` (remote paths to attach) — so "send this CSV, run analysis" is one
+call, and you `download_files` the result after.
 
 Every tool takes an optional `gateway` argument; omit it to use the default.
 `submit_job`/`run_prompt` accept `prompt` (required), `cwd`, `agent`, `model`,

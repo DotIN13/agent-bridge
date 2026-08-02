@@ -111,6 +111,7 @@ class JobSpec:
     permission_mode: str | None    # override; None -> adapter default
     model: str | None              # override; None -> adapter default
     cancel: Cancellation | None = None  # set by the worker; adapter binds procs
+    files: tuple[str, ...] = ()    # absolute paths of attached files (readable by the job)
 
 
 @dataclass

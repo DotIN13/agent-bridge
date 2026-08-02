@@ -146,6 +146,56 @@ def _parse(raw: bytes):
         return (raw or b"").decode(errors="replace")
 
 
+def http_multipart(base: str, path: str, token: str, payload: dict,
+                   files: list[tuple[str, str]], timeout: float = 300.0):
+    """POST multipart/form-data: one `payload` field (JSON) + file parts.
+    `files` is a list of (field_filename, local_path)."""
+    boundary = "----agentbridge" + os.urandom(12).hex()
+    crlf = b"\r\n"
+    body = bytearray()
+
+    def part_header(disp):
+        body.extend(f"--{boundary}".encode() + crlf)
+        body.extend(disp.encode() + crlf + crlf)
+
+    part_header('Content-Disposition: form-data; name="payload"')
+    body.extend(json.dumps(payload).encode() + crlf)
+    for fname, local in files:
+        with open(local, "rb") as fh:
+            data = fh.read()
+        part_header(f'Content-Disposition: form-data; name="files"; '
+                    f'filename="{fname}"\r\nContent-Type: application/octet-stream')
+        body.extend(data + crlf)
+    body.extend(f"--{boundary}--".encode() + crlf)
+
+    req = urllib.request.Request(base + path, data=bytes(body), method="POST")
+    req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, _parse(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, _parse(e.read())
+
+
+def http_download(base: str, path: str, token: str, local_path: str,
+                  timeout: float = 300.0) -> int:
+    """Stream GET /v1/files/content to a local file. Returns bytes written."""
+    url = base + "/v1/files/content?" + urllib.parse.urlencode({"path": path})
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {token}")
+    os.makedirs(os.path.dirname(os.path.abspath(local_path)) or ".", exist_ok=True)
+    total = 0
+    with urllib.request.urlopen(req, timeout=timeout) as r, open(local_path, "wb") as out:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            out.write(chunk)
+            total += len(chunk)
+    return total
+
+
 # --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
@@ -167,8 +217,14 @@ class Tools:
             "model": {"type": "string", "description": "model alias/id (optional)"},
             "session": {"type": "string", "description": "session_id hint (optional)"},
             "permission_mode": {"type": "string", "description": "optional override"},
+            "upload": {"type": "array", "items": {"type": "string"},
+                       "description": "LOCAL file paths to upload with the job; the "
+                                      "agent gets their remote paths as attachments"},
+            "files": {"type": "array", "items": {"type": "string"},
+                      "description": "REMOTE paths (already on the gateway) to attach"},
             "gateway": gw_prop,
         }
+        gw_only = {"type": "object", "properties": {"gateway": gw_prop}}
         return {
             "list_gateways": (
                 {"type": "object", "properties": {}},
@@ -221,6 +277,35 @@ class Tools:
                                                 "the job"}},
                  "required": ["prompt"]},
                 self.run_prompt),
+            "upload_files": (
+                {"type": "object", "properties": {
+                    "gateway": gw_prop,
+                    "paths": {"type": "array", "items": {"type": "string"},
+                              "description": "local file paths to upload"},
+                    "dir": {"type": "string",
+                            "description": "local dir to upload recursively "
+                                           "(preserves relative structure)"}}},
+                self.upload_files),
+            "download_files": (
+                {"type": "object", "properties": {
+                    "gateway": gw_prop,
+                    "paths": {"type": "array", "items": {"type": "string"},
+                              "description": "remote file paths to fetch"},
+                    "dir": {"type": "string", "description": "remote dir to fetch from"},
+                    "glob": {"type": "string", "description": "glob when using dir (default *)"},
+                    "recursive": {"type": "boolean"},
+                    "local_dir": {"type": "string",
+                                  "description": "local destination dir (required)"}},
+                 "required": ["local_dir"]},
+                self.download_files),
+            "list_remote_files": (
+                {"type": "object", "properties": {
+                    "gateway": gw_prop,
+                    "dir": {"type": "string"},
+                    "glob": {"type": "string"},
+                    "recursive": {"type": "boolean"}},
+                 "required": ["dir"]},
+                self.list_remote_files),
         }
 
     def descriptions(self) -> dict:
@@ -241,7 +326,16 @@ class Tools:
             "cancel_job": "Cancel a queued or running job (kills the agent "
                           "process on the gateway).",
             "run_prompt": "Submit a prompt to a gateway and WAIT for the result "
-                          "(polls to completion). The normal way to run a task.",
+                          "(polls to completion). The normal way to run a task. "
+                          "Pass `upload` (local files) to send inputs, `files` "
+                          "(remote paths) to attach existing ones.",
+            "upload_files": "Upload local files to a gateway (returns remote "
+                            "paths). Use `upload` on submit_job/run_prompt to do "
+                            "it in one call; use this to stage files for reuse.",
+            "download_files": "Fetch remote files (artifacts, result CSVs) from a "
+                              "gateway to a local dir. Give `paths`, or `dir`+`glob`.",
+            "list_remote_files": "List files under a remote dir on a gateway "
+                                 "(to discover artifacts before downloading).",
         }
 
     # --- implementations ---
@@ -264,10 +358,20 @@ class Tools:
         _raise_http(code, data)
         return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
 
-    def submit_job(self, args):
+    def _submit(self, args):
+        """POST a job (multipart if there are local uploads, else JSON)."""
         name, base, token = self.gws.resolve(args.get("gateway"))
-        code, data = http("POST", base, "/v1/jobs", token, body=_job_body(args))
+        payload = _job_payload(args)
+        uploads = [(os.path.basename(p), p) for p in (args.get("upload") or [])]
+        if uploads:
+            code, data = http_multipart(base, "/v1/jobs", token, payload, uploads)
+        else:
+            code, data = http("POST", base, "/v1/jobs", token, body=payload)
         _raise_http(code, data)
+        return name, base, token, data
+
+    def submit_job(self, args):
+        name, _base, _token, data = self._submit(args)
         return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
 
     def get_job(self, args):
@@ -296,10 +400,44 @@ class Tools:
         _raise_http(code, data)
         return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
 
-    def run_prompt(self, args):
+    def upload_files(self, args):
         name, base, token = self.gws.resolve(args.get("gateway"))
-        code, data = http("POST", base, "/v1/jobs", token, body=_job_body(args))
+        files = _collect_local(args)   # list of (remote_name, local_path)
+        if not files:
+            raise RuntimeError("give `paths` (files) or `dir` (a local directory)")
+        code, data = http_multipart(base, "/v1/files", token, {}, files)
         _raise_http(code, data)
+        return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
+
+    def download_files(self, args):
+        name, base, token = self.gws.resolve(args.get("gateway"))
+        local_dir = args["local_dir"]
+        remote = list(args.get("paths") or [])
+        if args.get("dir"):
+            q = urllib.parse.urlencode({"dir": args["dir"], "glob": args.get("glob", "*"),
+                                        "recursive": str(bool(args.get("recursive"))).lower()})
+            code, listing = http("GET", base, "/v1/files/list?" + q, token)
+            _raise_http(code, listing)
+            remote += [f["path"] for f in listing.get("files", [])]
+        if not remote:
+            raise RuntimeError("nothing to download (give `paths` or `dir`)")
+        saved = []
+        for rp in remote:
+            local = os.path.join(local_dir, os.path.basename(rp))
+            n = http_download(base, rp, token, local)
+            saved.append({"remote": rp, "local": local, "bytes": n})
+        return {"gateway": name, "downloaded": saved}
+
+    def list_remote_files(self, args):
+        name, base, token = self.gws.resolve(args.get("gateway"))
+        q = urllib.parse.urlencode({"dir": args["dir"], "glob": args.get("glob", "*"),
+                                    "recursive": str(bool(args.get("recursive"))).lower()})
+        code, data = http("GET", base, "/v1/files/list?" + q, token)
+        _raise_http(code, data)
+        return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
+
+    def run_prompt(self, args):
+        name, base, token, data = self._submit(args)
         job_id = data["id"]
         interval = float(args.get("poll_interval_sec") or 2.0)
         deadline = time.monotonic() + float(args.get("timeout_sec") or 900.0)
@@ -320,12 +458,28 @@ class Tools:
             time.sleep(interval)
 
 
-def _job_body(args: dict) -> dict:
+def _job_payload(args: dict) -> dict:
     body = {"prompt": args["prompt"]}
     for k in ("cwd", "agent", "model", "session", "permission_mode"):
         if args.get(k):
             body[k] = args[k]
+    if args.get("files"):
+        body["files"] = [{"path": p} for p in args["files"]]
     return body
+
+
+def _collect_local(args: dict) -> list[tuple[str, str]]:
+    """(remote_name, local_path) pairs from `paths` (basenames) or `dir` (relpaths)."""
+    out: list[tuple[str, str]] = []
+    for p in args.get("paths") or []:
+        out.append((os.path.basename(p), p))
+    d = args.get("dir")
+    if d:
+        for root, _dirs, fnames in os.walk(d):
+            for fn in fnames:
+                full = os.path.join(root, fn)
+                out.append((os.path.relpath(full, d), full))
+    return out
 
 
 def _raise_http(code: int, data):

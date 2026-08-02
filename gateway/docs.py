@@ -61,6 +61,23 @@ POST /v1/jobs/{{id}}/cancel    -> 202; cancel a queued/running job (kills the
 GET  /v1/jobs/{{id}}/events    -> SSE if Accept: text/event-stream,
                                  else JSON {{"job","events","terminal"}}. Poll
                                  with ?after=<last seq> to page incrementally.
+POST /v1/files                -> upload files; returns {{"paths":[...]}} to pass
+                                 later as files:[{{"path":...}}]. JSON inline or
+                                 multipart (see below).
+GET  /v1/files/list?dir=&glob=&recursive= -> [{{path,size,mtime}}] within allowed dirs
+GET  /v1/files/content?path=  -> streams a file back (artifacts, result CSVs)
+
+## Sending files with a job (uploads)
+Two ways, both one call:
+  A. JSON body with a `files` array; each item is one of:
+       {{"name":"data.csv","content_b64":"<base64>"}}   (binary)
+       {{"name":"run.py","text":"..."}}                  (text)
+       {{"path":"/abs/existing/on/node"}}                (reference; no upload)
+  B. multipart/form-data: a form field `payload` = the JSON body above, plus one
+     or more file parts (field name `files`). Best for larger/binary files.
+Uploaded files land in the job's input dir (inside an allowed dir) and their
+absolute paths are surfaced to the agent as ATTACHED FILES. For very large data,
+scp/rsync into an allowed dir and pass {{"path":...}} instead.
 
 ## POST /v1/jobs request body
   prompt           (string, REQUIRED) the task to run. Write it as you would to
@@ -73,6 +90,7 @@ GET  /v1/jobs/{{id}}/events    -> SSE if Accept: text/event-stream,
   session          (string, optional) a session_id hint to prefer forking.
   model            (string, optional) model alias/id, e.g. "opus","sonnet","haiku".
   permission_mode  (string, optional) e.g. "bypassPermissions","acceptEdits".
+  files            (array, optional) attachments (see "Sending files with a job").
 
 Allowed directories (jobs outside these are refused):
 {allowed}

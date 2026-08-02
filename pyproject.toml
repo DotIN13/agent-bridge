@@ -1,0 +1,15 @@
+[project]
+name = "agent-bridge"
+version = "0.2.0"
+description = "HTTP gateway that dispatches prompts to coding agents by forking the right session"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+]
+
+# The gateway (server side) needs these. The MCP client (mcp/) is stdlib-only
+# and has no dependencies. Create the env with:
+#     uv venv .venv && uv pip install -e .
+# or  uv pip install fastapi uvicorn python-multipart

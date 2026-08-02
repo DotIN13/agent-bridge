@@ -18,6 +18,12 @@ _DEFAULTS: dict = {
         # env vars reported presence-only (never their values) at /v1/info
         "env_presence": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
     },
+    "files": {
+        "enabled": True,
+        "dir": "files",            # relative -> under data_dir; must be inside an allowed_dir
+        "max_file_mb": 100,
+        "max_request_mb": 512,
+    },
     "agents": {
         "claude": {
             "bin": "claude",
@@ -69,11 +75,34 @@ class Config:
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
+    files_enabled: bool = True
+    files_dir: str = ""
+    files_max_file_mb: int = 100
+    files_max_request_mb: int = 512
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @property
     def default_agent(self) -> str:
         return "claude" if "claude" in self.agents else next(iter(self.agents))
+
+    def allowed_bases(self) -> list[Path]:
+        """Union of every agent's allowed_dirs, resolved. Used to sandbox file
+        upload/download so nothing escapes what the agents can already touch."""
+        bases: list[Path] = []
+        for a in self.agents.values():
+            for d in a.allowed_dirs:
+                p = Path(d).expanduser().resolve()
+                if p not in bases:
+                    bases.append(p)
+        return bases
+
+    def within_allowed(self, path: str | os.PathLike) -> Path:
+        """Resolve `path` and ensure it sits inside an allowed base, else raise."""
+        p = Path(path).expanduser().resolve()
+        for b in self.allowed_bases():
+            if p == b or b in p.parents:
+                return p
+        raise ValueError(f"path {p} is not under any allowed directory")
 
 
 def _deep_merge(base: dict, over: dict) -> dict:
@@ -145,6 +174,10 @@ def load(path: str | os.PathLike | None) -> Config:
         )
 
     cl = raw.get("cluster", {})
+    fl = raw.get("files", {})
+    files_dir = Path(fl.get("dir", "files"))
+    if not files_dir.is_absolute():
+        files_dir = data_dir / files_dir
     return Config(
         host=raw["server"]["host"],
         port=int(raw["server"]["port"]),
@@ -155,6 +188,10 @@ def load(path: str | os.PathLike | None) -> Config:
         cluster_enabled=bool(cl.get("enabled", True)),
         cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),
         cluster_env_presence=tuple(cl.get("env_presence", [])),
+        files_enabled=bool(fl.get("enabled", True)),
+        files_dir=str(files_dir.resolve()),
+        files_max_file_mb=int(fl.get("max_file_mb", 100)),
+        files_max_request_mb=int(fl.get("max_request_mb", 512)),
         agents=agents,
     )
 

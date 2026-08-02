@@ -1,6 +1,7 @@
 config.toml
 .token
 *.token
+.venv/
 gateways.json
 mcp/gateways.json
 *.db

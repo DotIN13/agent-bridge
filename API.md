@@ -98,6 +98,7 @@ Request body:
 | `session` | string | no | session_id hint to prefer forking |
 | `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id |
 | `permission_mode` | string | no | e.g. `bypassPermissions`, `acceptEdits` |
+| `files` | array | no | attachments — see [Files](#files) |
 
 ```bash
 curl -s -X POST http://localhost:8787/v1/jobs \
@@ -106,8 +107,28 @@ curl -s -X POST http://localhost:8787/v1/jobs \
        "cwd":"/project/jevans/tzhang3/myrepo"}'
 # 202
 { "id": "8d2ecd09-…", "status": "queued", "agent": "claude",
-  "cwd": "/project/jevans/tzhang3/myrepo" }
+  "cwd": "/project/jevans/tzhang3/myrepo", "files": [] }
 ```
+
+**With files, one call** — either JSON inline or multipart:
+
+```bash
+# JSON inline (small/text): each files[] item is {name,content_b64|text} or {path}
+curl -s -X POST http://localhost:8787/v1/jobs \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"summarize the attached csv","cwd":"/project/jevans/tzhang3/myrepo",
+       "files":[{"name":"in.csv","text":"a,b\n1,2\n"}]}'
+
+# multipart (larger/binary): form field `payload`=JSON + file parts named `files`
+curl -s -X POST http://localhost:8787/v1/jobs \
+  -H "Authorization: Bearer $TOKEN" \
+  -F 'payload={"prompt":"profile the attached data","cwd":"/project/jevans/tzhang3/myrepo"};type=application/json' \
+  -F 'files=@./train.csv'
+```
+
+The gateway saves uploads under the job's input dir (inside an allowed dir) and
+surfaces their absolute paths to the agent as *ATTACHED FILES*; they're also
+recorded on the job row's `files`.
 
 Errors: `400 {"error":"prompt is required"}`, `400 {"error":"cwd … not under any allowed_dirs …"}`, `400 {"error":"unknown agent '…'"}`.
 
@@ -122,6 +143,7 @@ The job row.
 | `id`, `status`, `agent`, `prompt`, `cwd`, `requested_session` | as submitted |
 | `chosen_session` | session the dispatcher forked (or `null`) |
 | `forked_session` | new session id created by the fork (or `null`) |
+| `files` | JSON list of attached file paths (or `null`) |
 | `result` | final answer text (present on success; sometimes on failure) |
 | `error` | failure reason (or `null`) |
 | `cost_usd` | total cost |
@@ -191,6 +213,39 @@ Event types and `data`:
 
 Poll with `after` set to the last `seq` you saw to page forward; stop when
 `terminal` is `true`.
+
+## Files
+
+All paths are sandboxed to `allowed_dirs` (realpath-resolved; `..`/absolute
+escapes and out-of-tree reads → `400`).
+
+### `POST /v1/files`
+Upload files for reuse (or just to stage them). Same body shapes as job
+attachments — JSON `{ "files": [ ... ] }` inline, or multipart (`payload` field +
+file parts). Returns:
+
+```json
+{ "upload_id": "…", "dir": "<abs remote dir>",
+  "paths": ["<abs remote path>", …] }
+```
+
+Pass those paths to a later job as `"files": [{"path": "<abs remote path>"}]`.
+
+### `GET /v1/files/list?dir=<dir>&glob=<glob>&recursive=<bool>`
+List files under an allowed dir (for discovering artifacts):
+
+```json
+{ "dir": "…", "files": [ {"path": "…", "size": 1234, "mtime": 1785…} ] }
+```
+
+### `GET /v1/files/content?path=<abs path>`
+Streams the file bytes (`application/octet-stream`, `Content-Disposition`
+attachment). Use for result CSVs and other artifacts — streamed, so large files
+are fine. `400` if the path is outside `allowed_dirs` or not a file.
+
+**Large data:** the `files_max_file_mb` / `files_max_request_mb` caps bound HTTP
+uploads; beyond them, `scp`/`rsync` into an allowed dir over your SSH session and
+reference the file by `{"path": ...}`.
 
 ---
 

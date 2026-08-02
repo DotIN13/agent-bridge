@@ -17,7 +17,8 @@ Type=simple
 WorkingDirectory=%h/agent-bridge
 Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 Environment=AGENT_BRIDGE_CONFIG=%h/agent-bridge/config.toml
-ExecStart=/usr/bin/python3 -m gateway --config %h/agent-bridge/config.toml
+# uses the venv interpreter (see pyproject.toml / run.sh)
+ExecStart=%h/agent-bridge/.venv/bin/python -m gateway --config %h/agent-bridge/config.toml
 Restart=on-failure
 RestartSec=10
 MemoryMax=4G

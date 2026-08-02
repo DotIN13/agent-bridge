@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     forked_session    TEXT,                   -- new session id created by the fork
     permission_mode   TEXT,
     model             TEXT,
+    files             TEXT,                   -- JSON list of attached file paths
     result            TEXT,
     error             TEXT,
     cost_usd          REAL,
@@ -56,7 +57,14 @@ class Database:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a db was first created."""
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+        if "files" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN files TEXT")
 
     # ---- jobs -----------------------------------------------------------
     def create_job(
@@ -79,6 +87,9 @@ class Database:
             )
             self._conn.commit()
         return job_id
+
+    def set_job_files(self, job_id: str, files: list[str]) -> None:
+        self._update(job_id, files=json.dumps(files))
 
     def mark_running(self, job_id: str) -> None:
         self._update(job_id, status="running", started_at=time.time())

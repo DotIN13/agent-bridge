@@ -69,7 +69,7 @@ Rules:
 - Operate ONLY within these directories: {allowed_dirs}. Never cd elsewhere.
 - Always use --fork-session when resuming; never resume in place.
 - Run exactly one nested claude command. Keep your own commentary minimal.
-
+{attached}
 AVAILABLE SESSIONS (JSON, newest first):
 {sessions_json}
 """
@@ -121,6 +121,9 @@ class ClaudeAdapter:
         return json.dumps(compact, indent=2)
 
     # -- run --------------------------------------------------------------
+    def _attached_note(self, spec: JobSpec) -> str:
+        return _attached_block(spec.files).strip()
+
     def run(self, spec: JobSpec, emit: Callable[[Event], None]) -> RunResult:
         if self.cfg.dispatch_mode == "select_then_exec":
             return self._run_select_then_exec(spec, emit)
@@ -146,6 +149,7 @@ class ClaudeAdapter:
             permission_mode=perm,
             model_flag=self._model_flag(spec),
             allowed_dirs=", ".join(self.cfg.allowed_dirs),
+            attached=_attached_block(spec.files),
             sessions_json=self._index_json(spec.cwd),
         )
         args = [
@@ -194,6 +198,8 @@ class ClaudeAdapter:
         exec_args = [self.cfg.bin, "-p", spec.prompt,
                      "--output-format", "stream-json", "--verbose",
                      "--permission-mode", perm]
+        if spec.files:
+            exec_args += ["--append-system-prompt", _attached_block(spec.files)]
         if chosen:
             exec_args += ["--resume", chosen, "--fork-session"]
         if spec.model or self.cfg.model:
@@ -302,6 +308,14 @@ class ClaudeAdapter:
             res.result = obj["result"]
         if obj.get("total_cost_usd") is not None:
             res.cost_usd = (res.cost_usd or 0) + obj["total_cost_usd"]
+
+
+def _attached_block(files: tuple[str, ...] | list[str]) -> str:
+    if not files:
+        return ""
+    listing = "\n".join(f"  - {p}" for p in files)
+    return ("\nATTACHED FILES (the user uploaded these; absolute paths, already "
+            "readable):\n" + listing + "\nUse them as inputs to the task.\n")
 
 
 def _kill(proc: subprocess.Popen):
