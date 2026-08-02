@@ -3,7 +3,7 @@ config.toml
 *.token
 .venv/
 gateways.json
-mcp/gateways.json
+client/gateways.json
 *.db
 *.db-wal
 *.db-shm

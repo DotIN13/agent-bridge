@@ -25,8 +25,8 @@ HTTP client ──POST /v1/jobs──▶ queue ──▶ worker ──▶ Claude
   a public interface. Reach it over the SSH tunnel.
 - **Server is FastAPI/uvicorn in a venv; the MCP client is stdlib.** The gateway
   deps (`fastapi`, `uvicorn`, `python-multipart`) install into `.venv` via `uv`
-  (`run.sh` does it on first launch). The local MCP client (`mcp/`) stays
-  dependency-free.
+  (`run.sh` does it on first launch). The local clients (`client/`, CLI + MCP)
+  stay dependency-free.
 
 ## Run it
 
@@ -164,23 +164,29 @@ Send inputs with a job and pull results back — all sandboxed to `allowed_dirs`
 - **Large data** → `scp`/`rsync` into an allowed dir over your SSH session and
   pass `{"path": ...}`; caps (`max_file_mb`, `max_request_mb`) bound HTTP uploads.
 
-From the MCP: `upload`/`files` on `run_prompt`, plus `upload_files`,
-`download_files`, `list_remote_files`.
+From a client: `--upload`/`--file` on `ab run` (or `upload`/`files` on the MCP
+`run_prompt`), plus `ab upload` / `ab download` / `ab ls`.
 
-## Local MCP client
+## Local clients (CLI + MCP)
 
-To drive one or more gateways from a **local** Claude Code, use the stdio MCP
-server in [`mcp/`](mcp/README.md). It runs on your laptop, connects over the SSH
-port-forward(s), and exposes tools (`run_prompt`, `submit_job`, `get_job`,
-`list_sessions`, `cluster_info`, `list_gateways`) routed to whichever gateway you
-name in `gateways.json`. Stdlib-only, single file — copy it over and:
+Drive one or more gateways from your laptop over the SSH port-forward(s). Both
+front ends live in [`client/`](client/README.md), stdlib-only, sharing one
+transport module (`abclient.py`):
 
-```bash
-claude mcp add agent-bridge -- \
-    python3 /path/to/mcp/agent_bridge_mcp.py --config ~/.config/agent-bridge/gateways.json
-```
+- **`ab` CLI (recommended)** — any shell/human/script/agent uses it; Claude Code
+  drives it via Bash:
+  ```bash
+  python3 client/ab.py run "run the tests" --cwd /project/jevans/tzhang3/myrepo
+  python3 client/ab.py run "profile it" --upload ./train.csv --stream
+  python3 client/ab.py download --dir /project/.../out --glob '*.csv' --to ./results
+  ```
+- **MCP server** — for MCP clients:
+  ```bash
+  claude mcp add agent-bridge -- \
+      python3 /path/to/client/agent_bridge_mcp.py --config ~/.config/agent-bridge/gateways.json
+  ```
 
-See [mcp/README.md](mcp/README.md) for config and tool details.
+See [client/README.md](client/README.md) for all commands/tools and config.
 
 ## Adding an agent backend
 

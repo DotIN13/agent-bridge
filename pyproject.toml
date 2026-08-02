@@ -9,7 +9,7 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
-# The gateway (server side) needs these. The MCP client (mcp/) is stdlib-only
-# and has no dependencies. Create the env with:
+# The gateway (server side) needs these. The clients (client/, CLI + MCP) are
+# stdlib-only and have no dependencies. Create the env with:
 #     uv venv .venv && uv pip install -e .
 # or  uv pip install fastapi uvicorn python-multipart
