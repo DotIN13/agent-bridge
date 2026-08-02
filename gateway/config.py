@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import tempfile
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -20,7 +21,7 @@ _DEFAULTS: dict = {
     },
     "files": {
         "enabled": True,
-        "dir": "files",            # relative -> under data_dir; must be inside an allowed_dir
+        "dir": "",                 # "" -> per-user dir under $TMPDIR; abs or data_dir-relative otherwise
         "max_file_mb": 100,
         "max_request_mb": 512,
     },
@@ -97,9 +98,13 @@ class Config:
         return bases
 
     def within_allowed(self, path: str | os.PathLike) -> Path:
-        """Resolve `path` and ensure it sits inside an allowed base, else raise."""
+        """Resolve `path` and ensure it sits inside an allowed base or the file
+        store (the store may live outside allowed_dirs, e.g. /tmp)."""
         p = Path(path).expanduser().resolve()
-        for b in self.allowed_bases():
+        bases = self.allowed_bases()
+        if self.files_dir:
+            bases.append(Path(self.files_dir).resolve())
+        for b in bases:
             if p == b or b in p.parents:
                 return p
         raise ValueError(f"path {p} is not under any allowed directory")
@@ -175,9 +180,7 @@ def load(path: str | os.PathLike | None) -> Config:
 
     cl = raw.get("cluster", {})
     fl = raw.get("files", {})
-    files_dir = Path(fl.get("dir", "files"))
-    if not files_dir.is_absolute():
-        files_dir = data_dir / files_dir
+    files_dir = _resolve_files_dir(fl.get("dir", ""), data_dir)
     return Config(
         host=raw["server"]["host"],
         port=int(raw["server"]["port"]),
@@ -189,11 +192,31 @@ def load(path: str | os.PathLike | None) -> Config:
         cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),
         cluster_env_presence=tuple(cl.get("env_presence", [])),
         files_enabled=bool(fl.get("enabled", True)),
-        files_dir=str(files_dir.resolve()),
+        files_dir=files_dir,
         files_max_file_mb=int(fl.get("max_file_mb", 100)),
         files_max_request_mb=int(fl.get("max_request_mb", 512)),
         agents=agents,
     )
+
+
+def _resolve_files_dir(cfg_dir: str, data_dir: Path) -> str:
+    """Where uploads live. Empty -> a per-user dir under $TMPDIR, locked to 0700
+    (/tmp is shared; uploads may be sensitive). Absolute is used as-is; relative
+    resolves under the data dir."""
+    if not cfg_dir:
+        d = Path(tempfile.gettempdir()) / f"agent-bridge-{os.getuid()}" / "files"
+    elif Path(cfg_dir).is_absolute():
+        d = Path(cfg_dir)
+    else:
+        d = data_dir / cfg_dir
+    d.mkdir(parents=True, exist_ok=True)
+    # Lock the store to the owner — it may live in world-accessible /tmp, and
+    # uploads can be sensitive. 0700 on the root protects everything beneath.
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return str(d.resolve())
 
 
 def _ensure_token(data_dir: Path) -> str:

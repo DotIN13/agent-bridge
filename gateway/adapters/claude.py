@@ -137,7 +137,9 @@ class ClaudeAdapter:
         d = Path(os.environ.get("AGENT_BRIDGE_DATA_DIR", spec.cwd)) / "jobs" / spec.job_id
         d.mkdir(parents=True, exist_ok=True)
         f = d / "task.txt"
-        f.write_text(spec.prompt)
+        # The task file is piped to the NESTED (forked) agent, so the attachment
+        # note must live here too — not only in the dispatcher's system prompt.
+        f.write_text(spec.prompt + _attached_block(spec.files))
         return str(f)
 
     # -- mode 1: dispatcher forks + executes itself -----------------------
@@ -160,6 +162,10 @@ class ClaudeAdapter:
             "--append-system-prompt", system,
         ]
         for d in self.cfg.allowed_dirs:
+            args += ["--add-dir", d]
+        # attached files may live outside allowed_dirs (e.g. /tmp store) — make
+        # their dirs readable to the dispatcher too.
+        for d in _parent_dirs(spec.files):
             args += ["--add-dir", d]
 
         res = RunResult(ok=False)
@@ -308,6 +314,15 @@ class ClaudeAdapter:
             res.result = obj["result"]
         if obj.get("total_cost_usd") is not None:
             res.cost_usd = (res.cost_usd or 0) + obj["total_cost_usd"]
+
+
+def _parent_dirs(files: tuple[str, ...] | list[str]) -> list[str]:
+    seen: list[str] = []
+    for f in files:
+        d = str(Path(f).parent)
+        if d not in seen:
+            seen.append(d)
+    return seen
 
 
 def _attached_block(files: tuple[str, ...] | list[str]) -> str:

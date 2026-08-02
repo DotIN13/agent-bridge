@@ -155,8 +155,10 @@ Send inputs with a job and pull results back — all sandboxed to `allowed_dirs`
 
 - **Upload + submit in one call.** `POST /v1/jobs` accepts a `files` array (JSON
   inline: `{name, content_b64|text}` or `{path}` reference) **or** multipart
-  (`payload` JSON field + file parts). Uploaded files land in the job's input dir
-  and their absolute paths are surfaced to the agent as *ATTACHED FILES*.
+  (`payload` JSON field + file parts). Uploads land in a **per-user file store**
+  (a `$TMPDIR` dir by default, created `0700`), and their absolute paths are
+  surfaced to the agent as *ATTACHED FILES* (readable by the forked agent and
+  downloadable, even though the store may sit outside `allowed_dirs`).
 - **Fetch artifacts.** `GET /v1/files/list?dir=&glob=` to discover, then
   `GET /v1/files/content?path=` to stream a file back (result CSVs, etc.).
 - **Large data** → `scp`/`rsync` into an allowed dir over your SSH session and

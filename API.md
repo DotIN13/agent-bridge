@@ -126,9 +126,11 @@ curl -s -X POST http://localhost:8787/v1/jobs \
   -F 'files=@./train.csv'
 ```
 
-The gateway saves uploads under the job's input dir (inside an allowed dir) and
-surfaces their absolute paths to the agent as *ATTACHED FILES*; they're also
-recorded on the job row's `files`.
+The gateway saves uploads in a per-user file store (a `$TMPDIR` dir by default,
+`0700`; configurable via `[files].dir`) and surfaces their absolute paths to the
+agent as *ATTACHED FILES*; they're also recorded on the job row's `files`. The
+store is readable by the forked agent and downloadable via `/v1/files/content`
+even though it may sit outside `allowed_dirs`.
 
 Errors: `400 {"error":"prompt is required"}`, `400 {"error":"cwd … not under any allowed_dirs …"}`, `400 {"error":"unknown agent '…'"}`.
 

@@ -75,9 +75,10 @@ Two ways, both one call:
        {{"path":"/abs/existing/on/node"}}                (reference; no upload)
   B. multipart/form-data: a form field `payload` = the JSON body above, plus one
      or more file parts (field name `files`). Best for larger/binary files.
-Uploaded files land in the job's input dir (inside an allowed dir) and their
-absolute paths are surfaced to the agent as ATTACHED FILES. For very large data,
-scp/rsync into an allowed dir and pass {{"path":...}} instead.
+Uploaded files land in a per-user file store (a temp dir by default, locked to
+you) and their absolute paths are surfaced to the agent as ATTACHED FILES; fetch
+them back later via /v1/files/content. For very large data, scp/rsync into an
+allowed dir and pass {{"path":...}} instead.
 
 ## POST /v1/jobs request body
   prompt           (string, REQUIRED) the task to run. Write it as you would to

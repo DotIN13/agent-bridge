@@ -19,10 +19,14 @@ path = "gateway.db"  # relative paths resolve against the data dir
 
 [files]
 # File upload/download surface (/v1/files, and files attached to jobs).
-# Uploads land under <data_dir>/dir (must be inside an allowed_dir so agents can
-# read them). Downloads/uploads are sandboxed to the agents' allowed_dirs.
+# dir = ""  -> per-user store under $TMPDIR (e.g. /tmp/agent-bridge-<uid>/files),
+#              created 0700 so other users on the node can't read your uploads.
+#              (Note: /tmp is reaped after ~10 days idle — fine for job inputs.)
+# dir = "abs/path"       -> used as-is;  dir = "relname" -> under the data dir.
+# The store is readable by forked agents and downloadable even though it's
+# outside allowed_dirs; everything else stays sandboxed to allowed_dirs.
 enabled = true
-dir = "files"              # relative -> under the data dir
+dir = ""
 max_file_mb = 100          # per-file cap
 max_request_mb = 512       # whole-request cap; larger data -> scp + pass {path}
 
