@@ -200,20 +200,37 @@ def load(path: str | os.PathLike | None) -> Config:
 
 
 def _resolve_files_dir(cfg_dir: str, data_dir: Path) -> str:
-    """Where uploads live. Empty -> a per-user dir under $TMPDIR, locked to 0700
-    (/tmp is shared; uploads may be sensitive). Absolute is used as-is; relative
-    resolves under the data dir."""
-    if not cfg_dir:
-        d = Path(tempfile.gettempdir()) / f"agent-bridge-{os.getuid()}" / "files"
-    elif Path(cfg_dir).is_absolute():
-        d = Path(cfg_dir)
-    else:
-        d = data_dir / cfg_dir
+    """Where uploads live, in priority order:
+        1. [files].dir from config (absolute, or relative to the data dir)
+        2. $SCRATCH   (per-user dir beneath it)
+        3. $TMPDIR    "
+        4. /tmp       (final fallback)
+    A candidate that isn't writable (e.g. $SCRATCH pointing at a root-owned base)
+    is skipped for the next one. The store is locked to 0700 — it may be
+    world-accessible and uploads can be sensitive."""
+    if cfg_dir:
+        d = Path(cfg_dir) if Path(cfg_dir).is_absolute() else data_dir / cfg_dir
+        return _prepare_store(d)   # explicit config: no fallback, surface errors
+
+    roots, seen = [], set()
+    for root in (os.environ.get("SCRATCH"), os.environ.get("TMPDIR"),
+                 tempfile.gettempdir()):
+        if root and root not in seen:
+            seen.add(root)
+            roots.append(root)
+    last_err: Exception | None = None
+    for root in roots:
+        try:
+            return _prepare_store(Path(root) / f"agent-bridge-{os.getuid()}" / "files")
+        except OSError as e:
+            last_err = e
+    raise RuntimeError(f"no writable file store in $SCRATCH/$TMPDIR/tmp: {last_err}")
+
+
+def _prepare_store(d: Path) -> str:
     d.mkdir(parents=True, exist_ok=True)
-    # Lock the store to the owner — it may live in world-accessible /tmp, and
-    # uploads can be sensitive. 0700 on the root protects everything beneath.
     try:
-        os.chmod(d, 0o700)
+        os.chmod(d, 0o700)   # protect uploads even in world-accessible /tmp
     except OSError:
         pass
     return str(d.resolve())

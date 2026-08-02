@@ -19,8 +19,9 @@ path = "gateway.db"  # relative paths resolve against the data dir
 
 [files]
 # File upload/download surface (/v1/files, and files attached to jobs).
-# dir = ""  -> per-user store under $TMPDIR (e.g. /tmp/agent-bridge-<uid>/files),
-#              created 0700 so other users on the node can't read your uploads.
+# dir = ""  -> per-user store, picked in order: $SCRATCH, then $TMPDIR, then /tmp
+#              (e.g. $SCRATCH/agent-bridge-<uid>/files), created 0700 so other
+#              users on the node can't read your uploads.
 #              (Note: /tmp is reaped after ~10 days idle — fine for job inputs.)
 # dir = "abs/path"       -> used as-is;  dir = "relname" -> under the data dir.
 # The store is readable by forked agents and downloadable even though it's
