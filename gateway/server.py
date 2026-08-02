@@ -8,6 +8,7 @@ Routes:
                                         model?, permission_mode?} -> 202 {id}
   GET  /v1/jobs                      -> recent jobs
   GET  /v1/jobs/{id}                 -> job row
+  POST /v1/jobs/{id}/cancel          -> cancel a queued/running job
   GET  /v1/jobs/{id}/events?after=N  -> SSE stream (Accept: text/event-stream)
                                         or one-shot JSON of events after N.
 
@@ -138,8 +139,11 @@ def _make_handler(gw: Gateway):
         def do_POST(self):
             if not self._authed():
                 return self._json(401, {"error": "unauthorized"})
-            if urlparse(self.path).path == "/v1/jobs":
+            path = urlparse(self.path).path
+            if path == "/v1/jobs":
                 return self._create_job()
+            if path.startswith("/v1/jobs/") and path.endswith("/cancel"):
+                return self._cancel_job(path[len("/v1/jobs/"):-len("/cancel")])
             return self._json(404, {"error": "not found"})
 
         # -- handlers -----------------------------------------------------
@@ -188,6 +192,17 @@ def _make_handler(gw: Gateway):
             if not job:
                 return self._json(404, {"error": "job not found"})
             return self._json(200, job)
+
+        def _cancel_job(self, job_id):
+            job = gw.db.get_job(job_id)
+            if not job:
+                return self._json(404, {"error": "job not found"})
+            if job["status"] in TERMINAL:
+                return self._json(409, {"id": job_id, "status": job["status"],
+                                        "error": "job already finished"})
+            where = gw.pool.cancel(job_id)
+            return self._json(202, {"id": job_id, "canceling": True,
+                                    "was": where})
 
         def _events(self, job_id, qs):
             job = gw.db.get_job(job_id)

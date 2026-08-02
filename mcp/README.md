@@ -80,6 +80,8 @@ Then in Claude Code the tools appear as `agent-bridge:*`.
 | `list_sessions` | sessions a gateway can fork (optional `cwd`) |
 | `submit_job` | submit a prompt, return a job id immediately (no wait) |
 | `get_job` | fetch a job's status/result |
+| `job_events` | fetch a job's event log incrementally (`after` = last seq seen) — poll for progress/streaming |
+| `cancel_job` | cancel a queued/running job (kills the agent on the gateway) |
 | `run_prompt` | submit **and wait** for the result (polls to completion) — the usual one |
 
 Every tool takes an optional `gateway` argument; omit it to use the default.

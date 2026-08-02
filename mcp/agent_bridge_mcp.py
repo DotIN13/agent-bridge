@@ -195,6 +195,22 @@ class Tools:
                     "job_id": {"type": "string"}},
                  "required": ["job_id"]},
                 self.get_job),
+            "job_events": (
+                {"type": "object", "properties": {
+                    "gateway": gw_prop,
+                    "job_id": {"type": "string"},
+                    "after": {"type": "integer",
+                              "description": "return only events with seq > this "
+                                             "(default 0); pass the last seq you "
+                                             "saw to page incrementally"}},
+                 "required": ["job_id"]},
+                self.job_events),
+            "cancel_job": (
+                {"type": "object", "properties": {
+                    "gateway": gw_prop,
+                    "job_id": {"type": "string"}},
+                 "required": ["job_id"]},
+                self.cancel_job),
             "run_prompt": (
                 {"type": "object",
                  "properties": {**job_fields,
@@ -219,6 +235,11 @@ class Tools:
             "submit_job": "Submit a prompt to a gateway and return immediately "
                           "with a job id (does not wait). Use get_job to poll.",
             "get_job": "Fetch a job's current status/result from a gateway.",
+            "job_events": "Fetch a job's event log incrementally (progress: "
+                          "assistant text, tool calls, result). Pass `after` = "
+                          "the last seq you saw to stream in chunks by polling.",
+            "cancel_job": "Cancel a queued or running job (kills the agent "
+                          "process on the gateway).",
             "run_prompt": "Submit a prompt to a gateway and WAIT for the result "
                           "(polls to completion). The normal way to run a task.",
         }
@@ -252,6 +273,26 @@ class Tools:
     def get_job(self, args):
         name, base, token = self.gws.resolve(args.get("gateway"))
         code, data = http("GET", base, f"/v1/jobs/{args['job_id']}", token)
+        _raise_http(code, data)
+        return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
+
+    def job_events(self, args):
+        name, base, token = self.gws.resolve(args.get("gateway"))
+        after = int(args.get("after") or 0)
+        path = f"/v1/jobs/{args['job_id']}/events?after={after}"
+        code, data = http("GET", base, path, token, accept="application/json")
+        _raise_http(code, data)
+        if not isinstance(data, dict):
+            return {"gateway": name, "data": data}
+        events = data.get("events", [])
+        last = events[-1]["seq"] if events else after
+        return {"gateway": name, "status": (data.get("job") or {}).get("status"),
+                "terminal": data.get("terminal"), "next_after": last,
+                "events": events}
+
+    def cancel_job(self, args):
+        name, base, token = self.gws.resolve(args.get("gateway"))
+        code, data = http("POST", base, f"/v1/jobs/{args['job_id']}/cancel", token)
         _raise_http(code, data)
         return {"gateway": name, **(data if isinstance(data, dict) else {"data": data})}
 

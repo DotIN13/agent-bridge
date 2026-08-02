@@ -56,8 +56,11 @@ GET  /v1/sessions?cwd=&agent= -> {{"sessions":[{{session_id,cwd,title,summary,
 POST /v1/jobs                 -> 202 {{"id","status","agent","cwd"}}
 GET  /v1/jobs                 -> {{"jobs":[...recent...]}}
 GET  /v1/jobs/{{id}}            -> the job row (see fields below)
+POST /v1/jobs/{{id}}/cancel    -> 202; cancel a queued/running job (kills the
+                                 agent process). 409 if already finished.
 GET  /v1/jobs/{{id}}/events    -> SSE if Accept: text/event-stream,
-                                 else JSON {{"job","events","terminal"}}
+                                 else JSON {{"job","events","terminal"}}. Poll
+                                 with ?after=<last seq> to page incrementally.
 
 ## POST /v1/jobs request body
   prompt           (string, REQUIRED) the task to run. Write it as you would to

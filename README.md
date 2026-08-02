@@ -74,6 +74,7 @@ All routes except `/health`, `/llms.txt`, and `/v1/help` require
 | POST | `/v1/jobs` | enqueue a prompt → `202 {id}` |
 | GET  | `/v1/jobs` | recent jobs |
 | GET  | `/v1/jobs/{id}` | job row (status, result, session ids, cost) |
+| POST | `/v1/jobs/{id}/cancel` | cancel a queued/running job (kills the agent) |
 | GET  | `/v1/jobs/{id}/events?after=N` | **SSE** stream, or one-shot JSON poll |
 
 **Driving it from an LLM agent:** point the agent at `GET /llms.txt` first — it

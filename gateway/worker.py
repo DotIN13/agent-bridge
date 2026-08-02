@@ -12,7 +12,7 @@ import threading
 import traceback
 
 from .adapters import build as build_adapter
-from .adapters.base import Event, JobSpec
+from .adapters.base import Cancellation, Event, JobSpec
 from .bus import Bus
 from .config import Config
 from .db import Database
@@ -26,6 +26,9 @@ class WorkerPool:
         self._q: queue.Queue[str] = queue.Queue()
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._cancels: dict[str, Cancellation] = {}   # running jobs
+        self._cancel_requested: set[str] = set()      # requested before start
 
     def start(self) -> None:
         for i in range(max(1, self.cfg.concurrency)):
@@ -35,6 +38,19 @@ class WorkerPool:
 
     def submit(self, job_id: str) -> None:
         self._q.put(job_id)
+
+    def cancel(self, job_id: str) -> str:
+        """Request cancellation. Returns 'running' (killed) or 'queued'
+        (marked canceled; the worker will skip it if/when dequeued)."""
+        with self._lock:
+            tok = self._cancels.get(job_id)
+            self._cancel_requested.add(job_id)
+        if tok is not None:
+            tok.cancel()
+            return "running"
+        # not started yet: finalize now so status reflects immediately
+        self.db.finish_job(job_id, status="canceled", error="canceled before start")
+        return "queued"
 
     def stop(self) -> None:
         self._stop.set()
@@ -62,42 +78,64 @@ class WorkerPool:
             self._fail(job_id, f"unknown agent '{agent_name}'")
             return
 
-        self.db.mark_running(job_id)
+        cancel = Cancellation()
+        with self._lock:
+            if job_id in self._cancel_requested:
+                # canceled while queued; cancel() already finalized the row
+                self.bus.close(job_id)
+                return
+            self._cancels[job_id] = cancel
+
         seq = _Seq()
-        self._emit(job_id, seq, Event("status", {"stage": "running", "agent": agent_name}))
+        try:
+            self.db.mark_running(job_id)
+            self._emit(job_id, seq,
+                       Event("status", {"stage": "running", "agent": agent_name}))
 
-        spec = JobSpec(
-            job_id=job_id,
-            prompt=job["prompt"],
-            cwd=job["cwd"] or agent_cfg.default_cwd,
-            requested_session=job["requested_session"],
-            permission_mode=job["permission_mode"],
-            model=job["model"],
-        )
-        adapter = build_adapter(agent_cfg)
+            spec = JobSpec(
+                job_id=job_id,
+                prompt=job["prompt"],
+                cwd=job["cwd"] or agent_cfg.default_cwd,
+                requested_session=job["requested_session"],
+                permission_mode=job["permission_mode"],
+                model=job["model"],
+                cancel=cancel,
+            )
+            adapter = build_adapter(agent_cfg)
 
-        def emit(ev: Event) -> None:
-            self._emit(job_id, seq, ev)
+            def emit(ev: Event) -> None:
+                self._emit(job_id, seq, ev)
 
-        result = adapter.run(spec, emit)
+            result = adapter.run(spec, emit)
+        finally:
+            with self._lock:
+                self._cancels.pop(job_id, None)
+                self._cancel_requested.discard(job_id)
 
-        if result.ok:
+        if cancel.cancelled():
+            status = "canceled"
+            self.db.finish_job(
+                job_id, status="canceled", error="canceled",
+                result=result.result or None,
+                chosen_session=result.chosen_session,
+                forked_session=result.forked_session, cost_usd=result.cost_usd,
+            )
+        elif result.ok:
+            status = "succeeded"
             self.db.finish_job(
                 job_id, status="succeeded", result=result.result,
                 chosen_session=result.chosen_session,
                 forked_session=result.forked_session, cost_usd=result.cost_usd,
             )
         else:
+            status = "failed"
             self.db.finish_job(
                 job_id, status="failed", error=result.error or "run failed",
                 result=result.result or None,
                 chosen_session=result.chosen_session,
                 forked_session=result.forked_session, cost_usd=result.cost_usd,
             )
-        self._emit(job_id, seq, Event("status", {
-            "stage": "done",
-            "status": "succeeded" if result.ok else "failed",
-        }))
+        self._emit(job_id, seq, Event("status", {"stage": "done", "status": status}))
         self.bus.close(job_id)
 
     def _emit(self, job_id: str, seq: "_Seq", ev: Event) -> None:

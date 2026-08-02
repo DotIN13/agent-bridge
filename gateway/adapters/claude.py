@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import signal
 import subprocess
 import threading
 from pathlib import Path
@@ -27,7 +26,7 @@ from typing import Callable
 
 from ..config import AgentConfig
 from ..sessions import SessionInfo, scan
-from .base import Event, JobSpec, RunResult
+from .base import Event, JobSpec, RunResult, _kill_group
 
 _RESUME_RE = re.compile(r"--resume[= ]+([0-9a-fA-F-]{36})")
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
@@ -160,7 +159,8 @@ class ClaudeAdapter:
             args += ["--add-dir", d]
 
         res = RunResult(ok=False)
-        self._stream(args, spec.cwd, emit, res, capture_nested=True)
+        self._stream(args, spec.cwd, emit, res, capture_nested=True,
+                     cancel=spec.cancel)
         return res
 
     # -- mode 2: model selects, worker executes ---------------------------
@@ -200,16 +200,20 @@ class ClaudeAdapter:
             exec_args += ["--model", spec.model or self.cfg.model]
 
         res = RunResult(ok=False, chosen_session=chosen)
-        self._stream(exec_args, target_cwd, emit, res, capture_nested=False)
+        self._stream(exec_args, target_cwd, emit, res, capture_nested=False,
+                     cancel=spec.cancel)
         return res
 
     # -- shared streaming -------------------------------------------------
-    def _stream(self, args, cwd, emit, res: RunResult, *, capture_nested: bool):
+    def _stream(self, args, cwd, emit, res: RunResult, *, capture_nested: bool,
+                cancel=None):
         proc = subprocess.Popen(
             args, cwd=cwd, text=True, bufsize=1,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        if cancel is not None:
+            cancel.bind(proc)  # kills the process group on cancel (even if already set)
         # timeout_sec <= 0 disables the wall-clock kill (jobs run unbounded).
         timer = None
         if self.cfg.timeout_sec and self.cfg.timeout_sec > 0:
@@ -301,10 +305,8 @@ class ClaudeAdapter:
 
 
 def _kill(proc: subprocess.Popen):
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    # reap the whole tree (dispatcher + any nested/forked agent), not just the group
+    _kill_group(proc)
 
 
 def _as_list(x):

@@ -129,6 +129,22 @@ The job row.
 
 `404 {"error":"job not found"}` if unknown.
 
+### `POST /v1/jobs/{id}/cancel`
+Cancel a queued or running job. A running job's agent process (and its process
+group, including any forked child agent) is killed; the job settles to
+`canceled`. A queued job is marked `canceled` and skipped when a worker would
+have picked it up.
+
+```bash
+curl -s -X POST http://localhost:8787/v1/jobs/$ID/cancel \
+  -H "Authorization: Bearer $TOKEN"
+# 202 { "id": "…", "canceling": true, "was": "running" }   # or "was":"queued"
+```
+
+`202` with `was` = `running` | `queued`. `409 {status, error:"job already
+finished"}` if terminal. `404` if unknown. The job's final `status` becomes
+`canceled` (a terminal status); poll `GET /v1/jobs/{id}` to confirm.
+
 ### `GET /v1/jobs/{id}/events`
 Two modes, chosen by the `Accept` header.
 
