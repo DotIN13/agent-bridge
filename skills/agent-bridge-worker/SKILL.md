@@ -60,7 +60,7 @@ to the caller is output-file mtimes — which cannot distinguish *queued* from
 *died before writing* from *the filesystem is unreachable*.
 
 ```bash
-#SBATCH --export=ALL,AB_JOB_ID=<the ab job uuid>,AB_DATA_DIR=/project/jevans/tzhang3/agent-bridge
+#SBATCH --export=ALL,AB_JOB_ID=<the ab job uuid>,AB_DATA_DIR=<gateway data dir>
 
 ab-notify --status running  --msg "server up, starting generation"
 ab-notify --status running  --msg "12/24 sources done"

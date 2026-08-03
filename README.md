@@ -166,23 +166,26 @@ whose index is mmap'd shared memory and therefore requires every writer on one
 host. Appending JSONL with `O_APPEND` needs no locking at all, which is why the
 fallback is a file and the gateway ingests it.
 
-## The remote agent's side of the contract
+## Skills — both ends of the contract
 
-[`skills/agent-bridge-worker/`](skills/agent-bridge-worker/SKILL.md) is a Claude
-Code skill for the agent **on the cluster**. Install it once on the gateway host:
+[`skills/`](skills/README.md) ships two Claude Code skills, written to agree
+with each other:
 
 ```bash
 mkdir -p ~/.claude/skills
-cp -r skills/agent-bridge-worker ~/.claude/skills/
+cp -r skills/agent-bridge-client ~/.claude/skills/     # the machine you work from
+cp -r skills/agent-bridge-worker ~/.claude/skills/     # the gateway host
 ```
 
-It covers the division of labour (local session plans and reviews; the remote
-agent investigates and executes), how to finish a turn — *a turn that ends with
-"I'll report back" is a failed turn, because the gateway records turn-end as
-task completion* — the Slurm recipe, and when to call `ab-notify`.
+The division of labour is the point: **the local session plans and reviews with
+a human; the remote agent investigates and executes.** The worker skill also
+forbids the failure that costs the most time — ending a turn with *"I'll report
+back when the job finishes"*, which the gateway records as success with no
+deliverable, because a `claude -p` turn cannot hold a blocking wait.
 
-Worth installing before you rely on batch reporting: the conventions are what
-make a job's progress visible at all.
+Neither needs a restart; both take effect on the next session. Install them
+before relying on batch reporting — the conventions are what make a job's
+progress visible at all.
 
 ## Cancel
 
