@@ -119,10 +119,39 @@ Request body:
 | `prompt` | string | **yes** | the task; runs in a forked session at `cwd` |
 | `cwd` | string | no | absolute dir; must be within an allowed dir or `400`. Defaults to the agent's `default_cwd` |
 | `agent` | string | no | one of `/v1/agents`; defaults to `default` |
-| `session` | string | no | session_id hint to prefer forking |
+| `session` | string | no | pin the target session. The dispatcher uses it instead of choosing, and will not silently substitute another. **Required** when `fork` is `false` |
+| `title` | string | no | human handle for the job. Derived from the prompt's first line when omitted, so every job has one. Pass it wherever an `{id}` is accepted |
+| `fork` | bool | no | default `true`. `false` queues the prompt into the target session **in place** — see [Fork vs resume-in-place](#fork-vs-resume-in-place) |
 | `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id. See [`/v1/models`](#get-v1models--agentname) for what this agent offers |
 | `permission_mode` | string | no | e.g. `bypassPermissions`, `acceptEdits` |
 | `files` | array | no | attachments — see [Files](#files) |
+
+#### Fork vs resume-in-place
+
+By default a job **forks** the session it lands in: the parent is never mutated
+and the run gets a fresh session id. That is right for independent tasks.
+
+`"fork": false` instead **resumes the target session in place**, appending to
+its own history. Use it when the prompt is a follow-up to work already in that
+thread — a course correction, extra context, or a queued instruction to pick up
+next — and the session genuinely needs to see it. A fork would put the message
+on a branch the original session never reads.
+
+```bash
+# nudge a specific in-flight thread rather than branching it
+curl -s -X POST http://localhost:8787/v1/jobs \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"prompt":"when the fetch finishes, do NOT build sources.json — stop and report",
+       "session":"3cf736d5-152a-417a-921c-c17bf1bd233a", "fork": false,
+       "title":"halt-before-metadata"}'
+```
+
+**`session` is required.** `fork:false` on its own is a `400`. An in-place write
+lands permanently in whichever session receives it, so the target is never
+resolved to "whatever the dispatcher likes" — you name it or it doesn't run.
+
+A busy target is fine: `--resume` queues the message and Claude picks it up at
+the end of the current turn, so the gateway does not gate on liveness.
 
 ```bash
 curl -s -X POST http://localhost:8787/v1/jobs \
@@ -131,7 +160,9 @@ curl -s -X POST http://localhost:8787/v1/jobs \
        "cwd":"/project/jevans/tzhang3/myrepo"}'
 # 202
 { "id": "8d2ecd09-…", "status": "queued", "agent": "claude",
-  "cwd": "/project/jevans/tzhang3/myrepo", "files": [] }
+  "cwd": "/project/jevans/tzhang3/myrepo",
+  "title": "add a --json flag to cli.py and run the tests", "fork": true,
+  "files": [] }
 ```
 
 **With files, one call** — either JSON inline or multipart:
@@ -156,17 +187,30 @@ agent as *ATTACHED FILES*; they're also recorded on the job row's `files`. The
 store is readable by the forked agent and downloadable via `/v1/files/content`
 even though it may sit outside `allowed_dirs`.
 
-Errors: `400 {"error":"prompt is required"}`, `400 {"error":"cwd … not under any allowed_dirs …"}`, `400 {"error":"unknown agent '…'"}`.
+Errors: `400 {"error":"prompt is required"}`, `400 {"error":"cwd … not under any allowed_dirs …"}`, `400 {"error":"unknown agent '…'"}`, `400 {"error":"fork=false requires 'session': …"}`.
 
 ### `GET /v1/jobs`
-Recent jobs, newest first: `{ "jobs": [ <job row>, … ] }` (default 50).
+Recent jobs, newest first: `{ "jobs": [ <job row>, … ] }`. `?limit=N` (default 50).
 
 ### `GET /v1/jobs/{id}`
 The job row.
 
+`{id}` takes a **full uuid, the job's title, or any unique leading id prefix** —
+`b4c220af`, `halt-before-metadata`, and the full
+`b4c220af-ca3b-4568-a9ca-d4f578d25ed3` all resolve. Titles are matched folded
+(case-insensitive, punctuation and spaces collapsed to `-`), so
+`--title "Halt before metadata"` is addressable as `halt-before-metadata`.
+
+Resolution order is id → title → id-prefix, and applies to `…/cancel` and
+`…/events` too. Titles are **not** unique — resubmitting a task reuses its
+name — so an ambiguous reference is a `409` listing the candidates, never a
+silent pick of the newest. That matters most for `cancel`.
+
 | field | meaning |
 |---|---|
 | `id`, `status`, `agent`, `prompt`, `cwd`, `requested_session` | as submitted |
+| `title` | human handle (given or derived); `title_norm` is its folded lookup key |
+| `fork` | `1` forked a session, `0` resumed one in place |
 | `chosen_session` | session the dispatcher forked (or `null`) |
 | `forked_session` | new session id created by the fork (or `null`) |
 | `files` | JSON list of attached file paths (or `null`) |
@@ -175,13 +219,26 @@ The job row.
 | `cost_usd` | total cost |
 | `created_at`, `started_at`, `finished_at` | epoch seconds |
 
-`404 {"error":"job not found"}` if unknown.
+`404 {"error":"no job matching id, title, or id-prefix '…'"}` if unknown;
+`409 {"error":"… is ambiguous (N jobs)", "matches":[{id,title,status,created_at}…]}`
+if several match — add characters to a prefix, or use the full id from
+`GET /v1/jobs`.
 
 ### `POST /v1/jobs/{id}/cancel`
-Cancel a queued or running job. A running job's agent process (and its process
-group, including any forked child agent) is killed; the job settles to
-`canceled`. A queued job is marked `canceled` and skipped when a worker would
-have picked it up.
+Cancel a queued or running job. A queued job is marked `canceled` and skipped
+when a worker would have picked it up.
+
+A **running** job is *interrupted*, not killed outright — the equivalent of
+pressing ESC in the interactive client. `SIGINT` goes to the whole tree (the
+dispatcher and the nested agent it forked), so the agent stops its current turn,
+flushes its transcript and exits, and **the session stays resumable**. Only if
+it hasn't wound down within `[worker] cancel_grace_sec` (default 15s) does the
+gateway escalate to `SIGTERM`, then `SIGKILL` after a further 5s. The wall-clock
+`timeout_sec` path interrupts the same way.
+
+Escalating matters: `SIGKILL` leaves the transcript mid-write, which is what
+makes a killed session awkward to pick up again. Either way the job settles to
+`canceled`, and any partial `result` is preserved on the row.
 
 ```bash
 curl -s -X POST http://localhost:8787/v1/jobs/$ID/cancel \

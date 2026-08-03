@@ -152,34 +152,72 @@ def create_app(gw: Gateway) -> FastAPI:
         if (items or uploads) and not cfg.files_enabled:
             raise HTTPException(400, "file attachments are disabled")
 
+        fork = spec.get("fork", True)
+        if not isinstance(fork, bool):
+            raise HTTPException(400, "fork must be a boolean")
+        if not fork and not spec.get("session"):
+            # Without a named target there is nothing to check for liveness
+            # before dispatch, so the no-race guarantee cannot be made.
+            raise HTTPException(400, "fork=false requires 'session': name the "
+                                     "session to resume in place")
+
         job_id = gw.db.create_job(
             agent=agent, prompt=prompt, cwd=cwd,
             requested_session=spec.get("session"),
-            permission_mode=spec.get("permission_mode"), model=spec.get("model"))
+            permission_mode=spec.get("permission_mode"), model=spec.get("model"),
+            title=spec.get("title"), fork=fork)
         paths = await _save_all(items, uploads, filemod.job_dir(cfg, job_id))
         if paths:
             gw.db.set_job_files(job_id, paths)
+        row = gw.db.get_job(job_id)
         gw.pool.submit(job_id)   # only now is it visible to a worker
         return JSONResponse(status_code=202, content={
             "id": job_id, "status": "queued", "agent": agent, "cwd": cwd,
+            "title": row.get("title") if row else None, "fork": fork,
             "files": paths})
 
+    def _resolve_job(ref: str) -> dict:
+        """Resolve a job reference: full id, then title, then id prefix.
+
+        Ids are uuid4s and people write down the leading 8 characters or, more
+        often, remember what the job was called. Exact-match-only lookup makes
+        both unaddressable and answers with the same "not found" a nonexistent
+        job gets, which reads as data loss rather than a short reference.
+
+        Ambiguity is always an error, never a silent pick of the newest — the
+        same reference reaching `cancel` must not act on a job the caller
+        didn't mean.
+        """
+        job = gw.db.get_job(ref)
+        if job:
+            return job
+        for kind, finder in (("title", gw.db.find_jobs_by_title),
+                             ("id-prefix", gw.db.find_jobs_by_prefix)):
+            matches = finder(ref)
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                raise HTTPException(409, {
+                    "error": f"{kind} '{ref}' is ambiguous ({len(matches)} jobs)",
+                    "matches": [{"id": m["id"], "title": m.get("title"),
+                                 "status": m.get("status"),
+                                 "created_at": m.get("created_at")}
+                                for m in matches],
+                })
+        raise HTTPException(404, f"no job matching id, title, or id-prefix '{ref}'")
+
     @app.get("/v1/jobs", dependencies=[auth])
-    async def list_jobs():
-        return {"jobs": gw.db.list_jobs()}
+    async def list_jobs(limit: int = 50):
+        return {"jobs": gw.db.list_jobs(limit=limit)}
 
     @app.get("/v1/jobs/{job_id}", dependencies=[auth])
     async def get_job(job_id: str):
-        job = gw.db.get_job(job_id)
-        if not job:
-            raise HTTPException(404, "job not found")
-        return job
+        return _resolve_job(job_id)
 
     @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth])
     async def cancel_job(job_id: str):
-        job = gw.db.get_job(job_id)
-        if not job:
-            raise HTTPException(404, "job not found")
+        job = _resolve_job(job_id)
+        job_id = job["id"]          # a prefix must not reach the worker pool
         if job["status"] in TERMINAL:
             return JSONResponse(status_code=409, content={
                 "id": job_id, "status": job["status"], "error": "job already finished"})
@@ -189,9 +227,8 @@ def create_app(gw: Gateway) -> FastAPI:
 
     @app.get("/v1/jobs/{job_id}/events", dependencies=[auth])
     async def job_events(job_id: str, request: Request, after: int = 0):
-        job = gw.db.get_job(job_id)
-        if not job:
-            raise HTTPException(404, "job not found")
+        job = _resolve_job(job_id)
+        job_id = job["id"]          # events are keyed by the full id
         start = _parse_after(after, request.headers.get("last-event-id"))
         if "text/event-stream" not in request.headers.get("accept", ""):
             evs = gw.db.events_after(job_id, start)

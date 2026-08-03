@@ -14,6 +14,12 @@ token = ""
 [worker]
 concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
 
+# Cancel interrupts rather than kills: SIGINT (what ESC maps to in the
+# interactive client) lets the agent stop its turn, flush the transcript and
+# exit, so the session stays resumable. Escalates to SIGTERM then SIGKILL only
+# if it hasn't wound down in this long.
+cancel_grace_sec = 15
+
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 

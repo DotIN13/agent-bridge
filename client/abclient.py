@@ -215,9 +215,10 @@ class Client:
 
     # -- jobs --
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
-               session=None, permission_mode=None, files=None, upload=None) -> dict:
+               session=None, permission_mode=None, files=None, upload=None,
+               title=None, fork=True) -> dict:
         payload = _job_payload(prompt, cwd, agent, model, session,
-                               permission_mode, files)
+                               permission_mode, files, title, fork)
         uploads = [(os.path.basename(p), p) for p in (upload or [])]
         if uploads:
             code, data = http_multipart(self.base, "/v1/jobs", self.token,
@@ -227,7 +228,11 @@ class Client:
         _raise(code, data)
         return data
 
+    def list_jobs(self, limit: int = 50) -> dict:
+        return self._get(f"/v1/jobs?limit={int(limit)}")
+
     def get_job(self, job_id: str) -> dict:
+        """Full id, or any unique id prefix (resolved gateway-side)."""
         return self._get(f"/v1/jobs/{job_id}")
 
     def events(self, job_id: str, after: int = 0) -> dict:
@@ -291,12 +296,16 @@ class Client:
         return out
 
 
-def _job_payload(prompt, cwd, agent, model, session, permission_mode, files) -> dict:
+def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
+                 title=None, fork=True) -> dict:
     body = {"prompt": prompt}
     for k, v in (("cwd", cwd), ("agent", agent), ("model", model),
-                 ("session", session), ("permission_mode", permission_mode)):
+                 ("session", session), ("permission_mode", permission_mode),
+                 ("title", title)):
         if v:
             body[k] = v
+    if not fork:
+        body["fork"] = False   # only sent when it differs from the default
     if files:
         body["files"] = [{"path": p} for p in files]
     return body

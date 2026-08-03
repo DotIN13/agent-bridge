@@ -10,6 +10,10 @@ Examples:
     ab run "run the tests in this repo" --cwd /project/jevans/tzhang3/myrepo
     ab run "profile this data" --upload ./train.csv --stream
     ab submit "long task" ; ab events <id> --follow ; ab job <id>
+    ab jobs                             # recent jobs with their full ids
+    ab job b4c220af                     # a unique id prefix works too
+    ab submit -F task.md --title fetch-corpus ; ab events fetch-corpus -f
+    ab submit -F nudge.md --session <id> --no-fork   # guidance into that thread
     ab ls /project/jevans/tzhang3/myrepo/out --glob '*.csv'
     ab download --dir /project/.../out --glob '*.csv' --to ./results
 
@@ -143,6 +147,7 @@ def cmd_run(args):
     job = c.run(prompt, cwd=args.cwd, agent=args.agent, model=args.model,
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=args.upload,
+                title=args.title, fork=args.fork,
                 timeout=args.timeout, on_event=on_event)
     if args.json:
         print(json.dumps(job, indent=2))
@@ -162,8 +167,38 @@ def cmd_submit(args):
     prompt = _resolve_prompt(args)
     job = c.submit(prompt, cwd=args.cwd, agent=args.agent, model=args.model,
                    session=args.session, permission_mode=args.permission_mode,
-                   files=args.file, upload=args.upload)
-    _out(args, job, lambda j: print(j["id"]))
+                   files=args.file, upload=args.upload,
+                   title=args.title, fork=args.fork)
+
+    def human(j):
+        print(j["id"])
+        if j.get("title"):
+            print(f"title: {j['title']}", file=sys.stderr)
+
+    _out(args, job, human)
+
+
+def cmd_jobs(args):
+    """Recent jobs. The only way to recover a full id from a prefix you wrote
+    down, so it prints ids in full and never truncates them."""
+    import time
+    d = _client(args).list_jobs(limit=args.limit)
+
+    def human(x):
+        jobs = x.get("jobs", [])
+        if not jobs:
+            print("no jobs on this gateway")
+            return
+        now = time.time()
+        print(f"  {'ID':<36} {'STATUS':<10} {'AGE':>6}  TITLE")
+        for j in jobs:
+            age_min = (now - (j.get("created_at") or now)) / 60.0
+            age = f"{age_min:.0f}m" if age_min < 120 else f"{age_min / 60:.1f}h"
+            label = j.get("title") or " ".join(str(j.get("prompt", "")).split())
+            print(f"  {j['id']:<36} {j.get('status', ''):<10} {age:>6}  "
+                  f"{label[:52]}")
+
+    _out(args, d, human)
 
 
 def cmd_job(args):
@@ -267,7 +302,19 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--cwd")
         sp.add_argument("--agent")
         sp.add_argument("--model")
-        sp.add_argument("--session")
+        sp.add_argument("--session",
+                        help="pin the session to run in (otherwise the "
+                             "dispatcher picks one)")
+        sp.add_argument("--title", help="human handle; you can pass it to "
+                                        "`ab job/events/cancel` instead of the "
+                                        "id. Derived from the prompt if unset")
+        sp.add_argument("--no-fork", dest="fork", action="store_false",
+                        default=True,
+                        help="resume the target session IN PLACE instead of "
+                             "forking it — for a follow-up or guidance message "
+                             "the session must actually see. Requires "
+                             "--session; if that session is mid-turn Claude "
+                             "queues the message for the end of the turn")
         sp.add_argument("--permission-mode", dest="permission_mode")
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="local file to upload with the job (repeatable)")
@@ -306,14 +353,22 @@ def build_parser() -> argparse.ArgumentParser:
     job_flags(sp)
     sp.set_defaults(func=cmd_submit)
 
-    sp = sub.add_parser("job"); sp.add_argument("id"); sp.set_defaults(func=cmd_job)
+    sp = sub.add_parser("jobs", help="recent jobs, with full ids")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.set_defaults(func=cmd_jobs)
 
-    sp = sub.add_parser("events"); sp.add_argument("id")
+    ref_help = "full uuid, a unique id prefix, or the job's title"
+
+    sp = sub.add_parser("job", help="one job, by id, id prefix, or title")
+    sp.add_argument("id", metavar="REF", help=ref_help)
+    sp.set_defaults(func=cmd_job)
+
+    sp = sub.add_parser("events"); sp.add_argument("id", metavar="REF", help=ref_help)
     sp.add_argument("--after", type=int, default=0)
     sp.add_argument("--follow", "-f", action="store_true")
     sp.set_defaults(func=cmd_events)
 
-    sp = sub.add_parser("cancel"); sp.add_argument("id")
+    sp = sub.add_parser("cancel"); sp.add_argument("id", metavar="REF", help=ref_help)
     sp.set_defaults(func=cmd_cancel)
 
     sp = sub.add_parser("upload")

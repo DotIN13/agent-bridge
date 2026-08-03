@@ -26,7 +26,7 @@ from typing import Callable
 
 from ..config import AgentConfig
 from ..sessions import SessionInfo, scan
-from .base import Event, JobSpec, RunResult, _kill_group
+from .base import Event, JobSpec, RunResult, interrupt_group
 
 _RESUME_RE = re.compile(r"--resume[= ]+([0-9a-fA-F-]{36})")
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
@@ -38,16 +38,33 @@ verbatim at:
     TASK_FILE = {task_file}
 ).
 
-Your ONLY job is to route this task to the most appropriate existing Claude Code
-session and run it there by FORKING that session. Do NOT perform the task
-yourself in this dispatcher session.
+Your ONLY job is to route this task to a Claude Code session and run it there.
+Do NOT perform the task yourself in this dispatcher session.
 
 Steps:
+{routing}
+5. The nested command prints a JSON object with "result" and "session_id".
+   After it finishes, output on its own line:
+       session: <target_session_id_or_NEW> -> <session_id_from_json>
+   then output the nested run's "result" text verbatim as your final answer.
+
+Rules:
+- Operate ONLY within these directories: {allowed_dirs}. Never cd elsewhere.
+{fork_rule}
+- Run exactly one nested claude command. Keep your own commentary minimal.
+{attached}
+AVAILABLE SESSIONS (JSON, newest first):
+{sessions_json}
+"""
+
+# -- routing blocks: fork vs resume-in-place, session chosen vs pinned -------
+
+_ROUTE_FORK_CHOOSE = """\
 1. Read AVAILABLE SESSIONS below. Each entry: session_id, cwd, title, summary,
    git_branch, last_active (epoch), messages.
 2. Choose the single session whose cwd and topic best match the task. Prefer a
    session whose cwd is the task's target project.
-3. Execute the task by forking that session, piping the exact task from the file
+3. Execute the task by FORKING that session, piping the exact task from the file
    so quoting is never an issue:
 
        cd <that session's cwd> && cat "{task_file}" | claude \\
@@ -59,20 +76,44 @@ Steps:
 
        cd <dir> && cat "{task_file}" | claude -p \\
            --output-format json --permission-mode {permission_mode}{model_flag}
-
-5. The nested command prints a JSON object with "result" and "session_id".
-   After it finishes, output on its own line:
-       session: <chosen_session_id_or_NEW> -> <new_session_id_from_json>
-   then output the nested run's "result" text verbatim as your final answer.
-
-Rules:
-- Operate ONLY within these directories: {allowed_dirs}. Never cd elsewhere.
-- Always use --fork-session when resuming; never resume in place.
-- Run exactly one nested claude command. Keep your own commentary minimal.
-{attached}
-AVAILABLE SESSIONS (JSON, newest first):
-{sessions_json}
 """
+
+_ROUTE_FORK_PINNED = """\
+1. The caller PINNED the target session: {session}
+   Do not choose a different one; the list below is context only.
+2. Execute the task by FORKING that session, piping the exact task from the file
+   so quoting is never an issue:
+
+       cd <that session's cwd> && cat "{task_file}" | claude \\
+           --resume {session} --fork-session -p \\
+           --output-format json --permission-mode {permission_mode}{model_flag}
+
+   --fork-session guarantees a NEW session id; the original is never mutated.
+4. If that session cannot be resumed, STOP and report why. Do not substitute
+   another session and do not start a fresh one.
+"""
+
+_ROUTE_INPLACE_PINNED = """\
+1. The caller PINNED the target session: {session}
+   Do not choose a different one; the list below is context only.
+2. Execute the task by RESUMING THAT SESSION IN PLACE. Note there is no
+   --fork-session here, and that is deliberate:
+
+       cd <that session's cwd> && cat "{task_file}" | claude \\
+           --resume {session} -p \\
+           --output-format json --permission-mode {permission_mode}{model_flag}
+
+   This APPENDS to that session's own history instead of branching it, which is
+   the whole point: the task is a follow-up instruction or a piece of guidance
+   for work already in that thread, and it must be visible to that thread.
+4. Do NOT fork, and do NOT start a fresh session. If that session cannot be
+   resumed, STOP and report why — a fresh session would silently lose the
+   context this message depends on.
+"""
+
+_FORK_RULE = "- Always use --fork-session when resuming; never resume in place."
+_INPLACE_RULE = ("- Never pass --fork-session. This job must land in the target"
+                 " session's own history, not on a branch of it.")
 
 _SELECTOR_PROMPT = """\
 You are a router. Given a user task and a list of existing Claude Code sessions,
@@ -142,14 +183,35 @@ class ClaudeAdapter:
         f.write_text(spec.prompt + _attached_block(spec.files))
         return str(f)
 
+    def _routing(self, spec: JobSpec, task_file: str, perm: str) -> tuple[str, str]:
+        """Pick the dispatcher's routing steps and its fork rule.
+
+        Forking may either pin a session or let the dispatcher choose.
+        Resume-in-place is always pinned — the server rejects fork=false
+        without a session, since the worker has to know the target up front to
+        check that nothing else is mid-turn in it.
+        """
+        if spec.fork:
+            tpl = _ROUTE_FORK_PINNED if spec.requested_session else _ROUTE_FORK_CHOOSE
+            rule = _FORK_RULE
+        else:
+            if not spec.requested_session:
+                raise ValueError("fork=false requires a session to resume")
+            tpl = _ROUTE_INPLACE_PINNED
+            rule = _INPLACE_RULE
+        return tpl.format(task_file=task_file, permission_mode=perm,
+                          model_flag=self._model_flag(spec),
+                          session=spec.requested_session or ""), rule
+
     # -- mode 1: dispatcher forks + executes itself -----------------------
     def _run_agent_exec(self, spec: JobSpec, emit) -> RunResult:
         task_file = self._write_task_file(spec)
         perm = spec.permission_mode or self.cfg.permission_mode
+        routing, fork_rule = self._routing(spec, task_file, perm)
         system = _DISPATCH_PROMPT.format(
             task_file=task_file,
-            permission_mode=perm,
-            model_flag=self._model_flag(spec),
+            routing=routing,
+            fork_rule=fork_rule,
             allowed_dirs=", ".join(self.cfg.allowed_dirs),
             attached=_attached_block(spec.files),
             sessions_json=self._index_json(spec.cwd),
@@ -175,30 +237,47 @@ class ClaudeAdapter:
 
     # -- mode 2: model selects, worker executes ---------------------------
     def _run_select_then_exec(self, spec: JobSpec, emit) -> RunResult:
-        system = _SELECTOR_PROMPT.format(sessions_json=self._index_json(spec.cwd))
-        sel_args = [
-            self.cfg.bin, "-p", spec.prompt,
-            "--output-format", "json",
-            "--tools", "",
-            "--append-system-prompt", system,
-            "--json-schema", json.dumps(_SELECT_SCHEMA),
-        ]
-        if self.cfg.model:
-            sel_args += ["--model", self.cfg.model]
-        emit(Event("status", {"stage": "selecting"}))
-        sel = _run_json(sel_args, spec.cwd, self.cfg.timeout_sec)
-        choice = _parse_structured(sel)
-        emit(Event("status", {"stage": "selected", "choice": choice}))
-
         target_cwd = spec.cwd
-        chosen = None
-        if choice and not choice.get("start_fresh") and choice.get("session_id"):
-            chosen = choice["session_id"]
-        if choice and choice.get("cwd"):
-            try:
-                target_cwd = self.cfg.resolve_cwd(choice["cwd"])
-            except ValueError:
-                pass
+        chosen = spec.requested_session
+
+        if chosen:
+            # Caller pinned a session; asking the model to re-pick it would
+            # only add a chance of picking something else.
+            emit(Event("status", {"stage": "selected",
+                                  "choice": {"session_id": chosen,
+                                             "reason": "pinned by caller"}}))
+        else:
+            system = _SELECTOR_PROMPT.format(
+                sessions_json=self._index_json(spec.cwd))
+            sel_args = [
+                self.cfg.bin, "-p", spec.prompt,
+                "--output-format", "json",
+                "--tools", "",
+                "--append-system-prompt", system,
+                "--json-schema", json.dumps(_SELECT_SCHEMA),
+            ]
+            if self.cfg.model:
+                sel_args += ["--model", self.cfg.model]
+            emit(Event("status", {"stage": "selecting"}))
+            sel = _run_json(sel_args, spec.cwd, self.cfg.timeout_sec)
+            choice = _parse_structured(sel)
+            emit(Event("status", {"stage": "selected", "choice": choice}))
+
+            if choice and not choice.get("start_fresh") and choice.get("session_id"):
+                chosen = choice["session_id"]
+            if choice and choice.get("cwd"):
+                try:
+                    target_cwd = self.cfg.resolve_cwd(choice["cwd"])
+                except ValueError:
+                    pass
+
+            if not spec.fork:
+                # Unreachable via HTTP (the server rejects it), but a direct
+                # caller must not silently get a fresh session instead.
+                res = RunResult(ok=False)
+                res.error = "fork=false requires a session to resume"
+                emit(Event("error", {"message": res.error}))
+                return res
 
         perm = spec.permission_mode or self.cfg.permission_mode
         exec_args = [self.cfg.bin, "-p", spec.prompt,
@@ -207,7 +286,9 @@ class ClaudeAdapter:
         if spec.files:
             exec_args += ["--append-system-prompt", _attached_block(spec.files)]
         if chosen:
-            exec_args += ["--resume", chosen, "--fork-session"]
+            exec_args += ["--resume", chosen]
+            if spec.fork:
+                exec_args += ["--fork-session"]
         if spec.model or self.cfg.model:
             exec_args += ["--model", spec.model or self.cfg.model]
 
@@ -334,8 +415,10 @@ def _attached_block(files: tuple[str, ...] | list[str]) -> str:
 
 
 def _kill(proc: subprocess.Popen):
-    # reap the whole tree (dispatcher + any nested/forked agent), not just the group
-    _kill_group(proc)
+    # Wall-clock timeout. Interrupt the whole tree (dispatcher + any nested
+    # agent) rather than killing it, so a timed-out run still flushes its
+    # transcript and stays resumable; escalates to SIGKILL if ignored.
+    interrupt_group(proc)
 
 
 def _as_list(x):

@@ -9,8 +9,16 @@ from __future__ import annotations
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
+
+# Cancel escalates rather than killing outright: SIGINT is what the interactive
+# client's ESC maps to, so the agent stops the current turn, flushes its
+# transcript and exits, leaving the session resumable. SIGKILL is the last
+# resort and leaves the transcript mid-write.
+INTERRUPT_GRACE_SEC = 15.0     # SIGINT -> SIGTERM
+TERM_GRACE_SEC = 5.0           # SIGTERM -> SIGKILL
 
 from ..config import AgentConfig
 from ..sessions import SessionInfo
@@ -24,17 +32,18 @@ class Cancellation:
     closing the race between spawn and cancel.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, grace_sec: float = INTERRUPT_GRACE_SEC) -> None:
         self._event = threading.Event()
         self._procs: list = []
         self._lock = threading.Lock()
+        self._grace = grace_sec
 
     def cancel(self) -> None:
         self._event.set()
         with self._lock:
             procs = list(self._procs)
         for p in procs:
-            _kill_group(p)
+            interrupt_group(p, self._grace)
 
     def cancelled(self) -> bool:
         return self._event.is_set()
@@ -44,7 +53,61 @@ class Cancellation:
             self._procs.append(proc)
             already = self._event.is_set()
         if already:
-            _kill_group(proc)
+            interrupt_group(proc, self._grace)
+
+
+def interrupt_group(proc, grace_sec: float = INTERRUPT_GRACE_SEC) -> None:
+    """Stop a run the way ESC does in the interactive client, escalating only
+    if that is ignored.
+
+    SIGINT is delivered to the whole tree — the dispatcher and the nested
+    `claude` it forked — because both are Claude Code processes that treat it
+    as "interrupt this turn". They then wind down and flush, so the session
+    stays resumable and its transcript stays well-formed. SIGKILL does none of
+    that, which is why it is now only the fallback.
+
+    Descendants are captured up front: once the parent dies they reparent to
+    init and become unfindable, so a late escalation would miss them.
+    """
+    pid = proc.pid
+    victims = _descendants(pid)
+    _signal_all(victims + [pid], signal.SIGINT)
+
+    if _settled(proc, victims, grace_sec):
+        return
+    _signal_all([p for p in victims if _alive(p)] +
+                ([pid] if proc.poll() is None else []), signal.SIGTERM)
+    if _settled(proc, victims, TERM_GRACE_SEC):
+        return
+    _kill_group(proc)
+
+
+def _signal_all(pids, sig) -> None:
+    """Send `sig` to each pid and to its process group."""
+    for target in pids:
+        for send in (lambda t: os.killpg(t, sig), lambda t: os.kill(t, sig)):
+            try:
+                send(target)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _settled(proc, victims: list[int], timeout: float) -> bool:
+    """Wait for the parent and every captured descendant to exit."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None and not any(_alive(p) for p in victims):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _kill_group(proc) -> None:
@@ -112,6 +175,8 @@ class JobSpec:
     model: str | None              # override; None -> adapter default
     cancel: Cancellation | None = None  # set by the worker; adapter binds procs
     files: tuple[str, ...] = ()    # absolute paths of attached files (readable by the job)
+    title: str = ""                # human handle for the job
+    fork: bool = True              # False -> resume the target session in place
 
 
 @dataclass

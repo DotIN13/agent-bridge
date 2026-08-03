@@ -79,7 +79,7 @@ class WorkerPool:
             self._fail(job_id, f"unknown agent '{agent_name}'")
             return
 
-        cancel = Cancellation()
+        cancel = Cancellation(grace_sec=self.cfg.cancel_grace_sec)
         with self._lock:
             if job_id in self._cancel_requested:
                 # canceled while queued; cancel() already finalized the row
@@ -102,6 +102,10 @@ class WorkerPool:
                 model=job["model"],
                 cancel=cancel,
                 files=tuple(json.loads(job["files"]) if job["files"] else ()),
+                title=job.get("title") or "",
+                # NULL on rows created before the column existed -> fork, the
+                # historical behaviour.
+                fork=job.get("fork") is None or bool(job["fork"]),
             )
             adapter = build_adapter(agent_cfg)
 

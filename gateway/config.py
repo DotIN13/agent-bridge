@@ -19,7 +19,12 @@ _MODEL_FIELDS = ("id", "alias", "tier", "context", "input_per_mtok",
 _DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8787},
     "auth": {"token": ""},
-    "worker": {"concurrency": 2},
+    "worker": {
+        "concurrency": 2,
+        # Cancel sends SIGINT first (the ESC equivalent) and only escalates if
+        # the agent hasn't wound down within this many seconds.
+        "cancel_grace_sec": 15,
+    },
     "db": {"path": "gateway.db"},
     "cluster": {
         "enabled": True,
@@ -91,6 +96,7 @@ class Config:
     concurrency: int
     db_path: str          # absolute
     data_dir: str         # absolute
+    cancel_grace_sec: float = 15.0
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -205,6 +211,7 @@ def load(path: str | os.PathLike | None) -> Config:
         port=int(raw["server"]["port"]),
         token=token,
         concurrency=int(raw["worker"]["concurrency"]),
+        cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
         db_path=str(db_path),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),

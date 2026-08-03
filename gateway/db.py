@@ -7,6 +7,7 @@ the in-memory Bus, so the lock is held only briefly.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -19,6 +20,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     status            TEXT NOT NULL,          -- queued|running|succeeded|failed|canceled
     agent             TEXT NOT NULL,
     prompt            TEXT NOT NULL,
+    title             TEXT,                   -- human handle, shown in listings
+    title_norm        TEXT,                   -- folded form used for lookup
+    fork              INTEGER,                -- 1 fork a session, 0 resume in place
     cwd               TEXT,
     requested_session TEXT,                   -- caller hint (optional)
     chosen_session    TEXT,                   -- session the dispatcher forked
@@ -48,6 +52,28 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id, seq);
 TERMINAL = {"succeeded", "failed", "canceled"}
 
 
+def norm_title(title: str) -> str:
+    """Fold a title into a lookup key: lowercase, runs of non-alphanumerics
+    collapsed to '-'. So `--title "Rebuild corpora"` can later be addressed as
+    `rebuild-corpora`, which is what actually gets typed on a command line."""
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")
+
+
+def derive_title(prompt: str, limit: int = 60) -> str:
+    """A title from the first meaningful line of the prompt.
+
+    Auto-derived so every job has a handle even when the caller sets none —
+    otherwise the feature only helps people who remember to use it. Leading
+    markdown hashes are stripped, since prompts here usually open with a
+    heading.
+    """
+    for line in (prompt or "").splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line:
+            return line[:limit].rstrip()
+    return ""
+
+
 class Database:
     def __init__(self, path: str) -> None:
         self._lock = threading.Lock()
@@ -63,8 +89,25 @@ class Database:
     def _migrate(self) -> None:
         """Add columns introduced after a db was first created."""
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
-        if "files" not in cols:
-            self._conn.execute("ALTER TABLE jobs ADD COLUMN files TEXT")
+        for name, decl in (("files", "TEXT"), ("title", "TEXT"),
+                           ("title_norm", "TEXT"), ("fork", "INTEGER")):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs(title_norm)")
+        self._backfill_titles()
+
+    def _backfill_titles(self) -> None:
+        """Give pre-existing rows a title too, so `ab jobs` isn't half blank
+        and old jobs stay addressable by name."""
+        rows = self._conn.execute(
+            "SELECT id, prompt FROM jobs WHERE title IS NULL OR title=''"
+        ).fetchall()
+        for r in rows:
+            t = derive_title(r["prompt"])
+            self._conn.execute(
+                "UPDATE jobs SET title=?, title_norm=? WHERE id=?",
+                (t, norm_title(t), r["id"]))
 
     # ---- jobs -----------------------------------------------------------
     def create_job(
@@ -76,14 +119,19 @@ class Database:
         requested_session: str | None,
         permission_mode: str | None,
         model: str | None,
+        title: str | None = None,
+        fork: bool = True,
     ) -> str:
         job_id = str(uuid.uuid4())
+        title = (title or "").strip() or derive_title(prompt)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO jobs (id, status, agent, prompt, cwd, requested_session,"
-                " permission_mode, model, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                " permission_mode, model, title, title_norm, fork, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, "queued", agent, prompt, cwd, requested_session,
-                 permission_mode, model, time.time()),
+                 permission_mode, model, title, norm_title(title),
+                 1 if fork else 0, time.time()),
             )
             self._conn.commit()
         return job_id
@@ -116,10 +164,49 @@ class Database:
             ).fetchone()
         return dict(row) if row else None
 
+    def find_jobs_by_title(self, title: str, limit: int = 10) -> list[dict]:
+        """Jobs whose title matches `title` after folding, newest first.
+
+        Titles are not unique — the same task resubmitted keeps its name — so
+        this can legitimately return several and the caller must disambiguate
+        rather than guess.
+        """
+        key = norm_title(title)
+        if not key:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE title_norm=?"
+                # rowid breaks created_at ties: two jobs submitted in the same
+                # clock tick must still order deterministically.
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (key, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_jobs_by_prefix(self, prefix: str, limit: int = 10) -> list[dict]:
+        """Jobs whose id starts with `prefix`, newest first.
+
+        Uses substr() rather than LIKE so `%` and `_` in caller input stay
+        literal instead of turning into wildcards.
+        """
+        if not prefix:
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE substr(id, 1, ?) = ?"
+                # rowid breaks created_at ties: two jobs submitted in the same
+                # clock tick must still order deterministically.
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (len(prefix), prefix, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_jobs(self, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
 

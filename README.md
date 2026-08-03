@@ -77,11 +77,19 @@ All routes except `/health`, `/llms.txt`, and `/v1/help` require
 | POST | `/v1/jobs` | enqueue a prompt → `202 {id}` |
 | GET  | `/v1/jobs` | recent jobs |
 | GET  | `/v1/jobs/{id}` | job row (status, result, session ids, cost) |
-| POST | `/v1/jobs/{id}/cancel` | cancel a queued/running job (kills the agent) |
+| POST | `/v1/jobs/{id}/cancel` | cancel a queued/running job (SIGINT, like ESC; escalates only if ignored) |
 | GET  | `/v1/jobs/{id}/events?after=N` | **SSE** stream, or one-shot JSON poll |
 | POST | `/v1/files` | upload files (JSON inline or multipart) → remote paths |
 | GET  | `/v1/files/list?dir=&glob=&recursive=` | list files within an allowed dir |
 | GET  | `/v1/files/content?path=` | stream a file back (artifacts, result CSVs) |
+
+`{id}` accepts a full uuid, the job's `title`, or a unique id prefix; an
+ambiguous reference is a `409` listing the candidates rather than a guess.
+Submit with `"fork": false` (plus a `session`) to queue a prompt into that
+session **in place** instead of branching it — for a follow-up or guidance
+message the session itself has to see. A busy target is fine; `--resume` queues
+it for the end of the current turn. See
+[API.md](API.md#fork-vs-resume-in-place).
 
 **Driving it from an LLM agent:** point the agent at `GET /llms.txt` first — it
 returns the whole contract (endpoints, body schema, event types, this instance's
