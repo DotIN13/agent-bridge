@@ -150,6 +150,13 @@ prints where it wrote — a message is never silently lost. It finds the gateway
 via `--url` → `$AB_URL` → `<data_dir>/gateway-endpoint.json`, never assuming
 loopback (on a compute node `127.0.0.1` is that node).
 
+The HTTP path needs the **bearer token**, resolved as `--token` → `$AB_TOKEN` →
+`<data_dir>/.token`. So `AB_DATA_DIR` in the job's `--export` is what enables
+tier 1 at all — it locates both the endpoint file and the token. Without a
+token it quietly falls to the shared filesystem. Never pass the token itself
+through `--export`; job environments leak into scheduler metadata on shared
+clusters.
+
 **Prompt shape for batch work**, learned the hard way:
 
 - Lead with the **action**, not a prohibition. Opening with "do NOT wait for the

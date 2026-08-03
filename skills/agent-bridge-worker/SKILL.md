@@ -83,9 +83,19 @@ ab-notify --status failed   --msg-file "$RUNS/error.log"
 | `--status failed --msg-file PATH` | the error text, from a file — don't cram a stack trace through a shell argument |
 | `--msg-file` | any long or multi-line message; avoids quoting bugs |
 
-`AB_JOB_ID` and `AB_DATA_DIR` must be exported into the job — the first
-identifies the job, the second is where `.token` and `gateway-endpoint.json`
-live.
+**`AB_JOB_ID` and `AB_DATA_DIR` must both be exported into the job.** The first
+identifies the job. The second is how `ab-notify` finds two things it needs:
+`gateway-endpoint.json` (where the gateway is) and `.token` (the bearer token
+for the HTTP path).
+
+Token resolution is `--token` → `$AB_TOKEN` → `<data_dir>/.token`. Without one,
+HTTP is skipped and the message falls to the shared filesystem — still
+delivered, just not immediately; stderr will say `http: no token found`.
+
+**Never put the token in the script or in `--export`.** Job environments and
+submit lines show up in scheduler metadata and accounting records that other
+users on a shared cluster can often read. Let it be read from `.token`, which is
+mode `0600` and already protected by the filesystem.
 
 `ab-notify` tries HTTP, then a shared-filesystem JSONL, then local `/tmp`, and
 prints where it wrote. **It exits 0 even when every path fails**, so it will

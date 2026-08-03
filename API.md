@@ -252,6 +252,13 @@ Use the **`ab-notify`** helper from inside an sbatch rather than curl directly �
 it falls back to a shared-filesystem JSONL, then to local `/tmp`, if the gateway
 is unreachable from the node.
 
+Like every other authed route this needs `Authorization: Bearer <token>`.
+`ab-notify` resolves it as `--token` → `$AB_TOKEN` → `<data_dir>/.token`, so
+exporting `AB_DATA_DIR` into the batch job is what makes the HTTP path usable;
+without a token it silently takes the filesystem fallback. Don't put the token
+in a job script or `--export` — job environments surface in scheduler metadata
+that other users on a shared cluster can read.
+
 **Why a job needs this at all.** A job's agent turn ends at `sbatch`; the actual
 compute then runs for hours with no connection to the gateway. Without messages
 the only signal is guessing from output-file mtimes, which cannot distinguish

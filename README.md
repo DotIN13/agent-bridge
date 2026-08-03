@@ -136,12 +136,29 @@ From inside an sbatch script:
 ```bash
 export PATH="/path/to/agent-bridge/bin:$PATH"
 export AB_JOB_ID=<the ab job uuid>     # via #SBATCH --export=ALL,AB_JOB_ID=…
+export AB_DATA_DIR=/path/to/agent-bridge
 ab-notify --status running  --msg "vllm up, generating"
 ab-notify --status finished --report "$RUNS/SWAP.md"
 ab-notify --status failed   --msg-file "$RUNS/error.txt"
 ```
 
 Those appear in `ab events <ref>` alongside the agent's own events.
+
+### The HTTP path needs the bearer token
+
+`ab-notify` resolves it as `--token` → `$AB_TOKEN` → `<data_dir>/.token`.
+**`AB_DATA_DIR` is how it finds both the token and `gateway-endpoint.json`**, so
+export it into the job — that one variable enables tier 1.
+
+Without a token, HTTP is skipped and the message falls through to the shared
+filesystem. That still works; you just lose immediate delivery and SSE push,
+and `ab-notify`'s stderr will say `http: no token found`.
+
+**Don't pass the token through `--export` or hardcode it in the script.** Job
+environments and submit lines surface in scheduler metadata and accounting
+records that other users on a shared cluster can often read. Reading `.token`
+(mode `0600`, owned by you) from the shared data dir keeps the secret on disk
+where the filesystem already protects it.
 
 Three write paths, tried in order, so a message is never silently lost:
 
