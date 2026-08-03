@@ -28,9 +28,12 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import socket
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -60,7 +63,41 @@ class Gateway:
         self.cluster = ClusterInfo(cfg.cluster_probe_timeout,
                                    cfg.cluster_env_presence) if cfg.cluster_enabled else None
 
+    def publish_endpoint(self) -> dict:
+        """Record how a *remote* node should reach this gateway.
+
+        `ab-notify` runs on compute nodes, where `127.0.0.1` is that node — not
+        us. Rather than making every sbatch hardcode a hostname, the gateway
+        writes its own reachable URL into the shared data dir (the same place
+        `.token` already lives) and ab-notify reads it.
+
+        When bound to loopback there is no reachable URL, so `url` is null and
+        ab-notify skips its HTTP path immediately instead of burning a timeout
+        per call.
+        """
+        loopback = self.cfg.host in ("127.0.0.1", "localhost", "::1", "")
+        info = {
+            "bound": self.cfg.host,
+            "port": self.cfg.port,
+            "fqdn": socket.getfqdn(),
+            "url": None if loopback else f"http://{socket.getfqdn()}:{self.cfg.port}",
+        }
+        if loopback:
+            info["note"] = ("bound to loopback — unreachable from other nodes; "
+                            "ab-notify will fall back to the shared filesystem. "
+                            "Set [server] host to an internal address to enable "
+                            "HTTP messages from compute nodes.")
+        path = Path(self.cfg.data_dir) / "gateway-endpoint.json"
+        try:
+            path.write_text(json.dumps(info, indent=2) + "\n")
+        except OSError as e:
+            print(f"warning: could not write {path}: {e}", file=sys.stderr)
+        print(f"endpoint for compute nodes: {info['url'] or 'NONE (loopback)'}",
+              flush=True)
+        return info
+
     def serve_forever(self) -> None:
+        self.publish_endpoint()
         uvicorn.run(create_app(self), host=self.cfg.host, port=self.cfg.port,
                     log_level="warning")
 
@@ -210,9 +247,34 @@ def create_app(gw: Gateway) -> FastAPI:
     async def list_jobs(limit: int = 50):
         return {"jobs": gw.db.list_jobs(limit=limit)}
 
+    @app.post("/v1/jobs/{job_id}/message", dependencies=[auth])
+    async def add_message(job_id: str, request: Request):
+        """A running batch job reporting its own lifecycle (see `ab-notify`).
+
+        This is the preferred path: the event lands immediately and is
+        published to the Bus, so SSE subscribers see it. The shared-filesystem
+        JSONL is only the fallback for nodes that cannot reach this endpoint.
+        """
+        job = _resolve_job(job_id)
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be JSON")
+        if not isinstance(data, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        row = await run_in_threadpool(gw.db.add_message, job["id"], data)
+        gw.bus.publish(job["id"], row)
+        return {"id": job["id"], "seq": row["seq"]}
+
     @app.get("/v1/jobs/{job_id}", dependencies=[auth])
     async def get_job(job_id: str):
-        return _resolve_job(job_id)
+        job = _resolve_job(job_id)
+        # Pick up anything ab-notify had to drop on the shared filesystem.
+        # Deliberately here and not in db.get_job(): the worker, _resolve_job
+        # and cancel all call that internally, and ingest must not fire on
+        # every internal lookup.
+        await run_in_threadpool(gw.db.ingest_messages, job["id"], cfg.messages_dir)
+        return gw.db.get_job(job["id"])
 
     @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth])
     async def cancel_job(job_id: str):
@@ -229,6 +291,7 @@ def create_app(gw: Gateway) -> FastAPI:
     async def job_events(job_id: str, request: Request, after: int = 0):
         job = _resolve_job(job_id)
         job_id = job["id"]          # events are keyed by the full id
+        await run_in_threadpool(gw.db.ingest_messages, job_id, cfg.messages_dir)
         start = _parse_after(after, request.headers.get("last-event-id"))
         if "text/event-stream" not in request.headers.get("accept", ""):
             evs = gw.db.events_after(job_id, start)

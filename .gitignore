@@ -8,5 +8,7 @@ client/gateways.json
 *.db-wal
 *.db-shm
 jobs/
+messages/
+gateway-endpoint.json
 __pycache__/
 *.pyc

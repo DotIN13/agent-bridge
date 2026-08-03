@@ -166,9 +166,52 @@ class ClaudeAdapter:
         return _attached_block(spec.files).strip()
 
     def run(self, spec: JobSpec, emit: Callable[[Event], None]) -> RunResult:
+        if self.cfg.dispatch_mode == "direct":
+            return self._run_direct(spec, emit)
         if self.cfg.dispatch_mode == "select_then_exec":
             return self._run_select_then_exec(spec, emit)
         return self._run_agent_exec(spec, emit)
+
+    # -- mode 0 (default): no router in the path --------------------------
+    def _run_direct(self, spec: JobSpec, emit) -> RunResult:
+        """Execute in the session the caller named. No model decides routing.
+
+        The dispatcher modes below put a whole Claude session in front of every
+        job purely to choose a fork target. That is nondeterministic, costs a
+        session per job, silently drops `--model` (a fork inherits its parent's),
+        and — because forks inherit context — trained sessions to answer with
+        "I'll report back" instead of working. The caller already knows which
+        session it wants; it should just say so.
+
+        No session given means start a fresh one.
+        """
+        perm = spec.permission_mode or self.cfg.permission_mode
+        args = [self.cfg.bin, "-p", spec.prompt,
+                "--output-format", "stream-json", "--verbose",
+                "--permission-mode", perm]
+        if spec.requested_session:
+            args += ["--resume", spec.requested_session]
+            if spec.fork:
+                args += ["--fork-session"]
+        elif not spec.fork:
+            res = RunResult(ok=False)
+            res.error = "fork=false requires a session to resume"
+            emit(Event("error", {"message": res.error}))
+            return res
+        if spec.model or self.cfg.model:
+            args += ["--model", spec.model or self.cfg.model]
+        if spec.files:
+            args += ["--append-system-prompt", _attached_block(spec.files)]
+        for d in _parent_dirs(spec.files):
+            args += ["--add-dir", d]
+
+        emit(Event("status", {"stage": "direct",
+                              "session": spec.requested_session or "NEW",
+                              "fork": spec.fork}))
+        res = RunResult(ok=False, chosen_session=spec.requested_session)
+        self._stream(args, spec.cwd, emit, res, capture_nested=False,
+                     cancel=spec.cancel)
+        return res
 
     def _model_flag(self, spec: JobSpec) -> str:
         model = spec.model or self.cfg.model

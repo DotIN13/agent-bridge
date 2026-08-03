@@ -7,12 +7,20 @@ the in-memory Bus, so the lock is held only briefly.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import threading
 import time
 import uuid
 from typing import Any, Iterable
+
+# Seq bands keep the three writers from ever colliding on (job_id, seq).
+# Worker events count up from 1; messages live far above anything a run will
+# reach. File-ingested seqs derive from line number, which makes re-reading a
+# file a no-op under INSERT OR IGNORE — no cursor, no offset bookkeeping.
+MSG_SEQ_HTTP_BASE = 1_000_000
+MSG_SEQ_FILE_BASE = 2_000_000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -226,6 +234,67 @@ class Database:
             )
             self._conn.commit()
         return row
+
+    # ---- messages from batch jobs ---------------------------------------
+    # A job's compute-node script reports its own lifecycle with `ab-notify`.
+    # Preferred path is HTTP (immediate, and publishes to the Bus so SSE sees
+    # it); a shared-filesystem JSONL is the fallback for when the gateway is
+    # unreachable from the node.
+    #
+    # Batch jobs cannot write this DB directly: it runs in WAL mode, whose
+    # index is mmap'd shared memory and therefore requires every writer on one
+    # host. Appending short lines with O_APPEND needs no locking at all.
+
+    def add_message(self, job_id: str, data: dict) -> dict:
+        """Record a message posted over HTTP; returns the event row."""
+        ts = float(data.get("ts") or time.time())
+        with self._lock:
+            top = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), ?) FROM events"
+                " WHERE job_id=? AND seq >= ? AND seq < ?",
+                (MSG_SEQ_HTTP_BASE - 1, job_id,
+                 MSG_SEQ_HTTP_BASE, MSG_SEQ_FILE_BASE),
+            ).fetchone()[0]
+            seq = top + 1
+            self._conn.execute(
+                "INSERT INTO events (job_id, seq, ts, type, data)"
+                " VALUES (?,?,?,?,?)",
+                (job_id, seq, ts, "message", json.dumps(data)),
+            )
+            self._conn.commit()
+        return {"job_id": job_id, "seq": seq, "ts": ts,
+                "type": "message", "data": data}
+
+    def ingest_messages(self, job_id: str, messages_dir: str) -> int:
+        """Fold any `ab-notify` fallback lines for this job into events.
+
+        Idempotent: seq is derived from line number, so re-reading inserts
+        nothing new.
+        """
+        path = os.path.join(messages_dir, f"{job_id}.jsonl")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        except OSError:
+            return 0
+        added = 0
+        with self._lock:
+            for i, ln in enumerate(lines):
+                try:
+                    data = json.loads(ln)
+                except ValueError:
+                    data = {"status": "unknown", "raw": ln[:2000]}
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO events (job_id, seq, ts, type, data)"
+                    " VALUES (?,?,?,?,?)",
+                    (job_id, MSG_SEQ_FILE_BASE + i,
+                     float(data.get("ts") or time.time()),
+                     "message", json.dumps(data)),
+                )
+                added += cur.rowcount or 0
+            if added:
+                self._conn.commit()
+        return added
 
     def events_after(self, job_id: str, after_seq: int) -> list[dict]:
         with self._lock:

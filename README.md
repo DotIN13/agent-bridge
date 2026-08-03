@@ -1,217 +1,238 @@
 # agent-bridge
 
-An HTTP gateway that accepts prompts, runs them through a coding agent in the
-**right existing session** (by forking it), and returns results. Built for a
-shared HPC login node: stdlib-only Python, localhost-bound, queue-worker model,
-SQLite-backed logs that downstream apps can **SSE-stream or poll**.
+An HTTP gateway that accepts prompts, runs them through a coding agent in a
+**named session** on a remote machine, and streams results back. Built for a
+shared HPC login node: stdlib-only clients, localhost-bound, queue-worker model,
+SQLite-backed logs you can **SSE-stream or poll**.
 
 Claude Code is the first backend; `opencode` / `antigravity-cli` slot in behind
 the same adapter interface (`gateway/adapters/`).
 
 ```
-HTTP client ──POST /v1/jobs──▶ queue ──▶ worker ──▶ ClaudeAdapter
-     ▲                                                   │
-     └── SSE / poll /v1/jobs/{id}/events ◀── SQLite ◀────┘ (events + result)
+laptop ──POST /v1/jobs──▶ queue ──▶ worker ──▶ claude --resume <session>
+   ▲                                                │
+   │                                                ▼
+   └── GET /v1/jobs/{id}/events ◀── SQLite ◀── events + result
+                    ▲
+                    └── ab-notify ◀── your sbatch, hours later
 ```
+
+That last arrow is the point. A job's agent turn ends when it runs `sbatch`;
+the actual compute then runs for hours with no connection to the gateway.
+`ab-notify` lets the batch job report its own lifecycle into the same event
+stream, so **one handle covers the whole thing**.
 
 ## Why it's shaped this way (login-node constraints)
 
-- **Duo on every SSH login.** You can't open a fresh SSH connection per task.
-  So the gateway runs on the node behind **one** SSH port-forward; all agents
-  talk HTTP to the forwarded port. One Duo push, then unlimited requests.
-  (Windows can't multiplex SSH — `ControlMaster` is unsupported — so a single
-  forwarded port is the portable answer.)
-- **Localhost bind + bearer token.** The node is multi-user; nothing listens on
-  a public interface. Reach it over the SSH tunnel.
-- **Server is FastAPI/uvicorn in a venv; the MCP client is stdlib.** The gateway
-  deps (`fastapi`, `uvicorn`, `python-multipart`) install into `.venv` via `uv`
-  (`run.sh` does it on first launch). The local clients (`client/`, CLI + MCP)
-  stay dependency-free.
+- **Duo on every SSH login.** You can't open a fresh connection per task, so the
+  gateway runs on the node behind **one** port-forward. One Duo push, then
+  unlimited requests. (Windows has no `ControlMaster`, so a single forwarded
+  port is the portable answer.)
+- **Localhost bind + bearer token.** The node is multi-user. Reach it over the
+  tunnel. (Exception: if you want `ab-notify`'s HTTP path to work from compute
+  nodes, bind an internal address — see [Messages](#messages-from-batch-jobs).)
+- **Server is FastAPI in a venv; clients are stdlib.** `run.sh` installs server
+  deps on first launch. `client/` stays dependency-free.
 
 ## Run it
 
-On the login node, inside a persistent tmux (survives disconnect; the node has
-no process reaper and linger is on):
+On the login node, inside a persistent tmux:
 
 ```bash
-ssh midway5                 # one Duo push  (see ~/.ssh/config note below)
+ssh midway5                 # one Duo push
 tmux new -s gw
 cd /project/jevans/tzhang3/agent-bridge
-cp config.example.toml config.toml   # then edit allowed_dirs etc.
+cp config.example.toml config.toml   # then edit allowed_dirs
 ./run.sh
 ```
 
-It prints the bearer token on startup (auto-generated into `.token` if you left
-`auth.token` empty). From your laptop:
+It prints the bearer token (auto-generated into `.token`). From your laptop:
 
 ```bash
-ssh -L 8787:localhost:8787 midway5    # forwards the gateway over the tunnel
+ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+    -L 8787:localhost:8787 midway5
 ```
 
-Then everything below targets `http://localhost:8787`.
+The keepalives matter — an idle forward drops silently, and every client call
+then fails with `connection refused` in a way that looks like the gateway died.
+`autossh -M 0` with the same flags reconnects automatically.
 
-### As a systemd user service (restarts across reboot)
+### As a systemd user service
 
 ```bash
 loginctl enable-linger $USER
 mkdir -p ~/.config/systemd/user
 cp systemd/agent-bridge.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now agent-bridge
+systemctl --user daemon-reload && systemctl --user enable --now agent-bridge
 ```
 
 ## API
 
-Full reference: **[API.md](API.md)**. Quick tour below.
-
-All routes except `/health`, `/llms.txt`, and `/v1/help` require
-`Authorization: Bearer <token>`.
+Full reference: **[API.md](API.md)**.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/health` | liveness (no auth) |
-| GET  | `/llms.txt` · `/v1/help` | agent-facing usage doc, rendered from live config (no auth) |
-| GET  | `/v1/agents` | configured & known agent backends |
-| GET  | `/v1/info?refresh=1` | this machine's capabilities (host/CPU/RAM, GPUs, Slurm partitions + GPU inventory, allocation balance), cached |
-| GET  | `/v1/sessions?cwd=&agent=` | the session index the dispatcher sees |
-| POST | `/v1/jobs` | enqueue a prompt → `202 {id}` |
-| GET  | `/v1/jobs` | recent jobs |
-| GET  | `/v1/jobs/{id}` | job row (status, result, session ids, cost) |
-| POST | `/v1/jobs/{id}/cancel` | cancel a queued/running job (SIGINT, like ESC; escalates only if ignored) |
-| GET  | `/v1/jobs/{id}/events?after=N` | **SSE** stream, or one-shot JSON poll |
-| POST | `/v1/files` | upload files (JSON inline or multipart) → remote paths |
-| GET  | `/v1/files/list?dir=&glob=&recursive=` | list files within an allowed dir |
-| GET  | `/v1/files/content?path=` | stream a file back (artifacts, result CSVs) |
+| GET  | `/llms.txt` · `/v1/help` | agent-facing contract, from live config (no auth) |
+| GET  | `/v1/agents` | configured agent backends |
+| GET  | `/v1/info?refresh=1` | host/CPU/RAM, GPUs, Slurm partitions, allocation balance |
+| GET  | `/v1/sessions?cwd=&agent=` | the session index |
+| POST | `/v1/jobs` | enqueue a prompt → `202 {id, title}` |
+| GET  | `/v1/jobs?limit=N` | recent jobs |
+| GET  | `/v1/jobs/{ref}` | job row |
+| POST | `/v1/jobs/{ref}/message` | **a running batch job reporting in** |
+| POST | `/v1/jobs/{ref}/cancel` | interrupt (SIGINT, like ESC) then escalate |
+| GET  | `/v1/jobs/{ref}/events?after=N` | SSE stream, or one-shot JSON poll |
+| POST | `/v1/files` · GET `/v1/files/list` · `/v1/files/content` | inputs and artifacts |
 
-`{id}` accepts a full uuid, the job's `title`, or a unique id prefix; an
-ambiguous reference is a `409` listing the candidates rather than a guess.
-Submit with `"fork": false` (plus a `session`) to queue a prompt into that
-session **in place** instead of branching it — for a follow-up or guidance
-message the session itself has to see. A busy target is fine; `--resume` queues
-it for the end of the current turn. See
-[API.md](API.md#fork-vs-resume-in-place).
-
-**Driving it from an LLM agent:** point the agent at `GET /llms.txt` first — it
-returns the whole contract (endpoints, body schema, event types, this instance's
-allowed dirs, dispatch behavior, examples) as markdown, no token needed. The
-agent then submits jobs and streams results. See [API.md](API.md#llm-agent-usage).
-
-**Submit:**
-
-```bash
-curl -X POST http://localhost:8787/v1/jobs \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"prompt":"add a --verbose flag to cli.py and run the tests",
-       "cwd":"/project/jevans/tzhang3/myrepo"}'
-# -> {"id":"...","status":"queued","agent":"claude","cwd":"..."}
-```
-
-Request body: `prompt` (required), `agent` (default `claude`), `cwd`
-(validated against `allowed_dirs`), `session` (optional hint), `model`,
-`permission_mode`.
-
-**Stream results (SSE):**
-
-```bash
-curl -N http://localhost:8787/v1/jobs/$ID/events \
-  -H "Authorization: Bearer $TOKEN" -H "Accept: text/event-stream"
-```
-
-Each event has an `id:` (per-job seq), an `event:` type, and JSON `data:`.
-Types: `status`, `thinking`, `assistant`, `tool_use`, `tool_result`, `result`,
-`error`, `log`. Reconnect with `?after=<last seq>` (or the `Last-Event-ID`
-header) to replay only newer events — no gaps, no dupes.
-
-**Poll instead** (same URL, `Accept: application/json`): returns
-`{job, events, terminal}` for events after `N`.
-
-`client_example.py` is a ~60-line stdlib client that submits and streams.
+**`{ref}` is a full uuid, the job's title, or a unique id prefix.** An ambiguous
+reference returns `409` with the candidates rather than guessing — which matters
+most for `cancel`.
 
 ## How dispatch works
 
-Per the spec, the dispatcher **is** an agent. For each job the worker launches a
-short Claude session whose appended system prompt (`gateway/adapters/claude.py`,
-`_DISPATCH_PROMPT`) contains a JSON index of recent sessions. It:
+**Default `dispatch_mode = "direct"`: the caller names the session, and the
+worker runs `claude --resume <session> -p` itself. No model decides routing.**
 
-1. picks the session whose cwd/topic best matches the task,
-2. forks it: `cat TASK_FILE | claude --resume <id> --fork-session -p --output-format json`,
-3. runs the task in the fork and reports the answer.
+```bash
+ab submit -F task.md --session <uuid>          # fork that session
+ab submit -F task.md --session <uuid> --no-fork  # append to it in place
+ab submit -F task.md                            # fresh session
+```
 
-`--fork-session` guarantees the original session is never mutated — verified: a
-run against session `86e…` produced a new `1f7…` and left `86e…` byte-identical.
-The task is piped from a file so prompt quoting is never an issue. The worker
-records `chosen_session` and `forked_session` on the job row.
+The two older modes (`agent_exec`, `select_then_exec`) put a whole Claude
+session in front of every job purely to *choose* a fork target. They remain
+available in config, but they are not the default any more, because that design:
 
-Alternative `dispatch_mode = "select_then_exec"` (config): the model only
-*chooses* a session (structured output, no tools) and the worker does the
-fork+exec directly — more deterministic and cheaper, cleaner token-level
-streaming, but the agent isn't "executing itself."
+- is nondeterministic — routing varies run to run
+- costs a full agent session per job
+- **silently ignores `--model`**, since a fork inherits its parent's
+- and, because forks inherit conversational context, trains sessions to reply
+  *"I'll report back"* instead of doing the work
+
+Name the session. If you don't have one, omit `--session` and get a fresh one.
+
+## Messages from batch jobs
+
+A job's agent turn ends at `sbatch`. Everything after that — queue wait, model
+load, hours of compute — is invisible unless the job says something. Without
+this you are reduced to guessing from output-file mtimes, which cannot tell
+"queued" from "died before writing" from "I can't see the filesystem".
+
+From inside an sbatch script:
+
+```bash
+export AB_JOB_ID=<the ab job uuid>     # via #SBATCH --export=ALL,AB_JOB_ID=…
+ab-notify --status running  --msg "vllm up, generating"
+ab-notify --status finished --report "$RUNS/SWAP.md"
+ab-notify --status failed   --msg-file "$RUNS/error.txt"
+```
+
+Those appear in `ab events <ref>` alongside the agent's own events.
+
+Three write paths, tried in order, so a message is never silently lost:
+
+| | Target | Notes |
+|---|---|---|
+| 1 | `POST /v1/jobs/{id}/message` | immediate; published to the bus so SSE sees it |
+| 2 | `<data_dir>/messages/<jobid>.jsonl` | shared filesystem; ingested on read |
+| 3 | `${TMPDIR}/agent-bridge-messages/<jobid>.jsonl` | last resort, path printed |
+
+### How `ab-notify` finds the gateway
+
+**It never assumes loopback.** On a compute node `127.0.0.1` is *that node*, so
+a loopback default would fail every call after burning a connect timeout.
+
+At startup the gateway writes `<data_dir>/gateway-endpoint.json` — the same
+shared directory `.token` already lives in:
+
+```json
+{ "bound": "10.50.251.129", "port": 8787,
+  "fqdn": "midway3-login5.rcc.local",
+  "url": "http://midway3-login5.rcc.local:8787" }
+```
+
+`ab-notify` resolves the URL as `--url` → `$AB_URL` → that file. If the gateway
+is bound to loopback it writes `"url": null` plus a note explaining why, and
+`ab-notify` **skips HTTP immediately** rather than timing out — falling straight
+to the shared filesystem.
+
+So tier 1 is available only when `[server] host` is an internal address. Keeping
+it loopback-only is a supported choice; you just lose immediate delivery and SSE
+push for messages.
+
+**Batch jobs must never write `gateway.db` directly.** It runs in WAL mode,
+whose index is mmap'd shared memory and therefore requires every writer on one
+host. Appending JSONL with `O_APPEND` needs no locking at all, which is why the
+fallback is a file and the gateway ingests it.
+
+## Cancel
+
+`POST /v1/jobs/{ref}/cancel` **interrupts** rather than killing: `SIGINT` to the
+whole process tree — the equivalent of pressing ESC — so the agent stops its
+turn, flushes its transcript, and exits, leaving the session resumable. Only if
+it hasn't wound down within `[worker] cancel_grace_sec` (default 15s) does it
+escalate to `SIGTERM`, then `SIGKILL`. `SIGKILL` leaves the transcript
+mid-write, which is what makes a killed session awkward to pick up again.
 
 ## Configuration
 
-See `config.example.toml`. Key knobs: `worker.concurrency` (mind the sshd
-`MaxSessions 10` cap and API cost), `agents.claude.allowed_dirs` (the cwd
-allowlist — the gateway refuses jobs outside it), `permission_mode`
-(`bypassPermissions` for headless; there's no TTY to answer prompts),
-`dispatch_mode`, `model`, `timeout_sec` (`0` = no wall-clock limit; default).
-Any scalar is overridable via
-`AGENT_BRIDGE_<SECTION>_<KEY>` env vars.
+See `config.example.toml`. Key knobs: `worker.concurrency` (mind sshd's
+`MaxSessions` and API cost), `agents.claude.allowed_dirs` (cwd allowlist),
+`dispatch_mode`, `messages.dir`, `cancel_grace_sec`, `timeout_sec` (`0` = no
+limit). Any scalar is overridable via `AGENT_BRIDGE_<SECTION>_<KEY>`.
 
 ## Files (inputs & artifacts)
 
-Send inputs with a job and pull results back — all sandboxed to `allowed_dirs`:
+- **Upload + submit in one call** — `POST /v1/jobs` takes a `files` array (JSON
+  inline or `{path}` refs) or multipart. Uploads land in a per-user `0700` store
+  and are surfaced to the agent as *ATTACHED FILES*.
+- **Fetch artifacts** — `GET /v1/files/list?dir=&glob=` then
+  `GET /v1/files/content?path=`.
+- **Large data** → `rsync` into an allowed dir and pass `{"path": …}`.
 
-- **Upload + submit in one call.** `POST /v1/jobs` accepts a `files` array (JSON
-  inline: `{name, content_b64|text}` or `{path}` reference) **or** multipart
-  (`payload` JSON field + file parts). Uploads land in a **per-user file store**
-  (a `$TMPDIR` dir by default, created `0700`), and their absolute paths are
-  surfaced to the agent as *ATTACHED FILES* (readable by the forked agent and
-  downloadable, even though the store may sit outside `allowed_dirs`).
-- **Fetch artifacts.** `GET /v1/files/list?dir=&glob=` to discover, then
-  `GET /v1/files/content?path=` to stream a file back (result CSVs, etc.).
-- **Large data** → `scp`/`rsync` into an allowed dir over your SSH session and
-  pass `{"path": ...}`; caps (`max_file_mb`, `max_request_mb`) bound HTTP uploads.
+CLI: `ab upload` / `ab download` / `ab ls`, or `--upload`/`--file` on submit.
 
-From a client: `--upload`/`--file` on `ab run` (or `upload`/`files` on the MCP
-`run_prompt`), plus `ab upload` / `ab download` / `ab ls`.
+## Local clients
 
-## Local clients (CLI + MCP)
+Stdlib-only, sharing one transport (`abclient.py`). See
+[client/README.md](client/README.md).
 
-Drive one or more gateways from your laptop over the SSH port-forward(s). Both
-front ends live in [`client/`](client/README.md), stdlib-only, sharing one
-transport module (`abclient.py`):
+```bash
+python3 client/ab.py jobs                       # recent jobs, full ids + titles
+python3 client/ab.py submit -F task.md --title nightly --session <uuid>
+python3 client/ab.py events nightly --follow    # by title
+python3 client/ab.py download --dir /project/.../out --glob '*.csv' --to ./out
+```
 
-- **`ab` CLI (recommended)** — any shell/human/script/agent uses it; Claude Code
-  drives it via Bash:
-  ```bash
-  python3 client/ab.py run "run the tests" --cwd /project/jevans/tzhang3/myrepo
-  python3 client/ab.py run "profile it" --upload ./train.csv --stream
-  python3 client/ab.py download --dir /project/.../out --glob '*.csv' --to ./results
-  ```
-- **MCP server** — for MCP clients:
-  ```bash
-  claude mcp add agent-bridge -- \
-      python3 /path/to/client/agent_bridge_mcp.py --config ~/.config/agent-bridge/gateways.json
-  ```
+## Recovering a job's output when the API can't help
 
-See [client/README.md](client/README.md) for all commands/tools and config.
+Session transcripts live on disk and are readable through `ab ls`/`ab download`:
+
+```
+/home/<user>/.claude/projects/-project-<slug>/<session-id>.jsonl
+```
+
+Transcript size doubles as a liveness signal (still growing = still working),
+and the file is the result channel for a job whose text you can't otherwise
+retrieve. Useful when a job row is stale or a run wrote no files.
 
 ## Adding an agent backend
 
-Implement `list_sessions()` and `run(spec, emit)` in a new
-`gateway/adapters/<name>.py` (see `base.py` / `claude.py`), then register it in
-`gateway/adapters/__init__._REGISTRY`. Emit `Event`s as the run progresses and
-return a `RunResult`; queueing, persistence, SSE, and auth are handled for you.
+Implement `list_sessions()` and `run(spec, emit)` in
+`gateway/adapters/<name>.py`, register it in `adapters/__init__._REGISTRY`.
+Queueing, persistence, SSE and auth are handled for you.
 
 ## Caveats
 
-- **Login5-specific.** The gateway lives on one login node; `midway3.rcc`
-  round-robins, so your tunnel must target `midway3-login5` explicitly, and it
-  dies with that node's reboot (systemd + linger brings it back after).
-- **Auth for `claude` must be non-interactive.** The forked runs reuse your
-  `~/.claude` credential; if that expires, jobs fail until you re-auth.
-- **Policy.** Login nodes are for light work. Keep `concurrency` low and don't
-  run heavy compute here — submit those to Slurm from within a job.
-- **bypassPermissions** lets the agent edit files and run commands freely inside
-  `allowed_dirs`. Scope that list to what you actually want reachable.
-```
+- **One login node.** `midway3.rcc` round-robins, so target `midway3-login5`
+  explicitly. Systemd + linger brings the gateway back after a reboot.
+- **`claude` auth must be non-interactive.** Runs reuse `~/.claude`; if that
+  expires, jobs fail until you re-auth.
+- **Login nodes are for light work.** Keep `concurrency` low; submit real
+  compute to Slurm from inside a job.
+- **`bypassPermissions`** lets the agent edit and execute freely inside
+  `allowed_dirs`. Scope that list deliberately.
+- **A stale `running` row is not proof of life.** A job whose session died on a
+  usage limit can sit in `running` indefinitely. Cross-check the session or a
+  recent `ab-notify` message.

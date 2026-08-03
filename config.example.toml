@@ -23,6 +23,16 @@ cancel_grace_sec = 15
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 
+[messages]
+# Where `ab-notify` drops a message when it cannot reach the gateway over HTTP.
+# Must be on a filesystem the COMPUTE NODES share with the login node (GPFS
+# /project, not /tmp). Relative paths resolve against the data dir.
+#
+# Batch jobs never write gateway.db directly: it runs in WAL mode, whose index
+# is mmap'd shared memory and so requires every writer on one host. Appending
+# JSONL with O_APPEND needs no locking; the gateway ingests it on read.
+dir = "messages"
+
 [files]
 # File upload/download surface (/v1/files, and files attached to jobs).
 # dir = ""  -> per-user store under the system temp dir (tempfile.gettempdir(),
@@ -49,11 +59,19 @@ env_presence = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
 [agents.claude]
 bin = "claude"
 # Dispatch mode:
-#   "agent_exec"       -> the model finds the right session, forks it, and runs the
-#                         task itself (via its own Bash tool). Matches the spec.
-#   "select_then_exec" -> the model only returns a session id; the worker forks+execs
-#                         it directly (cleaner streaming, more deterministic).
-dispatch_mode = "agent_exec"
+#   "direct"           -> DEFAULT. Run in the session the caller named (--session),
+#                         or a fresh one if none. No routing model in the path.
+#   "agent_exec"       -> a dispatcher session finds a session, forks it, and runs
+#                         the task via its own Bash tool.
+#   "select_then_exec" -> the model only returns a session id; the worker forks and
+#                         execs it directly.
+#
+# The two dispatcher modes put a whole Claude session in front of every job just
+# to choose a fork target. That is nondeterministic, costs a session per job, and
+# silently ignores --model (a fork inherits its parent's). Because forks also
+# inherit conversational context, dispatched sessions learned to reply "I'll
+# report back" instead of working. Prefer "direct" and name the session.
+dispatch_mode = "direct"
 permission_mode = "bypassPermissions"
 model = ""                 # empty = account default
 default_cwd = "/project/jevans/tzhang3/agent-bridge"

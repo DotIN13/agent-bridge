@@ -15,13 +15,23 @@ Base URL is wherever the gateway is reachable — over the SSH port-forward that
 ## Job lifecycle
 
 ```
-POST /v1/jobs           GET /v1/jobs/{id}/events (SSE)  or  GET /v1/jobs/{id} (poll)
+POST /v1/jobs           GET /v1/jobs/{ref}/events (SSE)  or  GET /v1/jobs/{ref} (poll)
       │                                    │
    queued ──▶ running ──▶ succeeded | failed | canceled
+                                     │
+                     POST /v1/jobs/{ref}/message  ◀── ab-notify, hours later
 ```
 
 `queued` and `running` are non-terminal; the other three are terminal. A job is
-one prompt, run by one agent, in one directory, in a forked session.
+one prompt, run by one agent, in one directory, in one session.
+
+**A terminal job is not necessarily finished work.** If the agent's task was to
+submit an sbatch, the job reaches `succeeded` the moment the submission returns
+— the compute then runs for hours. `ab-notify` messages keep arriving on that
+job's event stream afterwards, which is what makes one reference cover the whole
+lifecycle. See [`POST /v1/jobs/{id}/message`](#post-v1jobsidmessage).
+
+`{ref}` throughout is a full uuid, the job's **title**, or a unique id prefix.
 
 ---
 
@@ -98,8 +108,9 @@ per-node dump. Configure via `[cluster]` in `config.toml` (`enabled`,
 `probe_timeout_sec`, `env_presence`).
 
 ### `GET /v1/sessions?cwd=<dir>&agent=<name>`
-The session index the dispatcher chooses from. `cwd` (optional) sorts sessions
-under that directory first; `agent` (optional) defaults to the default agent.
+The session index — **how you pick a `session` to pass to `POST /v1/jobs`**
+under the default `direct` dispatch mode. `cwd` (optional) sorts sessions under
+that directory first; `agent` (optional) defaults to the default agent.
 ```json
 { "sessions": [
   { "session_id": "86e8bafe-…", "cwd": "/project/…/agent-bridge",
@@ -119,7 +130,7 @@ Request body:
 | `prompt` | string | **yes** | the task; runs in a forked session at `cwd` |
 | `cwd` | string | no | absolute dir; must be within an allowed dir or `400`. Defaults to the agent's `default_cwd` |
 | `agent` | string | no | one of `/v1/agents`; defaults to `default` |
-| `session` | string | no | pin the target session. The dispatcher uses it instead of choosing, and will not silently substitute another. **Required** when `fork` is `false` |
+| `session` | string | no | the session to run in. Omit for a fresh one. **Required** when `fork` is `false`. Under `direct` mode this is the whole routing decision — nothing substitutes another session |
 | `title` | string | no | human handle for the job. Derived from the prompt's first line when omitted, so every job has one. Pass it wherever an `{id}` is accepted |
 | `fork` | bool | no | default `true`. `false` queues the prompt into the target session **in place** — see [Fork vs resume-in-place](#fork-vs-resume-in-place) |
 | `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id. See [`/v1/models`](#get-v1models--agentname) for what this agent offers |
@@ -148,7 +159,7 @@ curl -s -X POST http://localhost:8787/v1/jobs \
 
 **`session` is required.** `fork:false` on its own is a `400`. An in-place write
 lands permanently in whichever session receives it, so the target is never
-resolved to "whatever the dispatcher likes" — you name it or it doesn't run.
+inferred — you name it or it doesn't run.
 
 A busy target is fine: `--resume` queues the message and Claude picks it up at
 the end of the current turn, so the gateway does not gate on liveness.
@@ -211,7 +222,7 @@ silent pick of the newest. That matters most for `cancel`.
 | `id`, `status`, `agent`, `prompt`, `cwd`, `requested_session` | as submitted |
 | `title` | human handle (given or derived); `title_norm` is its folded lookup key |
 | `fork` | `1` forked a session, `0` resumed one in place |
-| `chosen_session` | session the dispatcher forked (or `null`) |
+| `chosen_session` | session the job ran against (or `null` if it started fresh) |
 | `forked_session` | new session id created by the fork (or `null`) |
 | `files` | JSON list of attached file paths (or `null`) |
 | `result` | final answer text (present on success; sometimes on failure) |
@@ -223,6 +234,37 @@ silent pick of the newest. That matters most for `cancel`.
 `409 {"error":"… is ambiguous (N jobs)", "matches":[{id,title,status,created_at}…]}`
 if several match — add characters to a prefix, or use the full id from
 `GET /v1/jobs`.
+
+### `POST /v1/jobs/{id}/message`
+A **running batch job reporting its own lifecycle.** Body is any JSON object;
+by convention `{status, msg, report, host, slurm_job_id, ts}`. Appended to the
+job's event stream as `type:"message"` and published to the bus, so SSE
+subscribers see it immediately.
+
+```bash
+curl -s -X POST http://localhost:8787/v1/jobs/$ID/message \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"status":"finished","report":"/project/.../SWAP.md"}'
+# { "id": "…", "seq": 1000000 }
+```
+
+Use the **`ab-notify`** helper from inside an sbatch rather than curl directly —
+it falls back to a shared-filesystem JSONL, then to local `/tmp`, if the gateway
+is unreachable from the node.
+
+**Why a job needs this at all.** A job's agent turn ends at `sbatch`; the actual
+compute then runs for hours with no connection to the gateway. Without messages
+the only signal is guessing from output-file mtimes, which cannot distinguish
+"queued" from "died before writing" from "I can't see the filesystem".
+
+**Why batch jobs don't write the DB directly.** It runs in WAL mode, whose index
+is mmap'd shared memory and therefore requires every writer on one host. The
+JSONL fallback uses `O_APPEND`, which needs no locking, and the gateway ingests
+it when the job is next read.
+
+Seq bands keep the writers apart: worker events count from 1, HTTP messages from
+`1_000_000`, file-ingested messages from `2_000_000` (seq derived from line
+number, so re-ingesting is a no-op).
 
 ### `POST /v1/jobs/{id}/cancel`
 Cancel a queued or running job. A queued job is marked `canceled` and skipped

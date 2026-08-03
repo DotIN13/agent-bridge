@@ -26,6 +26,10 @@ _DEFAULTS: dict = {
         "cancel_grace_sec": 15,
     },
     "db": {"path": "gateway.db"},
+    # Where `ab-notify` drops messages when it cannot reach the gateway over
+    # HTTP. Must be on a filesystem the compute nodes share with the login
+    # node; relative paths resolve against the data dir.
+    "messages": {"dir": "messages"},
     "cluster": {
         "enabled": True,
         "probe_timeout_sec": 15,
@@ -41,7 +45,9 @@ _DEFAULTS: dict = {
     "agents": {
         "claude": {
             "bin": "claude",
-            "dispatch_mode": "agent_exec",
+            # direct: run in the session the caller names, no routing model.
+            # agent_exec / select_then_exec keep the old dispatcher behaviour.
+            "dispatch_mode": "direct",
             "permission_mode": "bypassPermissions",
             "model": "",
             "default_cwd": str(Path.cwd()),
@@ -97,6 +103,7 @@ class Config:
     db_path: str          # absolute
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
+    messages_dir: str = ""        # absolute; ab-notify's fallback drop point
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -188,12 +195,19 @@ def load(path: str | os.PathLike | None) -> Config:
     if not db_path.is_absolute():
         db_path = data_dir / db_path
 
+    messages_dir = Path(raw.get("messages", {}).get("dir", "messages"))
+    if not messages_dir.is_absolute():
+        messages_dir = data_dir / messages_dir
+    # Created up front: a batch job on another node must be able to write here
+    # without racing to mkdir.
+    messages_dir.mkdir(parents=True, exist_ok=True)
+
     agents: dict[str, AgentConfig] = {}
     for name, a in raw.get("agents", {}).items():
         agents[name] = AgentConfig(
             name=name,
             bin=a["bin"],
-            dispatch_mode=a.get("dispatch_mode", "agent_exec"),
+            dispatch_mode=a.get("dispatch_mode", "direct"),
             permission_mode=a.get("permission_mode", "bypassPermissions"),
             model=a.get("model", ""),
             default_cwd=str(Path(a["default_cwd"]).expanduser().resolve()),
@@ -213,6 +227,7 @@ def load(path: str | os.PathLike | None) -> Config:
         concurrency=int(raw["worker"]["concurrency"]),
         cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
         db_path=str(db_path),
+        messages_dir=str(messages_dir),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),
         cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),
