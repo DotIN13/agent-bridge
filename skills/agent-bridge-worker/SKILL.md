@@ -59,8 +59,15 @@ outlives your turn must report its own lifecycle, or the only signal available
 to the caller is output-file mtimes — which cannot distinguish *queued* from
 *died before writing* from *the filesystem is unreachable*.
 
+`ab-notify` lives at `<repo>/bin/ab-notify`, is executable, and needs no
+install — but the batch job has to find it. Prepend the repo's `bin/` to `PATH`
+in the script (safer than `~/.local/bin`, which on this cluster already shadows
+things), or call it by absolute path.
+
 ```bash
 #SBATCH --export=ALL,AB_JOB_ID=<the ab job uuid>,AB_DATA_DIR=<gateway data dir>
+
+export PATH="<repo>/bin:$PATH"
 
 ab-notify --status running  --msg "server up, starting generation"
 ab-notify --status running  --msg "12/24 sources done"

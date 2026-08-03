@@ -119,9 +119,22 @@ load, hours of compute — is invisible unless the job says something. Without
 this you are reduced to guessing from output-file mtimes, which cannot tell
 "queued" from "died before writing" from "I can't see the filesystem".
 
+`bin/ab-notify` is executable and stdlib-only, so it needs no install — just put
+it somewhere the batch job can find it. Either add the repo's `bin/` to `PATH`
+inside the script, or symlink it once:
+
+```bash
+ln -s /path/to/agent-bridge/bin/ab-notify ~/.local/bin/ab-notify
+```
+
+Prefer the absolute path or an in-script `PATH` prepend if `~/.local/bin` on
+your cluster already shadows things — stale console scripts there have caused
+real failures.
+
 From inside an sbatch script:
 
 ```bash
+export PATH="/path/to/agent-bridge/bin:$PATH"
 export AB_JOB_ID=<the ab job uuid>     # via #SBATCH --export=ALL,AB_JOB_ID=…
 ab-notify --status running  --msg "vllm up, generating"
 ab-notify --status finished --report "$RUNS/SWAP.md"
