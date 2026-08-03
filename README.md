@@ -166,6 +166,24 @@ whose index is mmap'd shared memory and therefore requires every writer on one
 host. Appending JSONL with `O_APPEND` needs no locking at all, which is why the
 fallback is a file and the gateway ingests it.
 
+## The remote agent's side of the contract
+
+[`skills/agent-bridge-worker/`](skills/agent-bridge-worker/SKILL.md) is a Claude
+Code skill for the agent **on the cluster**. Install it once on the gateway host:
+
+```bash
+mkdir -p ~/.claude/skills
+cp -r skills/agent-bridge-worker ~/.claude/skills/
+```
+
+It covers the division of labour (local session plans and reviews; the remote
+agent investigates and executes), how to finish a turn — *a turn that ends with
+"I'll report back" is a failed turn, because the gateway records turn-end as
+task completion* — the Slurm recipe, and when to call `ab-notify`.
+
+Worth installing before you rely on batch reporting: the conventions are what
+make a job's progress visible at all.
+
 ## Cancel
 
 `POST /v1/jobs/{ref}/cancel` **interrupts** rather than killing: `SIGINT` to the
