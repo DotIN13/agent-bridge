@@ -165,10 +165,18 @@ class Database:
             )
             self._conn.commit()
 
+    # `last_event_at` is derived rather than stored. A batch job keeps sending
+    # ab-notify messages long after `finished_at` — which only marks the end of
+    # the *agent's turn*, not the end of the work — so the row needs a "last
+    # heard from" that keeps moving. Computing it on read costs one indexed
+    # MAX() per row and avoids an UPDATE on every single event.
+    _SELECT_JOB = ("SELECT j.*, (SELECT MAX(ts) FROM events e WHERE e.job_id = j.id)"
+                   " AS last_event_at FROM jobs j")
+
     def get_job(self, job_id: str) -> dict | None:
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM jobs WHERE id=?", (job_id,)
+                f"{self._SELECT_JOB} WHERE j.id=?", (job_id,)
             ).fetchone()
         return dict(row) if row else None
 
@@ -184,10 +192,10 @@ class Database:
             return []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs WHERE title_norm=?"
+                f"{self._SELECT_JOB} WHERE j.title_norm=?"
                 # rowid breaks created_at ties: two jobs submitted in the same
                 # clock tick must still order deterministically.
-                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                " ORDER BY j.created_at DESC, j.rowid DESC LIMIT ?",
                 (key, limit),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -202,10 +210,10 @@ class Database:
             return []
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs WHERE substr(id, 1, ?) = ?"
+                f"{self._SELECT_JOB} WHERE substr(j.id, 1, ?) = ?"
                 # rowid breaks created_at ties: two jobs submitted in the same
                 # clock tick must still order deterministically.
-                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                " ORDER BY j.created_at DESC, j.rowid DESC LIMIT ?",
                 (len(prefix), prefix, limit),
             ).fetchall()
         return [dict(r) for r in rows]
@@ -213,8 +221,8 @@ class Database:
     def list_jobs(self, limit: int = 50) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                (limit,)
+                f"{self._SELECT_JOB} ORDER BY j.created_at DESC, j.rowid DESC"
+                " LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -190,13 +190,23 @@ def cmd_jobs(args):
             print("no jobs on this gateway")
             return
         now = time.time()
-        print(f"  {'ID':<36} {'STATUS':<10} {'AGE':>6}  TITLE")
+
+        def ago(ts):
+            if not ts:
+                return "-"
+            m = (now - ts) / 60.0
+            return f"{m:.0f}m" if m < 120 else f"{m / 60:.1f}h"
+
+        # SEEN is last_event_at: for a batch job it keeps moving after the row
+        # goes terminal, because ab-notify messages arrive long after the
+        # agent's turn ended. AGE alone would say "3h old" for something that
+        # reported in a minute ago.
+        print(f"  {'ID':<36} {'STATUS':<10} {'AGE':>6} {'SEEN':>6}  TITLE")
         for j in jobs:
-            age_min = (now - (j.get("created_at") or now)) / 60.0
-            age = f"{age_min:.0f}m" if age_min < 120 else f"{age_min / 60:.1f}h"
             label = j.get("title") or " ".join(str(j.get("prompt", "")).split())
-            print(f"  {j['id']:<36} {j.get('status', ''):<10} {age:>6}  "
-                  f"{label[:52]}")
+            print(f"  {j['id']:<36} {j.get('status', ''):<10} "
+                  f"{ago(j.get('created_at')):>6} {ago(j.get('last_event_at')):>6}  "
+                  f"{label[:46]}")
 
     _out(args, d, human)
 

@@ -384,8 +384,16 @@ class ClaudeAdapter:
     def _handle_record(self, rec, emit, res: RunResult, capture_nested: bool):
         rtype = rec.get("type")
         if rtype == "system":
+            # The init record is the only place the *actual* session id shows
+            # up in direct mode — there is no dispatcher printing an arrow line
+            # to scrape. Without this the job row says null and you cannot tell
+            # from `ab jobs` which session a fresh run created, which is
+            # exactly the id you need for the follow-up `--session`.
+            sid = rec.get("session_id")
+            if sid and not res.forked_session:
+                res.forked_session = sid
             emit(Event("status", {"subtype": rec.get("subtype"),
-                                  "session_id": rec.get("session_id"),
+                                  "session_id": sid,
                                   "model": rec.get("model"),
                                   "tools": rec.get("tools")}))
         elif rtype == "assistant":
