@@ -34,6 +34,73 @@ stream, so **one handle covers the whole thing**.
 - **Server is FastAPI in a venv; clients are stdlib.** `run.sh` installs server
   deps on first launch. `client/` stays dependency-free.
 
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph laptop["your laptop"]
+    CLI["ab CLI · MCP · skill<br/>stdlib only"]
+  end
+
+  subgraph login["login node — behind ONE ssh -L port-forward"]
+    API["FastAPI<br/>gateway/server.py"]
+    Q(["job queue"])
+    W["gateway/worker.py"]
+    AD["adapters/claude.py"]
+    SESS["claude --resume &lt;session&gt; -p"]
+    BUS["gateway/bus.py<br/>SSE fan-out"]
+  end
+
+  subgraph fs["shared filesystem — data_dir"]
+    DB[("gateway.db<br/>SQLite, WAL")]
+    TOK[".token · 0600"]
+    EP["gateway-endpoint.json"]
+    MSG["messages/&lt;job-id&gt;.jsonl"]
+  end
+
+  subgraph compute["compute node — minutes to hours later"]
+    SB["your sbatch script"]
+    ABN["bin/ab-notify"]
+    TMP["$TMPDIR/agent-bridge-messages/"]
+  end
+
+  CLI -- "POST /v1/jobs" --> API
+  API --> Q --> W --> AD --> SESS
+  SESS -- "events" --> W
+  W -- "writes" --> DB
+  API <-- "reads" --> DB
+  API --> BUS
+  BUS -- "SSE push" --> CLI
+  CLI -- "GET /events, poll" --> API
+
+  SB --> ABN
+  ABN -- "tier 1 · POST /v1/jobs/ID/message" --> API
+  ABN -- "tier 2 · O_APPEND" --> MSG
+  ABN -- "tier 3 · last resort, path printed" --> TMP
+  MSG -. "ingested on read" .-> API
+  EP -. "resolves gateway URL" .-> ABN
+  TOK -. "bearer token" .-> ABN
+```
+
+Three things the picture is meant to make obvious:
+
+- **No model sits in the request path.** Under the default
+  `dispatch_mode = "direct"` the worker resolves the session itself and execs
+  the agent. There is no dispatcher session choosing a fork target — see
+  [How dispatch works](#how-dispatch-works).
+- **Only the login node writes `gateway.db`.** WAL keeps its index in mmap'd
+  shared memory, so every writer must be on one host. That is precisely why the
+  compute-node fallback is an append-only JSONL file the gateway ingests, rather
+  than a second writer.
+- **The dotted arrows are discovery, not data.** `ab-notify` reads
+  `gateway-endpoint.json` and `.token` out of the shared `data_dir`, which is
+  how it reaches a gateway whose address it was never told — and how it knows to
+  skip HTTP outright when the gateway is bound to loopback.
+
+Events from all three sources land in one ordered stream, kept apart by
+sequence band: worker events from **1**, HTTP messages from **1,000,000**,
+file-ingested messages from **2,000,000**.
+
 ## Run it
 
 On the login node, inside a persistent tmux:
