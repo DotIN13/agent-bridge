@@ -17,7 +17,18 @@ Examples:
     ab ls /project/jevans/tzhang3/myrepo/out --glob '*.csv'
     ab download --dir /project/.../out --glob '*.csv' --to ./results
 
-Global flags: --gateway NAME, --config PATH, --json.
+Output contract:
+    stdout carries records, one per line — greppable, pipeable, ids in full.
+    stderr carries headers and hints, so they never reach a pipe.
+    Long free text is elided by default and marked with its true size.
+
+    --json  chooses the shape (machine-readable)
+    --full  chooses the completeness (no elision)
+    They are orthogonal: `--json --full` is the faithful dump, `--full` alone
+    is the readable one. `ab job` is never elided — the final report is the
+    deliverable.
+
+Global flags: --gateway NAME, --config PATH, --json, --full.
 Exit code is non-zero if a run fails.
 """
 from __future__ import annotations
@@ -37,10 +48,68 @@ def _err(msg: str, code: int = 1):
     raise SystemExit(code)
 
 
+# Output contract, applied by every command:
+#   stdout = records, one per line, greppable and pipeable
+#   stderr = headers, counts, hints — visible to a human, invisible to a pipe
+#   default = long free text elided; --full turns that off
+#   --json  = shape, not completeness. The two flags are orthogonal, so
+#             `--json --full` is the faithful machine-readable dump.
+ELIDE_AT = 200
+
+# Never elided, for two reasons.
+#
+# Identifiers: you cannot resume a session, cancel a job or open a path from a
+# prefix, so a silently shortened id is worse than a long line.
+#
+# `result` and `error`: the final report is the deliverable and is written to
+# stand alone. Clipping it would send the reader to the session transcript for
+# the one thing that was already complete, which is the expensive mistake this
+# whole contract exists to prevent.
+_KEEP_WHOLE = frozenset({
+    "id", "job_id", "session_id", "chosen_session", "forked_session",
+    "path", "cwd", "base_url", "url", "model", "agent", "type", "status",
+    "name", "default", "gateway", "seq", "ts",
+    "result", "error",
+})
+
+
+def _note(msg: str) -> None:
+    """Framing for a human. Goes to stderr so it never pollutes a pipe."""
+    print(msg, file=sys.stderr)
+
+
+def _line(s) -> str:
+    """One record per line: collapse embedded newlines so a multi-line value
+    cannot silently become three records."""
+    return " ".join(str(s).split())
+
+
+def _clip(s: str, n: int = ELIDE_AT) -> str:
+    """Elide with the true size attached, so a clipped value is visibly
+    clipped and the reader knows what it costs to get the rest."""
+    return s if len(s) <= n else f"{s[:n]}… [+{len(s) - n} chars, --full]"
+
+
+def _elide_obj(obj, full: bool):
+    """Apply the same elision to JSON that the line view uses, so --json and
+    the default agree on content and differ only in shape."""
+    if full:
+        return obj
+    if isinstance(obj, dict):
+        return {k: (v if k in _KEEP_WHOLE else _elide_obj(v, full))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_elide_obj(v, full) for v in obj]
+    if isinstance(obj, str):
+        return _clip(obj)
+    return obj
+
+
 def _out(args, obj, human):
-    """Print obj as JSON (if --json) else call human(obj)."""
+    """--json picks the shape; --full picks the completeness."""
+    full = getattr(args, "full", False)
     if args.json:
-        print(json.dumps(obj, indent=2))
+        print(json.dumps(_elide_obj(obj, full), indent=2))
     else:
         human(obj)
 
@@ -77,24 +146,36 @@ def cmd_models(args):
 
     def human(x):
         if not x.get("models"):
-            print(f"agent '{x['agent']}' advertises no models; --model accepts "
+            _note(f"agent '{x['agent']}' advertises no models; --model accepts "
                   f"any id the agent itself supports. Configure them under "
                   f"[agents.{x['agent']}] models = [...].")
             return
-        print(f"Models offered by agent '{x['agent']}' — pass one to --model:")
+        _note(f"models for agent '{x['agent']}' — pass one to --model:")
         for m in x["models"]:
-            print(f"  {m}")
+            print(m)
         if x.get("default"):
-            print(f"\nThis agent's default when --model is omitted: {x['default']}")
+            _note(f"default when --model is omitted: {x['default']}")
 
     _out(args, d, human)
 
 
 def cmd_sessions(args):
+    """Sessions you can resume. Ids print in full: under the resume-first
+    policy this is where you get the value for --session, and an 8-char prefix
+    (what this used to print) is not something you can pass to anything."""
     d = _client(args).sessions(cwd=args.cwd, agent=args.agent)
+
     def human(x):
-        for s in x.get("sessions", []):
-            print(f" {s['session_id'][:8]}  {s['cwd']:40}  {s.get('title','')[:50]}")
+        rows = x.get("sessions", [])
+        if not rows:
+            _note("no sessions on this gateway for that filter")
+            return
+        _note(f"{'SESSION':<36} {'CWD':<40} TITLE")
+        for s in rows:
+            title = _line(s.get("title", ""))
+            print(f"{s['session_id']:<36} {s['cwd']:<40} "
+                  f"{title if args.full else _clip(title, 60)}")
+
     _out(args, d, human)
 
 
@@ -181,24 +262,30 @@ def cmd_jobs(args):
         # goes terminal, because ab-notify messages arrive long after the
         # agent's turn ended. AGE alone would say "3h old" for something that
         # reported in a minute ago.
-        print(f"  {'ID':<36} {'STATUS':<10} {'AGE':>6} {'SEEN':>6}  TITLE")
+        _note(f"{'ID':<36} {'STATUS':<10} {'AGE':>6} {'SEEN':>6}  TITLE")
         for j in jobs:
-            label = j.get("title") or " ".join(str(j.get("prompt", "")).split())
-            print(f"  {j['id']:<36} {j.get('status', ''):<10} "
+            label = _line(j.get("title") or j.get("prompt", ""))
+            print(f"{j['id']:<36} {j.get('status', ''):<10} "
                   f"{ago(j.get('created_at')):>6} {ago(j.get('last_event_at')):>6}  "
-                  f"{label[:46]}")
+                  f"{label if args.full else _clip(label, 46)}")
 
     _out(args, d, human)
 
 
 def cmd_job(args):
+    """The final report. Never elided even without --full: this is the whole
+    point of the job, it is stored whole, and a worker writes it to stand
+    alone. Truncating it would send the reader to the transcript for the one
+    thing that was already complete."""
     j = _client(args).get_job(args.id)
+
     def human(x):
-        print(f"status: {x['status']}")
+        _note(f"status: {x['status']}")
         if x.get("result"):
             print(x["result"])
         if x.get("error"):
-            print("error:", x["error"], file=sys.stderr)
+            _note(f"error: {x['error']}")
+
     _out(args, j, human)
 
 
@@ -308,6 +395,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--gateway", "-g", help="gateway name (default: config default)")
     common.add_argument("--config", "-c", help="path to gateways.json")
     common.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    common.add_argument("--full", action="store_true",
+                        help="do not elide long text. Works with or without "
+                             "--json: --json chooses the shape, --full chooses "
+                             "the completeness")
     sub = p.add_subparsers(dest="cmd", required=True, parser_class=lambda **kw:
                            argparse.ArgumentParser(parents=[common], **kw))
 
@@ -389,10 +480,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only this event type; repeatable "
                          "(assistant, thinking, tool_use, tool_result, "
                          "result, status, error, log, message)")
-    sp.add_argument("--full", action="store_true",
-                    help="do not elide event text. Events are stored whole, so "
-                         "this is usually all you need instead of downloading "
-                         "a session transcript — bound it with --after/--until")
     sp.add_argument("--follow", "-f", action="store_true")
     sp.set_defaults(func=cmd_events)
 
