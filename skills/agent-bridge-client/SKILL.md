@@ -1,7 +1,7 @@
 ---
-name: agent-bridge
+name: agent-bridge-client
 description: Drive a remote coding agent through an agent-bridge gateway using the `ab` CLI — submit prompts, watch job events, upload inputs and download artifacts. Use for work that needs a remote machine's GPUs, a batch scheduler (Slurm/PBS/LSF), or delegating a long-running task to an agent on another host.
-allowed-tools: Bash, Read, Write, Glob, Grep
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
 # agent-bridge (`ab` CLI)

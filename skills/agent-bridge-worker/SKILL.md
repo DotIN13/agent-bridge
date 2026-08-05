@@ -1,7 +1,7 @@
 ---
 name: agent-bridge-worker
 description: How to execute a task dispatched through agent-bridge on this cluster — your remit versus the local session's, finishing a turn properly, submitting Slurm (or PBS/LSF) work, and reporting progress back with ab-notify. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
-allowed-tools: Bash, Read, Write, Edit, Glob, Grep
+allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
 # Working through agent-bridge (remote side)
