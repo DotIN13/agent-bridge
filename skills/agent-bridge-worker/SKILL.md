@@ -16,7 +16,7 @@ names one, work within it and say so if you had to deviate.
 
 ## Your remit
 
-**Local Claude plans and reviews. You investigate and execute.**
+**Local session plans and reviews. You investigate and execute.**
 
 - **Gather information first.** Inventory what already exists before building
   anything — modules, scripts, data, prior runs. You can see this machine; the
@@ -173,6 +173,27 @@ a `ModuleNotFoundError` knowable in one second.
 ### Then stop
 
 Submit, print the job id and `squeue` output, and end your turn. Do not poll it.
+
+### Checking on work: cheap probes, never full-log dumps
+
+When you do want a quick status before you hand off, probe narrowly instead of
+dumping output into the transcript:
+
+- **Scheduler state** — `squeue -j <id> -o "%.8T %.10M %.20R"`, or `sacct -j <id>
+  --format=State,ExitCode,Elapsed`. Not `squeue` + the whole log.
+- **The job's own voice** — prefer `ab-notify` messages the job has sent; they
+  say what's actually happening, in one line.
+- **Output files** — `tail -N <log>`, `grep <marker> <log>`, or `wc -l` on the
+  output file. Never `cat` a log or a directory of files wholesale.
+
+Everything you read lands in the transcript and is **re-read on every later
+turn** of the run. A 50K-char dump that answered one question then taxes every
+remaining turn at the model's input price — and costs you nothing to have
+skipped. If the answer you need is "did it finish", that is one `squeue` line;
+if it's "is it progressing", `tail -5`. That's all.
+
+A single bounded probe is fine. A `sleep`-loop waiting for a job to finish is
+not — that is what `ab-notify` and the caller's `ab events --follow` are for.
 
 ## Other schedulers
 

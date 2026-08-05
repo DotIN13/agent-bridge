@@ -21,7 +21,7 @@ Division of labour between this session and the remote agent. The remote side
 has its own skill — `skills/agent-bridge-worker/` in the repo — install it on
 the gateway host so both halves agree.
 
-**Local Claude — plan and review, with the user.**
+**Local session — plan and review, with the user.**
 
 - Work out *what* to run and *why*, then write the spec. The remote agent
   executes a brief; it does not choose the research direction.
@@ -110,6 +110,13 @@ ab submit -F task.md                               # fresh session
 for a follow-up the session itself must see — a fork puts the message on a
 branch the original never reads.
 
+**Forking a session re-reads its whole transcript.** A resumed/forked session
+loads every prior turn into context — including this one, minutes from now —
+and pays for re-reading it on every turn of the run. For independent work, use a
+fresh session (omit `--session`); keep `--session` for genuine follow-ups on a
+thread whose history the task needs. A fresh session is faster and cheaper; a
+big fork of a long session is neither.
+
 **Pick the backend and model per job.** `--agent` (claude or opencode) and
 `--model` are independent knobs; both are set at submit time. Scope the catalogs
 the same way:
@@ -117,7 +124,7 @@ the same way:
 ```bash
 ab models --agent opencode                 # deepseek/deepseek-v4-flash, deepseek/deepseek-v4-pro
 ab submit -F task.md --agent opencode --model deepseek/deepseek-v4-flash
-ab run -F task.md --agent claude --model claude-sonnet-5   # default backend unchanged
+ab run -F task.md --agent claude --model claude-sonnet-5   # claude is the gateway default
 ab sessions --agent opencode               # sessions the opencode adapter can fork
 ```
 
@@ -133,14 +140,25 @@ Titles auto-derive from the prompt's first line if unset. Ambiguous refs return
 **Use `submit` + `events`, not `run`, for anything slow.** `run` blocks and a
 harness will usually background it out from under you.
 
+**Reasoning is hidden by default.** `thinking` events (the agent's reasoning)
+are dropped from the stream unless you pass `--include-thinking` at submit time.
+Only turn it on when you genuinely need the reasoning — it is verbose and
+usually noise.
+
 **Background the follower and read its log.** `events --follow` polls once a
 second and exits at the terminal event, so it behaves well as a background
 command whose output file you read incrementally.
 
-**Pin the model with a full id and verify it took.** Aliases track the newest
-model in a tier, so an aliased run isn't reproducible. The `init`/`status` line
-in `ab events` reports the model *actually* running (claude) — for opencode,
-`ab job <id>` shows the requested `model`; check that, not just the job JSON.
+**Verify the model that actually ran.** `--model` is passed through unchecked, so
+check the run, not your intent: the `init` line in `ab events` reports the model
+in use (claude); for opencode, `ab job <id>` shows the requested `model`.
+
+**Spend the cheapest model that fits the task.** If your prompt already spells
+out the plan step by step — the agent is executing, not deciding — a cheaper
+model (haiku for claude, deepseek-v4-flash for opencode) does the same job for a
+fraction of the price. Reach for opus only when the task needs the agent to
+reason, choose, and improvise. Claude's input price spans 10× from haiku to
+fable; don't pay opus to run a checklist.
 
 ## Batch work: the pattern that works
 
