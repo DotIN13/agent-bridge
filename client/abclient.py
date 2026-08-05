@@ -220,9 +220,10 @@ class Client:
     # -- jobs --
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
                session=None, permission_mode=None, files=None, upload=None,
-               title=None, fork=True) -> dict:
+               title=None, fork=True, include_thinking=False) -> dict:
         payload = _job_payload(prompt, cwd, agent, model, session,
-                               permission_mode, files, title, fork)
+                               permission_mode, files, title, fork,
+                               include_thinking)
         uploads = [(os.path.basename(p), p) for p in (upload or [])]
         if uploads:
             code, data = http_multipart(self.base, "/v1/jobs", self.token,
@@ -302,7 +303,7 @@ class Client:
 
 
 def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
-                 title=None, fork=True) -> dict:
+                 title=None, fork=True, include_thinking=False) -> dict:
     body = {"prompt": prompt}
     for k, v in (("cwd", cwd), ("agent", agent), ("model", model),
                  ("session", session), ("permission_mode", permission_mode),
@@ -311,6 +312,8 @@ def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
             body[k] = v
     if not fork:
         body["fork"] = False   # only sent when it differs from the default
+    if include_thinking:
+        body["include_thinking"] = True  # only sent when it differs from the default
     if files:
         body["files"] = [{"path": p} for p in files]
     return body

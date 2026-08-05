@@ -126,6 +126,7 @@ def cmd_run(args):
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=args.upload,
                 title=args.title, fork=args.fork,
+                include_thinking=args.include_thinking,
                 timeout=args.timeout, on_event=on_event)
     if args.json:
         print(json.dumps(job, indent=2))
@@ -146,7 +147,8 @@ def cmd_submit(args):
     job = c.submit(prompt, cwd=args.cwd, agent=args.agent, model=args.model,
                    session=args.session, permission_mode=args.permission_mode,
                    files=args.file, upload=args.upload,
-                   title=args.title, fork=args.fork)
+                   title=args.title, fork=args.fork,
+                   include_thinking=args.include_thinking)
 
     def human(j):
         print(j["id"])
@@ -307,6 +309,10 @@ def build_parser() -> argparse.ArgumentParser:
                              "--session; if that session is mid-turn Claude "
                              "queues the message for the end of the turn")
         sp.add_argument("--permission-mode", dest="permission_mode")
+        sp.add_argument("--include-thinking", dest="include_thinking",
+                        action="store_true", default=False,
+                        help="keep the agent's reasoning (thinking) events in "
+                             "the event stream; hidden by default")
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="local file to upload with the job (repeatable)")
         sp.add_argument("--file", action="append", metavar="REMOTE",

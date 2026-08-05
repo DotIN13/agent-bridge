@@ -99,6 +99,11 @@ class OpenCodeAdapter:
         # the opencode spelling of the gateway's default bypassPermissions.
         if perm in _AUTO_PERMISSIONS:
             args += ["--auto"]
+        # Reasoning events are opt-in: ask opencode to surface them only when
+        # the job's caller wanted them (the worker also drops `thinking` events
+        # unless include_thinking is set).
+        if spec.include_thinking:
+            args += ["--thinking"]
         if spec.requested_session:
             args += ["-s", spec.requested_session]
             if spec.fork:

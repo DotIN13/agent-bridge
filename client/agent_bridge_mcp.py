@@ -44,6 +44,9 @@ class Tools:
             "cwd": {"type": "string", "description": "abs working dir within allowed_dirs"},
             "agent": {"type": "string"}, "model": {"type": "string"},
             "session": {"type": "string"}, "permission_mode": {"type": "string"},
+            "include_thinking": {"type": "boolean",
+                                 "description": "keep model reasoning events "
+                                                "(hidden by default)"},
             "upload": {"type": "array", "items": {"type": "string"},
                        "description": "LOCAL files to upload with the job"},
             "files": {"type": "array", "items": {"type": "string"},
@@ -117,7 +120,8 @@ class Tools:
         return {"gateway": c.name, **c.submit(
             a["prompt"], cwd=a.get("cwd"), agent=a.get("agent"), model=a.get("model"),
             session=a.get("session"), permission_mode=a.get("permission_mode"),
-            files=a.get("files"), upload=a.get("upload"))}
+            files=a.get("files"), upload=a.get("upload"),
+            include_thinking=bool(a.get("include_thinking")))}
 
     def get_job(self, a):
         c = self._c(a); return {"gateway": c.name, **c.get_job(a["job_id"])}
@@ -134,6 +138,7 @@ class Tools:
                     model=a.get("model"), session=a.get("session"),
                     permission_mode=a.get("permission_mode"),
                     files=a.get("files"), upload=a.get("upload"),
+                    include_thinking=bool(a.get("include_thinking")),
                     timeout=float(a.get("timeout_sec") or 900))
         return {"gateway": c.name, "job_id": job.get("id"), "status": job.get("status"),
                 "result": job.get("result"), "error": job.get("error"),

@@ -102,6 +102,9 @@ allowed dir and pass {{"path":...}} instead.
                    /v1/models (for claude: "claude-sonnet-5"; for opencode:
                    "deepseek/deepseek-v4-flash"). Omit for the agent default.
   permission_mode  (string, optional) e.g. "bypassPermissions","acceptEdits".
+  include_thinking (boolean, optional) keep the agent's reasoning ("thinking")
+                   events in the stream. Hidden by default; pass true only when
+                   you need to see the reasoning.
   files            (array, optional) attachments (see "Sending files with a job").
 
 Allowed directories (jobs outside these are refused):
@@ -120,7 +123,8 @@ Each event: `id: <seq>`, `event: <type>`, `data: <json>`. Reconnect with
 `?after=<last seq>` (or Last-Event-ID header) to resume with no gaps/dupes.
 Event types and their data:
   status       progress markers ({{stage:"running"|"done", ...}})
-  thinking     {{text}}   model reasoning (may be absent)
+  thinking     {{text}}   model reasoning; only present if the job was submitted
+                          with include_thinking=true (hidden by default)
   assistant    {{text}}   assistant output, streamed in chunks
   tool_use     {{name,input}}   a tool the agent invoked
   tool_result  {{text}}

@@ -106,10 +106,18 @@ class WorkerPool:
                 # NULL on rows created before the column existed -> fork, the
                 # historical behaviour.
                 fork=job.get("fork") is None or bool(job["fork"]),
+                include_thinking=bool(job.get("include_thinking")),
             )
             adapter = build_adapter(agent_cfg)
 
+            include_thinking = spec.include_thinking
+
             def emit(ev: Event) -> None:
+                # Reasoning is noisy and can be long; keep it out of the stream
+                # (not persisted, not fanned out to SSE) unless the caller asked
+                # for it when submitting the job.
+                if ev.type == "thinking" and not include_thinking:
+                    return
                 self._emit(job_id, seq, ev)
 
             result = adapter.run(spec, emit)

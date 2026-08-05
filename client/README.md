@@ -59,6 +59,7 @@ python3 client/ab.py <command> [flags]     # or: ln -s .../client/ab.py ~/bin/ab
 
 Global: `--gateway NAME`, `--config PATH`, `--json` (machine-readable output).
 `run`/`submit` take `--cwd --agent --model --session --permission-mode`, plus
+`--include-thinking` (keep the agent's reasoning events — hidden by default),
 `--upload LOCAL` (repeatable) and `--file REMOTE` (repeatable). `ab run` exits
 non-zero if the job doesn't succeed.
 

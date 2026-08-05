@@ -177,6 +177,7 @@ class JobSpec:
     files: tuple[str, ...] = ()    # absolute paths of attached files (readable by the job)
     title: str = ""                # human handle for the job
     fork: bool = True              # False -> resume the target session in place
+    include_thinking: bool = False # True -> keep model reasoning in the event stream
 
 
 @dataclass

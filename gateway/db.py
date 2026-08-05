@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     title             TEXT,                   -- human handle, shown in listings
     title_norm        TEXT,                   -- folded form used for lookup
     fork              INTEGER,                -- 1 fork a session, 0 resume in place
+    include_thinking  INTEGER,                -- 1 keep thinking events, 0 drop them
     cwd               TEXT,
     requested_session TEXT,                   -- caller hint (optional)
     chosen_session    TEXT,                   -- session the dispatcher forked
@@ -98,7 +99,8 @@ class Database:
         """Add columns introduced after a db was first created."""
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
         for name, decl in (("files", "TEXT"), ("title", "TEXT"),
-                           ("title_norm", "TEXT"), ("fork", "INTEGER")):
+                           ("title_norm", "TEXT"), ("fork", "INTEGER"),
+                           ("include_thinking", "INTEGER")):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
         self._conn.execute(
@@ -129,17 +131,19 @@ class Database:
         model: str | None,
         title: str | None = None,
         fork: bool = True,
+        include_thinking: bool = False,
     ) -> str:
         job_id = str(uuid.uuid4())
         title = (title or "").strip() or derive_title(prompt)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO jobs (id, status, agent, prompt, cwd, requested_session,"
-                " permission_mode, model, title, title_norm, fork, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " permission_mode, model, title, title_norm, fork, include_thinking,"
+                " created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, "queued", agent, prompt, cwd, requested_session,
                  permission_mode, model, title, norm_title(title),
-                 1 if fork else 0, time.time()),
+                 1 if fork else 0, 1 if include_thinking else 0, time.time()),
             )
             self._conn.commit()
         return job_id

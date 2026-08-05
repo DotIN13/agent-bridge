@@ -129,6 +129,7 @@ Request body:
 | `fork` | bool | no | default `true`. `false` queues the prompt into the target session **in place** — see [Fork vs resume-in-place](#fork-vs-resume-in-place) |
 | `model` | string | no | id for this agent from `/v1/models` (e.g. `claude-sonnet-5` or `deepseek/deepseek-v4-flash`). Omit for the agent's default. See [`/v1/models`](#get-v1models--agentname) |
 | `permission_mode` | string | no | e.g. `bypassPermissions`, `acceptEdits` |
+| `include_thinking` | bool | no | default `false`. Keep the agent's reasoning (`thinking`) events in the event stream. Hidden by default; set `true` only when you need to see reasoning |
 | `files` | array | no | attachments — see [Files](#files) |
 
 #### Fork vs resume-in-place
@@ -323,7 +324,7 @@ Event types and `data`:
 | `event` | `data` |
 |---|---|
 | `status` | progress: `{"stage":"running"\|"done", …}` |
-| `thinking` | `{"text"}` model reasoning (may be absent) |
+| `thinking` | `{"text"}` model reasoning; present only if the job was submitted with `include_thinking=true` (hidden by default) |
 | `assistant` | `{"text"}` assistant output (chunked) |
 | `tool_use` | `{"name","input"}` a tool the agent ran |
 | `tool_result` | `{"text"}` |

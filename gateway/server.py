@@ -198,11 +198,16 @@ def create_app(gw: Gateway) -> FastAPI:
             raise HTTPException(400, "fork=false requires 'session': name the "
                                      "session to resume in place")
 
+        include_thinking = spec.get("include_thinking", False)
+        if not isinstance(include_thinking, bool):
+            raise HTTPException(400, "include_thinking must be a boolean")
+
         job_id = gw.db.create_job(
             agent=agent, prompt=prompt, cwd=cwd,
             requested_session=spec.get("session"),
             permission_mode=spec.get("permission_mode"), model=spec.get("model"),
-            title=spec.get("title"), fork=fork)
+            title=spec.get("title"), fork=fork,
+            include_thinking=include_thinking)
         paths = await _save_all(items, uploads, filemod.job_dir(cfg, job_id))
         if paths:
             gw.db.set_job_files(job_id, paths)
@@ -211,7 +216,7 @@ def create_app(gw: Gateway) -> FastAPI:
         return JSONResponse(status_code=202, content={
             "id": job_id, "status": "queued", "agent": agent, "cwd": cwd,
             "title": row.get("title") if row else None, "fork": fork,
-            "files": paths})
+            "include_thinking": include_thinking, "files": paths})
 
     def _resolve_job(ref: str) -> dict:
         """Resolve a job reference: full id, then title, then id prefix.
