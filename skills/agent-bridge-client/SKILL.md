@@ -110,12 +110,27 @@ ab submit -F task.md                               # fresh session
 for a follow-up the session itself must see — a fork puts the message on a
 branch the original never reads.
 
-**Forking a session re-reads its whole transcript.** A resumed/forked session
-loads every prior turn into context — including this one, minutes from now —
-and pays for re-reading it on every turn of the run. For independent work, use a
-fresh session (omit `--session`); keep `--session` for genuine follow-ups on a
-thread whose history the task needs. A fresh session is faster and cheaper; a
-big fork of a long session is neither.
+**Prefer continuity. Check `ab sessions` before every submit** and pick in this
+order:
+
+1. **Resume in place** — `--session <uuid> --no-fork`. The default when a
+   relevant session exists. The agent keeps the context it already built and
+   does not re-derive what it worked out last time.
+2. **Fork** — `--session <uuid>`. When you want that session's history but the
+   work branches: a new turn on the same thread, or a variant you don't want
+   written back into the original.
+3. **Fresh** — omit `--session`. Only when nothing relevant exists.
+
+A remote agent that has already read the repo, found the config and learned the
+cluster's quirks is worth far more than the tokens saved by starting clean.
+Reaching for a fresh session because it is cheaper throws that away and buys a
+re-derivation of the same facts.
+
+The cost is real, though, and worth managing rather than ignoring: a resumed
+session re-reads its whole transcript on every turn, so a thread that has run
+all day is expensive to continue. Keep sessions scoped to a line of work and
+start a new one when the subject genuinely changes — not to save money on a
+task that needs the history.
 
 **Pick the backend and model per job.** `--agent` (claude or opencode) and
 `--model` are independent knobs; both are set at submit time. Scope the catalogs
