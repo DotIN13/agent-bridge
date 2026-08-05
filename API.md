@@ -47,32 +47,26 @@ allowed dirs, agents, dispatch mode). See [LLM usage](#llm-agent-usage).
 ### `GET /v1/agents`
 Which backends exist.
 ```json
-{ "configured": ["claude"], "known": ["claude"], "default": "claude" }
+{ "configured": ["claude", "opencode"], "known": ["claude", "opencode"], "default": "claude" }
 ```
+`configured` comes from config.toml's `[agents.<name>]` sections; `known` is what
+the adapter registry ships. Each job picks one backend via the `agent` field.
 
 ### `GET /v1/models`  ·  `?agent=<name>`
-Models this agent offers, so a caller can choose by task complexity rather than
-by guessing an id. Config-driven — `[[agents.<name>.models]]` in the gateway's
-config.toml — so what's listed is what that agent is set up to accept.
+Model ids this agent is configured to accept, so a caller can see what's
+supported before setting `model` on a job. Config-driven — a plain
+`models = ["..."]` list under `[agents.<name>]` in the gateway's config.toml.
 ```json
 {
-  "agent": "claude",
-  "models": [
-    { "id": "claude-sonnet-5", "alias": "sonnet", "tier": "standard",
-      "context": "1M", "input_per_mtok": 2.0, "output_per_mtok": 10.0,
-      "use": "Most coding, analysis, and multi-step work.",
-      "note": "introductory pricing through 2026-08-31" }
-  ],
-  "tiers":   { "standard": "claude-sonnet-5" },
-  "default": ""
+  "agent": "opencode",
+  "models": ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"],
+  "default": "deepseek/deepseek-v4-flash"
 }
 ```
-`id` is the only required field per entry; the rest is advertising copy and may
-be absent. There is no built-in catalog — an agent with no `models` configured
-returns an empty list, and `model` on a job is passed through unchecked. `tiers` maps a complexity to an id (first model declared for a tier
-wins) so clients don't reimplement the choice — `default` is what the agent uses
-when a job omits `model`. Prefer a full id over an alias: `opus`/`sonnet`/`haiku`
-track the newest model in each tier, so an alias makes a run non-reproducible.
+The list is exactly what's advertised: an agent with no `models` configured
+returns an empty list, and `model` on a job is passed through unchecked.
+`default` is what the agent uses when a job omits `model`. There are no tiers,
+aliases or pricing — just ids, one per line.
 
 ### `GET /v1/info`  ·  `?refresh=1`
 This machine's capabilities, probed once on startup (concurrently, in the
@@ -133,7 +127,7 @@ Request body:
 | `session` | string | no | the session to run in. Omit for a fresh one. **Required** when `fork` is `false`. Under `direct` mode this is the whole routing decision — nothing substitutes another session |
 | `title` | string | no | human handle for the job. Derived from the prompt's first line when omitted, so every job has one. Pass it wherever an `{id}` is accepted |
 | `fork` | bool | no | default `true`. `false` queues the prompt into the target session **in place** — see [Fork vs resume-in-place](#fork-vs-resume-in-place) |
-| `model` | string | no | alias/id: `opus`, `sonnet`, `haiku`, or full id. See [`/v1/models`](#get-v1models--agentname) for what this agent offers |
+| `model` | string | no | id for this agent from `/v1/models` (e.g. `claude-sonnet-5` or `deepseek/deepseek-v4-flash`). Omit for the agent's default. See [`/v1/models`](#get-v1models--agentname) |
 | `permission_mode` | string | no | e.g. `bypassPermissions`, `acceptEdits` |
 | `files` | array | no | attachments — see [Files](#files) |
 
@@ -161,7 +155,7 @@ curl -s -X POST http://localhost:8787/v1/jobs \
 lands permanently in whichever session receives it, so the target is never
 inferred — you name it or it doesn't run.
 
-A busy target is fine: `--resume` queues the message and Claude picks it up at
+A busy target is fine: resuming queues the message and the agent picks it up at
 the end of the current turn, so the gateway does not gate on liveness.
 
 ```bash
@@ -175,6 +169,8 @@ curl -s -X POST http://localhost:8787/v1/jobs \
   "title": "add a --json flag to cli.py and run the tests", "fork": true,
   "files": [] }
 ```
+`agent` is whatever you sent (default: the gateway's default). The worker
+builds the matching adapter and runs the prompt in the requested session.
 
 **With files, one call** — either JSON inline or multipart:
 
@@ -364,10 +360,14 @@ file parts). Returns:
 Pass those paths to a later job as `"files": [{"path": "<abs remote path>"}]`.
 
 ### `GET /v1/files/list?dir=<dir>&glob=<glob>&recursive=<bool>`
-List files under an allowed dir (for discovering artifacts):
+List files and directories under an allowed dir (for discovering artifacts;
+`is_dir` tells the two apart, `size` is 0 for directories):
 
 ```json
-{ "dir": "…", "files": [ {"path": "…", "size": 1234, "mtime": 1785…} ] }
+{ "dir": "…", "files": [
+    { "path": "…/out/results.csv", "is_dir": false, "size": 1234, "mtime": 1785… },
+    { "path": "…/out/plots",        "is_dir": true,  "size": 0,    "mtime": 1785… }
+] }
 ```
 
 ### `GET /v1/files/content?path=<abs path>`

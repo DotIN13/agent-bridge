@@ -17,13 +17,14 @@ def render_llms_txt(cfg: Config) -> str:
     )
     base = f"http://{cfg.host}:{cfg.port}"
     _def = cfg.agents.get(cfg.default_agent) if cfg.agents else None
-    tiers = "/".join(_def.tiers()) if _def and _def.tiers() else "none configured"
+    models = ", ".join(_def.models) if _def and _def.models else "none configured"
     return f"""\
 # agent-bridge — how to use this API (for LLM agents)
 
 You are talking to **agent-bridge {__version__}**, an HTTP gateway that runs a
-coding-agent prompt inside the most relevant *existing* Claude Code session (it
-forks that session, so nothing is mutated) and streams back the result.
+coding-agent prompt inside the most relevant *existing* agent session (Claude
+Code or opencode; it forks that session, so nothing is mutated) and streams back
+the result.
 
 Submit a task, then either stream events (SSE) or poll until the job reaches a
 terminal status. One job = one prompt executed by one agent in one directory.
@@ -48,11 +49,11 @@ Terminal statuses: succeeded, failed, canceled. Non-terminal: queued, running.
 GET  /health                 -> {{"ok": true}}                        (no auth)
 GET  /llms.txt | /v1/help     -> this document                        (no auth)
 GET  /v1/agents               -> {{"configured":[...],"default":"..."}}
-GET  /v1/models[?agent=]      -> models offered, each tagged with the task
-                                 complexity it suits, plus context window and
-                                 $/Mtok. Read before setting `model` on a job;
-                                 the `tiers` map gives complexity -> id.
-                                 Tiers here: {tiers}.
+GET  /v1/models[?agent=]      -> model ids this agent is configured to accept
+                                 (a simple list). Read before setting `model`
+                                 on a job; pass `agent` to scope to a specific
+                                 one (configured: {agents}). Models for
+                                 {cfg.default_agent}: {models}.
 GET  /v1/info[?refresh=1]  -> this machine's capabilities (host/CPU/RAM,
                                  local GPUs, Slurm partitions + GPU inventory,
                                  allocation balance). Cached; read before choosing
@@ -71,7 +72,8 @@ GET  /v1/jobs/{{id}}/events    -> SSE if Accept: text/event-stream,
 POST /v1/files                -> upload files; returns {{"paths":[...]}} to pass
                                  later as files:[{{"path":...}}]. JSON inline or
                                  multipart (see below).
-GET  /v1/files/list?dir=&glob=&recursive= -> [{{path,size,mtime}}] within allowed dirs
+GET  /v1/files/list?dir=&glob=&recursive= -> [{{path,is_dir,size,mtime}}] files
+                                 and dirs within allowed dirs
 GET  /v1/files/content?path=  -> streams a file back (artifacts, result CSVs)
 
 ## Sending files with a job (uploads)
@@ -96,7 +98,9 @@ allowed dir and pass {{"path":...}} instead.
                    Defaults to the agent's default_cwd.
   agent            (string, optional) one of: {agents}. Default: {cfg.default_agent}.
   session          (string, optional) a session_id hint to prefer forking.
-  model            (string, optional) model alias/id, e.g. "opus","sonnet","haiku".
+  model            (string, optional) model id for this agent, e.g. from
+                   /v1/models (for claude: "claude-sonnet-5"; for opencode:
+                   "deepseek/deepseek-v4-flash"). Omit for the agent default.
   permission_mode  (string, optional) e.g. "bypassPermissions","acceptEdits".
   files            (array, optional) attachments (see "Sending files with a job").
 
@@ -126,10 +130,12 @@ Event types and their data:
 Stop when you see event `status` with data.stage=="done", or a `result`/`error`.
 
 ## How dispatch works (why you don't pick a session)
-The gateway itself asks an agent to read the session index and choose the best
-existing session for your prompt, then forks and runs it there. You normally
-only set `prompt` (and `cwd` to steer which project). Use `session` only to force
-a specific fork. GET /v1/sessions to see what's available.
+Default `direct` dispatch runs the prompt in the session you name (`session`),
+or a fresh one if you omit it — no routing model in the path. `GET /v1/sessions`
+lists what's forkable. Use `session` to pin one; the fork never mutates it.
+`fork: false` + `session` resumes that thread in place instead of forking.
+Other dispatch modes exist for claude (`agent_exec`, `select_then_exec`) and
+ask the agent to pick a fork target; see config.toml.
 
 ## Minimal examples
 curl -s -X POST {base}/v1/jobs \\

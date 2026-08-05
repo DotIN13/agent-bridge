@@ -5,8 +5,9 @@ An HTTP gateway that accepts prompts, runs them through a coding agent in a
 shared HPC login node: stdlib-only clients, localhost-bound, queue-worker model,
 SQLite-backed logs you can **SSE-stream or poll**.
 
-Claude Code is the first backend; `opencode` / `antigravity-cli` slot in behind
-the same adapter interface (`gateway/adapters/`).
+Claude Code and opencode are the current backends; each implements the same
+adapter interface (`gateway/adapters/`), so a job names its backend with `agent`
+and picks a model per job with `model`.
 
 ```
 laptop ──POST /v1/jobs──▶ queue ──▶ worker ──▶ claude --resume <session>
@@ -179,6 +180,27 @@ available in config, but they are not the default any more, because that design:
 
 Name the session. If you don't have one, omit `--session` and get a fresh one.
 
+## Choosing a backend and model
+
+`agent` (the adapter: `claude` or `opencode`) and `model` are independent, so
+any backend×model combo is selectable per job. The backend determines the tool
+(Claude Code vs opencode); the model is what runs inside it.
+
+```bash
+ab models -g gw --agent opencode          # deepseek/deepseek-v4-flash, deepseek/deepseek-v4-pro
+ab submit -g gw --agent opencode --model deepseek/deepseek-v4-flash -F task.md
+ab run -g gw --agent opencode --model deepseek/deepseek-v4-pro "…"
+ab run -g gw --agent claude --model claude-sonnet-5 "…"                # unchanged
+```
+
+`models` is a per-agent list in config.toml (`[agents.<name>] models = [...]`),
+so `/v1/models` / `ab models` advertise exactly what each backend accepts:
+claude's ids are `claude-*`, opencode's are `provider/model` (deepseek by
+default).
+`ab sessions --agent opencode` lists what the opencode adapter can fork;
+`--agent claude` (default) lists Claude transcripts. opencode supports
+`dispatch_mode="direct"` only; claude additionally offers the dispatcher modes.
+
 ## Messages from batch jobs
 
 A job's agent turn ends at `sbatch`. Everything after that — queue wait, model
@@ -265,8 +287,9 @@ fallback is a file and the gateway ingests it.
 
 ## Skills — both ends of the contract
 
-[`skills/`](skills/README.md) ships two Claude Code skills, written to agree
-with each other:
+[`skills/`](skills/README.md) ships two agent skills, written to agree
+with each other and backend-agnostic (they work whether the gateway runs
+Claude Code or opencode):
 
 ```bash
 mkdir -p ~/.claude/skills
@@ -338,8 +361,10 @@ retrieve. Useful when a job row is stale or a run wrote no files.
 ## Adding an agent backend
 
 Implement `list_sessions()` and `run(spec, emit)` in
-`gateway/adapters/<name>.py`, register it in `adapters/__init__._REGISTRY`.
-Queueing, persistence, SSE and auth are handled for you.
+`gateway/adapters/<name>.py`, register it in `adapters/__init__._REGISTRY`, and
+add a `[agents.<name>]` section (with a `models = [...]` list) to config.toml.
+Queueing, persistence, SSE and auth are handled for you. `claude`
+and `opencode` are registered; `antigravity` is the next placeholder.
 
 ## Caveats
 
@@ -347,6 +372,9 @@ Queueing, persistence, SSE and auth are handled for you.
   explicitly. Systemd + linger brings the gateway back after a reboot.
 - **`claude` auth must be non-interactive.** Runs reuse `~/.claude`; if that
   expires, jobs fail until you re-auth.
+- **`opencode` auth lives in opencode's own store** (`~/.local/share/opencode`,
+  or `opencode auth login`), not an env var — so opencode jobs just work once
+  you've logged in on the gateway host.
 - **Login nodes are for light work.** Keep `concurrency` low; submit real
   compute to Slurm from inside a job.
 - **`bypassPermissions`** lets the agent edit and execute freely inside

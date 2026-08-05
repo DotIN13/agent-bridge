@@ -6,9 +6,13 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep
 
 # Working through agent-bridge (remote side)
 
-You are the **remote agent**. A local Claude session, working with a human,
-wrote the brief you are executing. This skill is the other half of that
-contract.
+You are the **remote agent**. A local agent session — Claude Code or opencode,
+working with a human — wrote the brief you are executing. This skill is the
+other half of that contract.
+
+**Which backend are you?** The gateway can run the brief through `claude` or
+`opencode`. `ab job <id>` shows the job's `agent` and `model`; if the brief
+names one, work within it and say so if you had to deviate.
 
 ## Your remit
 
@@ -40,9 +44,10 @@ The gateway records your turn ending as the task completing. There is no
 session sees `succeeded` with no deliverable and has to rediscover that nothing
 happened.
 
-**You cannot hold a blocking wait.** A `claude -p` turn ends when generation
-stops, and a Bash call that sleeps for hours hits the tool timeout. Do not try
-to wait for a Slurm job — that is what `ab-notify` exists for.
+**You cannot hold a blocking wait.** A non-interactive agent turn (`claude -p`,
+`opencode run`) ends when generation stops, and a Bash call that sleeps for
+hours hits the tool timeout. Do not try to wait for a Slurm job — that is what
+`ab-notify` exists for.
 
 So:
 

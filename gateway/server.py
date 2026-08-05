@@ -144,14 +144,14 @@ def create_app(gw: Gateway) -> FastAPI:
 
     @app.get("/v1/models", dependencies=[auth])
     async def models(agent: str | None = None):
-        """Models this agent advertises, so a caller can pick one by task
-        complexity. Config-driven ([[agents.<name>.models]]); `tiers` maps a
-        complexity to an id so clients don't reimplement the choice."""
+        """Model ids this agent advertises, so a caller can see what's
+        supported before setting `model` on a job. Config-driven — a simple
+        `models = ["..."]` list under [agents.<name>] in config.toml."""
         acfg = cfg.agents.get(agent or cfg.default_agent)
         if not acfg:
             raise HTTPException(400, f"unknown agent '{agent}'")
         return {"agent": acfg.name, "models": list(acfg.models),
-                "tiers": acfg.tiers(), "default": acfg.model}
+                "default": acfg.model}
 
     @app.get("/v1/info", dependencies=[auth])
     async def info(refresh: bool = False):

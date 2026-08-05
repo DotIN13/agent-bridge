@@ -205,9 +205,13 @@ class Client:
     def info(self, refresh: bool = False) -> dict:
         return self._get("/v1/info" + ("?refresh=1" if refresh else ""))
 
-    def sessions(self, cwd: str | None = None) -> dict:
-        q = ("?" + urllib.parse.urlencode({"cwd": cwd})) if cwd else ""
-        return self._get("/v1/sessions" + q)
+    def sessions(self, cwd: str | None = None, agent: str | None = None) -> dict:
+        q = {}
+        if cwd:
+            q["cwd"] = cwd
+        if agent:
+            q["agent"] = agent
+        return self._get("/v1/sessions" + (("?" + urllib.parse.urlencode(q)) if q else ""))
 
     def models(self, agent: str | None = None) -> dict:
         q = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
@@ -285,7 +289,8 @@ class Client:
         remote = list(paths or [])
         if dir:
             remote += [f["path"] for f in
-                       self.list_files(dir, glob, recursive).get("files", [])]
+                       self.list_files(dir, glob, recursive).get("files", [])
+                       if not f.get("is_dir")]
         if not remote:
             raise GatewayError("nothing to download (give paths or a dir)")
         out = []

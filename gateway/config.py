@@ -8,14 +8,6 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-# Fields kept from a [[agents.<name>.models]] entry. The catalog itself is NOT
-# defined here — config.toml is its single source of truth, so a model can be
-# added or repriced by editing config and restarting, with no code change and
-# no second copy to drift. An agent with no models configured simply advertises
-# none, and `model` on a job is then passed through unchecked.
-_MODEL_FIELDS = ("id", "alias", "tier", "context", "input_per_mtok",
-                 "output_per_mtok", "use", "note")
-
 _DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8787},
     "auth": {"token": ""},
@@ -54,7 +46,7 @@ _DEFAULTS: dict = {
             "allowed_dirs": [str(Path.home())],
             "timeout_sec": 0,
             "max_sessions_in_index": 40,
-            "models": [],       # see config.example.toml; config is the catalog
+            "models": [],       # model ids this agent accepts (see config.toml)
         }
     },
 }
@@ -71,15 +63,7 @@ class AgentConfig:
     allowed_dirs: tuple[str, ...]
     timeout_sec: int
     max_sessions_in_index: int
-    models: tuple[dict, ...] = ()
-
-    def tiers(self) -> dict[str, str]:
-        """complexity tier -> model id. First declared model of a tier wins."""
-        out: dict[str, str] = {}
-        for m in self.models:
-            if m.get("tier") and m["tier"] not in out:
-                out[m["tier"]] = m["id"]
-        return out
+    models: tuple[str, ...] = ()
 
     def resolve_cwd(self, requested: str | None) -> str:
         """Return an allowed absolute cwd, or raise ValueError."""
@@ -240,19 +224,17 @@ def load(path: str | os.PathLike | None) -> Config:
     )
 
 
-def _load_models(raw: list, agent: str) -> tuple[dict, ...]:
-    """Normalise [[agents.<name>.models]] into a stable shape for /v1/models.
-
-    Only `id` is required; everything else is advertising copy. Unknown keys are
-    dropped rather than passed through, so the endpoint's shape stays fixed no
-    matter what an operator adds to the TOML.
-    """
-    out: list[dict] = []
+def _load_models(raw: list, agent: str) -> tuple[str, ...]:
+    """Normalise `models` (a list of model id strings) into a stable shape for
+    /v1/models. This list IS the catalog — an agent with no models configured
+    advertises none, and `model` on a job is then passed through unchecked."""
+    out: list[str] = []
     for entry in raw:
-        if not isinstance(entry, dict) or not entry.get("id"):
+        if not isinstance(entry, str) or not entry.strip():
             raise ValueError(
-                f"agents.{agent}.models: every entry needs an `id` (got {entry!r})")
-        out.append({k: entry[k] for k in _MODEL_FIELDS if entry.get(k) not in (None, "")})
+                f"agents.{agent}.models: every entry needs a model id "
+                f"(got {entry!r})")
+        out.append(entry.strip())
     return tuple(out)
 
 

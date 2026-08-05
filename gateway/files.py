@@ -123,9 +123,11 @@ def list_files(cfg: Config, dir_: str, glob: str = "*", recursive: bool = False)
     it = base.rglob(glob) if recursive else base.glob(glob)
     out = []
     for p in it:
-        if p.is_file():
-            st = p.stat()
-            out.append({"path": str(p), "size": st.st_size, "mtime": st.st_mtime})
+        is_dir = p.is_dir()
+        st = p.stat()
+        out.append({"path": str(p), "is_dir": is_dir,
+                    "size": st.st_size if not is_dir else 0,
+                    "mtime": st.st_mtime})
     out.sort(key=lambda d: -d["mtime"])
     return out
 

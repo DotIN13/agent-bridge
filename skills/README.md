@@ -1,7 +1,9 @@
 # Skills
 
-Two Claude Code skills, one for each end of the connection. They are written to
-agree with each other — install both, or the conventions only hold on one side.
+Two agent skills, one for each end of the connection. They are written to agree
+with each other and are backend-agnostic — they hold whether the gateway runs
+the job through Claude Code or opencode, so install both, or the conventions
+only hold on one side.
 
 | Skill | Install on | Covers |
 |---|---|---|
@@ -24,10 +26,11 @@ same contract from its own side, so neither has to infer the other's behaviour.
 
 The single most expensive failure this is designed around: a remote agent
 ending its turn with *"I'll report back when the job finishes."* The gateway
-records turn-end as task completion, and a `claude -p` turn cannot hold a
-blocking wait — so that promise reads as **success with no deliverable**. The
-worker skill forbids it; the client skill explains how to structure a brief so
-the situation doesn't arise, and `ab-notify` gives the batch job its own voice.
+records turn-end as task completion, and a non-interactive agent turn (`claude
+-p` or `opencode run`) cannot hold a blocking wait — so that promise reads as
+**success with no deliverable**. The worker skill forbids it; the client skill
+explains how to structure a brief so the situation doesn't arise, and
+`ab-notify` gives the batch job its own voice.
 
 ## Adapting them
 

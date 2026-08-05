@@ -4,10 +4,11 @@ from __future__ import annotations
 from ..config import AgentConfig
 from .base import AgentAdapter, Event, RunResult, JobSpec
 from .claude import ClaudeAdapter
+from .opencode import OpenCodeAdapter
 
 _REGISTRY = {
     "claude": ClaudeAdapter,
-    # "opencode": OpenCodeAdapter,
+    "opencode": OpenCodeAdapter,
     # "antigravity": AntigravityAdapter,
 }
 

@@ -7,8 +7,9 @@ allowed-tools: Bash, Read, Write, Glob, Grep
 # agent-bridge (`ab` CLI)
 
 Drives a coding agent on a remote host through the agent-bridge gateway. Work is
-submitted as a prompt; the gateway runs it in a Claude Code session on that
-machine. Use it for remote GPUs, batch jobs, and long delegated tasks.
+submitted as a prompt; the gateway runs it in an agent session on that machine —
+Claude Code or opencode, whichever `--agent` names, on whichever `--model` the
+job pins. Use it for remote GPUs, batch jobs, and long delegated tasks.
 
 > **Adapt before use.** Replace `<repo>`, `<host>`, and `<workdir>` below with
 > your own paths, and delete whatever doesn't apply. The conventions and
@@ -75,8 +76,8 @@ inline each time. PowerShell needs no such flag.
 |---|---|
 | `gateways` | configured gateways; confirms a token is loaded |
 | `info [--refresh]` | remote host capabilities (CPU/RAM, GPUs, scheduler) |
-| `models [--pick TIER]` | models the gateway offers; `--pick` prints one id |
-| `sessions [--cwd DIR]` | sessions you can target |
+| `models [--agent A]` | model ids a gateway's agent accepts |
+| `sessions [--cwd DIR] [--agent A]` | sessions you can target |
 | `jobs [--limit N]` | recent jobs, with full ids and titles |
 | `submit -F FILE [...]` | submit, print job id, return immediately |
 | `run -F FILE [...]` | submit **and block** until done |
@@ -96,7 +97,8 @@ Compose the file with the Write tool — not a heredoc — so no shell quoting i
 involved anywhere.
 
 **Name the session, or accept a fresh one.** Under the default `direct` dispatch
-the worker runs `claude --resume <session>` itself, with no routing model:
+the worker resumes the named session itself (`claude --resume <session>` /
+`opencode run -s <session>`), with no routing model:
 
 ```bash
 ab submit -F task.md --session <uuid>              # fork that session
@@ -107,6 +109,20 @@ ab submit -F task.md                               # fresh session
 `ab sessions --json` lists candidates. `--no-fork` requires `--session` and is
 for a follow-up the session itself must see — a fork puts the message on a
 branch the original never reads.
+
+**Pick the backend and model per job.** `--agent` (claude or opencode) and
+`--model` are independent knobs; both are set at submit time. Scope the catalogs
+the same way:
+
+```bash
+ab models --agent opencode                 # deepseek/deepseek-v4-flash, deepseek/deepseek-v4-pro
+ab submit -F task.md --agent opencode --model deepseek/deepseek-v4-flash
+ab run -F task.md --agent claude --model claude-sonnet-5   # default backend unchanged
+ab sessions --agent opencode               # sessions the opencode adapter can fork
+```
+
+The gateway advertises exactly what each backend accepts (`/v1/models`, a plain
+list); a model not in that list is passed through unchecked, so pin ids verbatim.
 
 **Give every job a `--title`**, then address it by name: `ab events my-run -f`.
 Titles auto-derive from the prompt's first line if unset. Ambiguous refs return
@@ -122,8 +138,9 @@ second and exits at the terminal event, so it behaves well as a background
 command whose output file you read incrementally.
 
 **Pin the model with a full id and verify it took.** Aliases track the newest
-model in a tier, so an aliased run isn't reproducible. The `init` line in
-`ab events` reports the model *actually* running — check that, not the job JSON.
+model in a tier, so an aliased run isn't reproducible. The `init`/`status` line
+in `ab events` reports the model *actually* running (claude) — for opencode,
+`ab job <id>` shows the requested `model`; check that, not just the job JSON.
 
 ## Batch work: the pattern that works
 
@@ -187,14 +204,18 @@ Prefer `ab events` over mtimes once `ab-notify` is wired up.
 
 ## Recovering output when the API can't help
 
-Claude Code session transcripts are readable through `ab ls` / `ab download`:
+Sessions are stored per backend, and both are readable:
 
-```
-<remote home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl
-```
-
-Growing size = still working. Downloading it gives you a job's text even when
-the job row is stale or the run wrote no files.
+- **Claude Code transcripts** are files, reachable through `ab ls` / `ab download`:
+  ```
+  <remote home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl
+  ```
+  Growing size = still working. Downloading it gives you a job's text even when
+  the job row is stale or the run wrote no files.
+- **opencode sessions** live in a SQLite DB at
+  `<remote home>/.local/share/opencode/opencode.db` (no per-session files). Read
+  them with `opencode export <sessionID>` or `opencode session list` on the
+  gateway host; the job's `forked_session` id is the one to export.
 
 ## When it can't connect
 

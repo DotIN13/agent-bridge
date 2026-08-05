@@ -54,7 +54,7 @@ max_request_mb = 512       # whole-request cap; larger data -> scp + pass {path}
 enabled = true
 probe_timeout_sec = 15
 # env vars reported presence-only (yes/no) — values are NEVER exposed
-env_presence = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+env_presence = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"]
 
 [agents.claude]
 bin = "claude"
@@ -82,49 +82,41 @@ allowed_dirs = [
 timeout_sec = 0            # 0 (or negative) = no wall-clock limit; jobs run unbounded
 max_sessions_in_index = 40 # how many recent sessions to show the dispatcher
 
-# Models advertised at /v1/models (and by `ab models`) so a caller can choose by
-# task complexity. This list IS the catalog — there is no built-in fallback, so
-# an agent with no models here advertises none, and `model` on a job is then
-# passed through unchecked. Add or reprice a model by editing here + restarting.
-#   id     (required) what gets passed to the agent's --model
-#   tier   the task complexity this model is the right default for. First model
-#          of a tier wins when resolving tier -> id, so order matters.
-#   rest   optional, shown to whoever is choosing. Unknown keys are ignored.
-# Keep ids pinned rather than aliases: opus/sonnet/haiku track the newest model
-# in each tier, so an alias makes a run non-reproducible once a new one ships.
+# Models this agent advertises at /v1/models (and by `ab models`) so a caller
+# can see what's supported before setting `model` on a job. A plain list of ids
+# — what gets passed to the agent's --model. `model` on a job is passed through
+# unchecked; this list is just what's advertised. Edits take effect on restart.
+models = [
+    "claude-haiku-4-5",
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-fable-5",
+]
 
-[[agents.claude.models]]
-id = "claude-haiku-4-5"
-alias = "haiku"
-tier = "simple"
-context = "200K"
-input_per_mtok = 1.0
-output_per_mtok = 5.0
-use = "Classification, extraction, formatting, short lookups. Fastest and cheapest; the only model here under 1M context."
+[agents.opencode]
+bin = "opencode"
+# The opencode adapter supports dispatch_mode="direct" only — the dispatcher
+# modes rely on Claude-only flags (--tools, --json-schema, structured output).
+dispatch_mode = "direct"
+# Non-interactive runs need tools pre-approved or opencode denies them all;
+# "auto" is the opencode spelling of claude's bypassPermissions.
+permission_mode = "auto"
+# Deterministic default for `--agent opencode` with no --model; override per
+# job with --model. Model ids are provider/model (see `opencode models`).
+model = "deepseek/deepseek-v4-flash"
+default_cwd = "/project/jevans/tzhang3/agent-bridge"
+allowed_dirs = [
+    "/project/jevans/tzhang3",
+    "/home/tzhang3",
+]
+timeout_sec = 0            # 0 (or negative) = no wall-clock limit; jobs run unbounded
+max_sessions_in_index = 40 # how many recent sessions to show in /v1/sessions
 
-[[agents.claude.models]]
-id = "claude-sonnet-5"
-alias = "sonnet"
-tier = "standard"
-context = "1M"
-input_per_mtok = 2.0
-output_per_mtok = 10.0
-use = "Most coding, analysis, and multi-step work. Near-Opus quality on agentic tasks at a third of the cost — the default choice."
-note = "introductory pricing through 2026-08-31; list is 3.00/15.00"
-
-[[agents.claude.models]]
-id = "claude-opus-5"
-alias = "opus"
-tier = "hard"
-context = "1M"
-input_per_mtok = 5.0
-output_per_mtok = 25.0
-use = "Complex agentic coding, long-horizon autonomous runs, deep reasoning. Worth it when the task spans many files or hours."
-
-[[agents.claude.models]]
-id = "claude-fable-5"
-tier = "frontier"
-context = "1M"
-input_per_mtok = 10.0
-output_per_mtok = 50.0
-use = "The hardest reasoning and longest-horizon work. Turns can run many minutes. Reach for it only when Opus 5 has fallen short."
+# opencode/deepseek auth lives in opencode's own store (~/.local/share/opencode),
+# not an env var, so nothing extra is needed here. Models opencode advertises;
+# deepseek-chat and deepseek-reasoner are sunset. See `opencode models deepseek`
+# on the gateway host for the authoritative list.
+models = [
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+]
