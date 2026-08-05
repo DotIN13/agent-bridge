@@ -235,9 +235,34 @@ When inferring a job's state from the filesystem, keep these distinct:
 Folding the first into the second is how a live job gets reported as dead.
 Prefer `ab events` over mtimes once `ab-notify` is wired up.
 
-## Recovering output when the API can't help
+## Reading a job's output
 
-Sessions are stored per backend, and both are readable:
+**`ab job <ref>` first, and usually last.** The final message is stored whole
+and printed whole — no truncation anywhere in that path. A worker following its
+own skill writes that message to stand alone, so in most cases it is the only
+thing you need to read.
+
+**Then `ab events`, which elides by default.** Every event is stored complete;
+the one-line view clips long text and marks it `… [+N chars, --full]`, so a
+truncated line can never be mistaken for a short one. To read the full text of
+a slice without pulling the whole log:
+
+```bash
+ab events my-run --after 40 --until 60 --full     # one bounded window
+ab events my-run --type tool_result --full        # just the tool output
+ab events my-run --json                           # everything, machine-readable
+```
+
+Bounding matters. `--full` with no range on a long job returns every tool
+result in full, which is the thing this is meant to avoid.
+
+### Only then, the session transcript
+
+Reach for it when the job row genuinely cannot help — the gateway lost state,
+or the run died before emitting a result. **It is the most expensive read
+available**: a transcript is every tool call *and every tool result*, megabytes
+for a long session, nearly all of it noise you have already seen summarised.
+Filter it on the remote host and download the extract, not the file.
 
 - **Claude Code transcripts** are files, reachable through `ab ls` / `ab download`:
   ```

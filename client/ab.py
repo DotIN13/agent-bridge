@@ -207,8 +207,16 @@ def cmd_events(args):
     after = args.after
     if not args.follow:
         d = c.events(args.id, after)
-        _out(args, d, lambda x: [print(f"{e['seq']:4} {e['type']}: "
-                                       f"{_ev_text(e)}") for e in x["events"]])
+        if args.until is not None:
+            d = dict(d, events=[e for e in d["events"] if e["seq"] <= args.until])
+        if args.type:
+            keep = set(args.type)
+            d = dict(d, events=[e for e in d["events"] if e["type"] in keep])
+
+        def human(x):
+            for e in x["events"]:
+                print(f"{e['seq']:4} {e['type']}: {_ev_text(e, args.full)}")
+        _out(args, d, human)
         return
     import time
     printer = _stream_printer()
@@ -253,15 +261,27 @@ def cmd_ls(args):
 
 
 # -- streaming helpers ----------------------------------------------------
-def _ev_text(e: dict) -> str:
+def _ev_text(e: dict, full: bool = False) -> str:
+    """One line per event, elided so a long log stays scannable.
+
+    The gateway stores every event whole; the clipping here is presentation
+    only. `--full` turns it off — pair it with `--after/--until` to pull one
+    bounded slice rather than the entire log, which is the cheap alternative
+    to downloading a session transcript.
+    """
     d = e.get("data", {})
-    if e["type"] in ("assistant", "thinking"):
-        return (d.get("text") or "")[:200]
+    cut = (lambda s, n: s or "") if full else (lambda s, n: _elide(s or "", n))
+    if e["type"] in ("assistant", "thinking", "result", "tool_result"):
+        return cut(d.get("text"), 200)
     if e["type"] == "tool_use":
-        return f"{d.get('name')} {json.dumps(d.get('input'))[:120]}"
-    if e["type"] == "result":
-        return (d.get("text") or "")[:200]
-    return json.dumps(d)[:160]
+        return f"{d.get('name')} {cut(json.dumps(d.get('input')), 120)}"
+    return cut(json.dumps(d), 160)
+
+
+def _elide(s: str, n: int) -> str:
+    """Clip with a visible marker and the true size, so a truncated line can
+    never be mistaken for a short one."""
+    return s if len(s) <= n else f"{s[:n]}… [+{len(s) - n} chars, --full]"
 
 
 def _stream_printer():
@@ -360,7 +380,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_job)
 
     sp = sub.add_parser("events"); sp.add_argument("id", metavar="REF", help=ref_help)
-    sp.add_argument("--after", type=int, default=0)
+    sp.add_argument("--after", type=int, default=0,
+                    help="only events with seq > N")
+    sp.add_argument("--until", type=int, default=None,
+                    help="only events with seq <= N; pair with --after "
+                         "and --full to pull one bounded slice in full")
+    sp.add_argument("--type", action="append", metavar="TYPE",
+                    help="only this event type; repeatable "
+                         "(assistant, thinking, tool_use, tool_result, "
+                         "result, status, error, log, message)")
+    sp.add_argument("--full", action="store_true",
+                    help="do not elide event text. Events are stored whole, so "
+                         "this is usually all you need instead of downloading "
+                         "a session transcript — bound it with --after/--until")
     sp.add_argument("--follow", "-f", action="store_true")
     sp.set_defaults(func=cmd_events)
 

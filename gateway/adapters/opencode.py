@@ -200,7 +200,9 @@ class OpenCodeAdapter:
                                     "input": state.get("input", {})}))
             out = state.get("output")
             if out is not None:
-                emit(Event("tool_result", {"text": str(out)[:8000]}))
+                # Stored whole — see the matching note in adapters/claude.py.
+                # Truncation belongs to the client, not the record.
+                emit(Event("tool_result", {"text": str(out)}))
         elif t == "error":
             err = rec.get("error") or {}
             data = err.get("data") or {}

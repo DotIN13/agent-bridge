@@ -415,7 +415,13 @@ class ClaudeAdapter:
             for block in _as_list(rec.get("message", {}).get("content")):
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     text = _flatten(block.get("content"))
-                    emit(Event("tool_result", {"text": text[:8000]}))
+                    # Stored whole, deliberately. This used to clip at 8k, which
+                    # made the event log an unfaithful record of what the agent
+                    # saw and left the session transcript as the only complete
+                    # copy — so recovering one long tool result meant
+                    # downloading megabytes. Truncation is the client's job now
+                    # (`ab events` elides by default, `--full` doesn't).
+                    emit(Event("tool_result", {"text": text}))
                     if capture_nested:
                         self._absorb_nested(text, res)
         elif rtype == "rate_limit_event":

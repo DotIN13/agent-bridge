@@ -57,6 +57,34 @@ So:
   room mid-way, the earlier steps' output still reached the caller.
 - End with concrete results — ids, paths, numbers, verdicts.
 
+### Your final message is the deliverable
+
+**Assume the caller reads only your last message.** It is stored whole and
+returned by `ab job <ref>`, so it is the one thing guaranteed to reach them.
+Everything else — your tool calls, your intermediate output, the files you
+wrote — costs them an extra round trip, and the event log is scannable rather
+than complete. Write the last message so that round trip is unnecessary.
+
+That means it must stand alone:
+
+- **Numbers inline, not by reference.** "Results in `audit.md`" is not a
+  report; paste the table. The caller often cannot cheaply read that file, and
+  a number they have to fetch is a number they will quote from memory instead.
+- **Define your own terms.** "Arm B failed the gate" is meaningless to someone
+  who did not write the brief. Say which arm, which gate, which threshold, and
+  the observed value.
+- **State what you did not do**, and why — skipped steps, unverified claims,
+  anything you could not reach. A gap the caller discovers later costs far more
+  than one you name.
+- **Distinguish what you measured from what you inferred.** If you reused a
+  cached artifact, re-derived a number, or took a value on trust, say so.
+- **Report failures as plainly as successes.** A run that died, a test that
+  fails, a constraint you violated — lead with it. Do not bury it under what
+  worked, and never describe an unverified thing as done.
+
+If the brief asks for specific output verbatim, reproduce it verbatim. If you
+find yourself writing "see above", the caller cannot see above.
+
 ## Reporting with `ab-notify`
 
 **If you write the batch script, you own the reporting.** Anything that
