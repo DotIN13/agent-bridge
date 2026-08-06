@@ -18,8 +18,12 @@ Examples:
     ab download --dir /project/.../out --glob '*.csv' --to ./results
 
 Output contract:
-    stdout carries records, one per line — greppable, pipeable, ids in full.
-    stderr carries headers and hints, so they never reach a pipe.
+    stdout carries everything the command produces — records and the headers
+    around them — one line each, ids in full, so grep sees all of it.
+    stderr carries only the tool's own failures: bad config, unreachable
+    gateway, ambiguous ref. Exception: `submit`, `run` and `--stream` put
+    their metadata on stderr, because their stdout is a payload meant to be
+    captured or redirected whole (`id=$(ab submit ...)`, `ab run > out.md`).
     Long free text is elided by default and marked with its true size.
 
     --json  chooses the shape (machine-readable)
@@ -49,11 +53,24 @@ def _err(msg: str, code: int = 1):
 
 
 # Output contract, applied by every command:
-#   stdout = records, one per line, greppable and pipeable
-#   stderr = headers, counts, hints — visible to a human, invisible to a pipe
+#   stdout = everything the command was asked to produce — records AND the
+#            headers, counts and hints around them, one line each. If you can
+#            see it, you can grep it; you never have to know which stream a
+#            line landed on before you can filter it.
+#   stderr = only the tool's own failures (see `_err`): bad config, an
+#            unreachable gateway, an ambiguous ref. Things that mean the
+#            command did not run, not things it produced.
 #   default = long free text elided; --full turns that off
 #   --json  = shape, not completeness. The two flags are orthogonal, so
 #             `--json --full` is the faithful machine-readable dump.
+#
+# The exceptions are the three commands whose stdout IS a payload meant to be
+# captured or redirected whole, where a stray metadata line would corrupt it:
+#   ab submit  — stdout is the bare job id, so `id=$(ab submit -F t.md)` works
+#   ab run     — stdout is the result text, so `ab run ... > out.md` is clean
+#   --stream   — stdout is the live assistant text; tool and status markers
+#                interleave on stderr rather than inside the transcript
+# Their metadata lines go to stderr for that reason and that reason only.
 ELIDE_AT = 200
 
 # Never elided, for two reasons.
@@ -74,8 +91,10 @@ _KEEP_WHOLE = frozenset({
 
 
 def _note(msg: str) -> None:
-    """Framing for a human. Goes to stderr so it never pollutes a pipe."""
-    print(msg, file=sys.stderr)
+    """A header, count or hint. Goes to stdout with everything else — it is
+    output the caller asked for, not a diagnostic, and putting it on stderr
+    would mean `ab job x | grep status` finds nothing."""
+    print(msg)
 
 
 def _line(s) -> str:
