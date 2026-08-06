@@ -210,9 +210,13 @@ class OpenCodeAdapter:
             res.error = str(msg)[:4000]
             emit(Event("error", {"message": str(msg)}))
         elif t == "step_finish":
+            # Accumulate. opencode emits one step_finish per step and each
+            # carries only that step's cost, so assigning kept the last step
+            # and silently under-reported every multi-step run — which is all
+            # of them that use a tool.
             cost = part.get("cost")
-            if isinstance(cost, (int, float)) and cost is not None:
-                res.cost_usd = cost
+            if isinstance(cost, (int, float)):
+                res.cost_usd = (res.cost_usd or 0.0) + cost
         else:
             emit(Event("log", {"raw": json.dumps(rec)[:2000]}))
 

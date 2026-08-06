@@ -97,6 +97,17 @@ def _note(msg: str) -> None:
     print(msg)
 
 
+def _ts(ts) -> str:
+    """Local wall-clock for one event. Both seq and ts are stored, but only
+    seq was ever displayed — which made it impossible to line an event up
+    against an sbatch log or see where a run stalled without dropping to
+    --json. Seq gives order; ts gives duration and correlation."""
+    if not ts:
+        return "--:--:--"
+    import datetime
+    return datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+
+
 def _line(s) -> str:
     """One record per line: collapse embedded newlines so a multi-line value
     cannot silently become three records."""
@@ -321,7 +332,8 @@ def cmd_events(args):
 
         def human(x):
             for e in x["events"]:
-                print(f"{e['seq']:4} {e['type']}: {_ev_text(e, args.full)}")
+                print(f"{e['seq']:4} {_ts(e.get('ts'))} {e['type']}: "
+                      f"{_ev_text(e, args.full)}")
         _out(args, d, human)
         return
     import time
