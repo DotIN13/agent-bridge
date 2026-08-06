@@ -235,6 +235,28 @@ When inferring a job's state from the filesystem, keep these distinct:
 Folding the first into the second is how a live job gets reported as dead.
 Prefer `ab events` over mtimes once `ab-notify` is wired up.
 
+## Output contract
+
+Everything a command produces goes to **stdout**, one line per record, ids in
+full — so `grep` sees all of it, headers included. stderr carries only the
+tool's own failures (bad config, unreachable gateway, ambiguous ref), meaning
+the command did not run rather than something it produced.
+
+The exceptions are the three commands whose stdout is a payload you capture or
+redirect whole, where a stray metadata line would corrupt it: `submit` (bare
+job id, for `id=$(ab submit -F t.md)`), `run` (result text, for `> out.md`) and
+`--stream` (live assistant text). Their metadata goes to stderr.
+
+**`--json` and `--full` are orthogonal.** `--json` picks the shape; `--full`
+picks the completeness. Long free text is elided by default *in both*, so the
+two views agree on content and differ only in form — `--json --full` is the
+faithful dump. Every clip carries its true size, `… [+N chars, --full]`, so a
+truncated value can never be mistaken for a short one.
+
+Never elided, with or without `--full`: **identifiers** (you cannot resume a
+session or cancel a job from a prefix) and **`result`/`error`** (the final
+report is the deliverable).
+
 ## Reading a job's output
 
 **`ab job <ref>` first, and usually last.** The final message is stored whole
@@ -242,19 +264,22 @@ and printed whole — no truncation anywhere in that path. A worker following it
 own skill writes that message to stand alone, so in most cases it is the only
 thing you need to read.
 
-**Then `ab events`, which elides by default.** Every event is stored complete;
-the one-line view clips long text and marks it `… [+N chars, --full]`, so a
-truncated line can never be mistaken for a short one. To read the full text of
-a slice without pulling the whole log:
+**Then `ab events`, which elides by default.** Every event is stored complete.
+To read the full text of a slice without pulling the whole log:
 
 ```bash
 ab events my-run --after 40 --until 60 --full     # one bounded window
 ab events my-run --type tool_result --full        # just the tool output
-ab events my-run --json                           # everything, machine-readable
+ab events my-run --json --full                    # everything, machine-readable
 ```
 
 Bounding matters. `--full` with no range on a long job returns every tool
 result in full, which is the thing this is meant to avoid.
+
+**Parse `--json`, don't grep the line view.** Grep works on it now, but the
+line view elides at 200 chars, so a pattern that appears later in a long tool
+result will not match and the miss is silent. For a field you are branching on
+— a status, a cost, a session id — read `--json`.
 
 ### Only then, the session transcript
 
