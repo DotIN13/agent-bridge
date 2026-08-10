@@ -1,10 +1,4 @@
-"""Queue-worker pool.
-
-A bounded thread pool pulls job ids off an in-process queue, builds the right
-adapter, and drives it. Each event the adapter emits is assigned a per-job seq,
-persisted to SQLite, and published on the Bus for live SSE. Terminal status is
-written back to the job row.
-"""
+"""Persistent queue worker pool with graceful recovery and shutdown."""
 from __future__ import annotations
 
 import json
@@ -13,7 +7,7 @@ import threading
 import traceback
 
 from .adapters import build as build_adapter
-from .adapters.base import Cancellation, Event, JobSpec
+from .adapters.base import Cancellation, Event, JobSpec, Steering
 from .bus import Bus
 from .config import Config
 from .db import Database
@@ -28,37 +22,126 @@ class WorkerPool:
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
         self._lock = threading.Lock()
-        self._cancels: dict[str, Cancellation] = {}   # running jobs
-        self._cancel_requested: set[str] = set()      # requested before start
+        self._cancels: dict[str, Cancellation] = {}
+        self._cancel_requested: set[str] = set()
+        self._steers: dict[str, Steering] = {}
+        self._claimed: dict[str, str] = {}
+        self._started = False
 
     def start(self) -> None:
-        for i in range(max(1, self.cfg.concurrency)):
-            t = threading.Thread(target=self._loop, name=f"worker-{i}", daemon=True)
-            t.start()
-            self._threads.append(t)
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            self._stop.clear()
+        queued = self.db.reconcile_startup()
+        for index in range(max(1, self.cfg.concurrency)):
+            thread = threading.Thread(
+                target=self._loop, name=f"worker-{index}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+        for job_id in queued:
+            self.submit(job_id)
 
     def submit(self, job_id: str) -> None:
+        if self._stop.is_set():
+            raise RuntimeError("worker pool is stopping")
         self._q.put(job_id)
 
     def cancel(self, job_id: str) -> str:
-        """Request cancellation. Returns 'running' (killed) or 'queued'
-        (marked canceled; the worker will skip it if/when dequeued)."""
         with self._lock:
-            tok = self._cancels.get(job_id)
+            token = self._cancels.get(job_id)
             self._cancel_requested.add(job_id)
-        if tok is not None:
-            tok.cancel()
+            if token is not None:
+                # Terminal persistence is serialized by this same pool lock.
+                # Publish the flag before releasing it, then do the potentially
+                # slow process interruption outside the lock.
+                token.mark_cancelled()
+        if token is not None:
+            token.cancel()
             return "running"
-        # not started yet: finalize now so status reflects immediately
-        self.db.finish_job(job_id, status="canceled", error="canceled before start")
-        return "queued"
 
-    def stop(self) -> None:
-        self._stop.set()
-        for _ in self._threads:
-            self._q.put("")  # unblock
+        row = self.db.cancel_queued_job(job_id)
+        if row is not None:
+            self.bus.publish(job_id, row)
+            self.bus.close(job_id)
+            with self._lock:
+                self._cancel_requested.discard(job_id)
+            return "queued"
 
-    # -- internals --------------------------------------------------------
+        # A worker may have won queued -> running between the first token read
+        # and the database compare-and-set. It registers the token before that
+        # transition, so re-checking here closes the race.
+        with self._lock:
+            token = self._cancels.get(job_id)
+            if token is not None:
+                token.mark_cancelled()
+        if token is not None:
+            token.cancel()
+            return "running"
+        job = self.db.get_job(job_id)
+        status = job["status"] if job else "unknown"
+        if status != "running":
+            with self._lock:
+                self._cancel_requested.discard(job_id)
+        return status
+
+    def steering(self, job_id: str) -> Steering | None:
+        with self._lock:
+            return self._steers.get(job_id)
+
+    def claimant(self, session_id: str) -> str | None:
+        if not session_id:
+            return None
+        with self._lock:
+            return self._claimed.get(session_id)
+
+    def _claim(self, job_id: str, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        with self._lock:
+            holder = self._claimed.get(session_id)
+            if holder and holder != job_id:
+                return holder
+            self._claimed[session_id] = job_id
+        return None
+
+    def _release_locked(self, job_id: str) -> None:
+        """Release per-job state while ``self._lock`` is already held."""
+        self._cancels.pop(job_id, None)
+        self._steers.pop(job_id, None)
+        self._cancel_requested.discard(job_id)
+        for sid in [sid for sid, owner in self._claimed.items()
+                    if owner == job_id]:
+            del self._claimed[sid]
+
+    def _release(self, job_id: str) -> None:
+        with self._lock:
+            self._release_locked(job_id)
+
+    def stop(self, timeout: float | None = None) -> None:
+        """Interrupt live work, wake workers, and join before DB shutdown."""
+        with self._lock:
+            if not self._started:
+                return
+            self._stop.set()
+            tokens = list(self._cancels.values())
+            threads = list(self._threads)
+        for token in tokens:
+            token.cancel()
+        for _thread in threads:
+            self._q.put("")
+        per_thread = timeout if timeout is not None else (
+            self.cfg.cancel_grace_sec + 6.0)
+        for thread in threads:
+            thread.join(per_thread)
+        alive = [thread.name for thread in threads if thread.is_alive()]
+        with self._lock:
+            self._threads = [thread for thread in threads if thread.is_alive()]
+            self._started = bool(self._threads)
+        if alive:
+            raise RuntimeError(f"worker threads did not stop: {alive}")
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             job_id = self._q.get()
@@ -66,12 +149,12 @@ class WorkerPool:
                 continue
             try:
                 self._run_job(job_id)
-            except Exception:  # never let a worker thread die
+            except Exception:
                 self._fail(job_id, traceback.format_exc())
 
     def _run_job(self, job_id: str) -> None:
         job = self.db.get_job(job_id)
-        if not job:
+        if not job or job["status"] != "queued":
             return
         agent_name = job["agent"]
         agent_cfg = self.cfg.agents.get(agent_name)
@@ -80,19 +163,15 @@ class WorkerPool:
             return
 
         cancel = Cancellation(grace_sec=self.cfg.cancel_grace_sec)
+        steer = Steering()
         with self._lock:
             if job_id in self._cancel_requested:
-                # canceled while queued; cancel() already finalized the row
                 self.bus.close(job_id)
                 return
             self._cancels[job_id] = cancel
+            self._steers[job_id] = steer
 
-        seq = _Seq()
         try:
-            self.db.mark_running(job_id)
-            self._emit(job_id, seq,
-                       Event("status", {"stage": "running", "agent": agent_name}))
-
             spec = JobSpec(
                 job_id=job_id,
                 prompt=job["prompt"],
@@ -101,75 +180,102 @@ class WorkerPool:
                 permission_mode=job["permission_mode"],
                 model=job["model"],
                 cancel=cancel,
-                files=tuple(json.loads(job["files"]) if job["files"] else ()),
+                steer=steer,
+                files=tuple(job.get("files") or ()),
                 title=job.get("title") or "",
-                # NULL on rows created before the column existed -> fork, the
-                # historical behaviour.
-                fork=job.get("fork") is None or bool(job["fork"]),
+                fork=bool(job.get("fork", True)),
                 include_thinking=bool(job.get("include_thinking")),
             )
+            if not spec.fork:
+                holder = self._claim(job_id, spec.requested_session)
+                if holder:
+                    self._fail(
+                        job_id,
+                        f"session {spec.requested_session} is being written by "
+                        f"job {holder}; steer that job or wait for it to finish")
+                    return
+
+            running_row = self.db.start_queued_job(job_id, {
+                "stage": "running", "agent": agent_name})
+            if running_row is None:
+                steer.close()
+                self._release(job_id)
+                return
+            self.bus.publish(job_id, running_row)
+            if cancel.cancelled():
+                steer.close()
+                with self._lock:
+                    rows = self.db.finish_job_with_events(
+                        job_id, {"status": "canceled", "error": "canceled"},
+                        [("status", {"stage": "done", "status": "canceled"})])
+                    self._release_locked(job_id)
+                for row in rows:
+                    self.bus.publish(job_id, row)
+                self.bus.close(job_id)
+                return
             adapter = build_adapter(agent_cfg)
 
-            include_thinking = spec.include_thinking
-
-            def emit(ev: Event) -> None:
-                # Reasoning is noisy and can be long; keep it out of the stream
-                # (not persisted, not fanned out to SSE) unless the caller asked
-                # for it when submitting the job.
-                if ev.type == "thinking" and not include_thinking:
+            def emit(event: Event) -> None:
+                if event.type == "thinking" and not spec.include_thinking:
                     return
-                self._emit(job_id, seq, ev)
+                if event.type == "status" and event.data.get("session_id"):
+                    self._claim(job_id, event.data["session_id"])
+                self._emit(job_id, event)
 
             result = adapter.run(spec, emit)
-        finally:
-            with self._lock:
-                self._cancels.pop(job_id, None)
-                self._cancel_requested.discard(job_id)
+        except Exception:
+            steer.close()
+            self._fail(job_id, traceback.format_exc())
+            return
 
-        if cancel.cancelled():
-            status = "canceled"
-            self.db.finish_job(
-                job_id, status="canceled", error="canceled",
-                result=result.result or None,
-                chosen_session=result.chosen_session,
-                forked_session=result.forked_session, cost_usd=result.cost_usd,
-            )
-        elif result.ok:
-            status = "succeeded"
-            self.db.finish_job(
-                job_id, status="succeeded", result=result.result,
-                chosen_session=result.chosen_session,
-                forked_session=result.forked_session, cost_usd=result.cost_usd,
-            )
-        else:
-            status = "failed"
-            self.db.finish_job(
-                job_id, status="failed", error=result.error or "run failed",
-                result=result.result or None,
-                chosen_session=result.chosen_session,
-                forked_session=result.forked_session, cost_usd=result.cost_usd,
-            )
-        self._emit(job_id, seq, Event("status", {"stage": "done", "status": status}))
+        # Keep the cancellation token registered while deciding and committing
+        # the terminal state. A concurrent cancel either sets the token before
+        # this lock is acquired (and wins), or observes the committed terminal
+        # row after per-job state is released; it can never report an accepted
+        # cancellation that is then overwritten by success.
+        steer.close()
+        with self._lock:
+            fields = {
+                "result": result.result or None,
+                "chosen_session": result.chosen_session,
+                "forked_session": result.forked_session,
+                "cost_usd": result.cost_usd,
+            }
+            if cancel.cancelled():
+                status = "canceled"
+                fields.update(status=status, error="canceled")
+            elif result.ok:
+                status = "succeeded"
+                fields.update(status=status, result=result.result, error=None)
+            else:
+                status = "failed"
+                fields.update(status=status, error=result.error or "run failed")
+            rows = self.db.finish_job_with_events(
+                job_id, fields,
+                [("status", {"stage": "done", "status": status})])
+            self._release_locked(job_id)
+        for row in rows:
+            self.bus.publish(job_id, row)
         self.bus.close(job_id)
 
-    def _emit(self, job_id: str, seq: "_Seq", ev: Event) -> None:
-        row = self.db.add_event(job_id, seq.next(), ev.type, ev.data)
+    def _emit(self, job_id: str, event: Event) -> None:
+        row = self.db.append_event(job_id, event.type, event.data)
         self.bus.publish(job_id, row)
 
     def _fail(self, job_id: str, message: str) -> None:
-        try:
-            self.db.finish_job(job_id, status="failed", error=message[:4000])
-            row = self.db.add_event(job_id, 10**9, "error", {"message": message[:4000]})
+        text = message[:4000]
+        with self._lock:
+            token = self._cancels.get(job_id)
+            canceled = bool(token and token.cancelled())
+            if canceled:
+                fields = {"status": "canceled", "error": "canceled"}
+                events = [("status", {"stage": "done", "status": "canceled"})]
+            else:
+                fields = {"status": "failed", "error": text}
+                events = [("error", {"message": text}),
+                          ("status", {"stage": "done", "status": "failed"})]
+            rows = self.db.finish_job_with_events(job_id, fields, events)
+            self._release_locked(job_id)
+        for row in rows:
             self.bus.publish(job_id, row)
-        finally:
-            self.bus.close(job_id)
-
-
-class _Seq:
-    """Monotonic per-job sequence; a job is owned by exactly one worker."""
-    def __init__(self) -> None:
-        self._n = 0
-
-    def next(self) -> int:
-        self._n += 1
-        return self._n
+        self.bus.close(job_id)

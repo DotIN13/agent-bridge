@@ -1,14 +1,33 @@
+# Local configuration and credentials
 config.toml
 .token
 *.token
-.venv/
+.env
+.env.*
 gateways.json
 client/gateways.json
+
+# Virtual environments, Python caches, and packaging output
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Gateway runtime state
 *.db
 *.db-wal
 *.db-shm
 jobs/
 messages/
 gateway-endpoint.json
-__pycache__/
-*.pyc
+*.log
+
+# Local agent/tool state and development probes
+.opencode/
+.pi-subagents/
+gw-test-*.txt

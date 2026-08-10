@@ -6,6 +6,8 @@ and HTTP live outside so a new backend is just one file implementing `run`.
 """
 from __future__ import annotations
 
+import itertools
+import json
 import os
 import signal
 import threading
@@ -38,8 +40,12 @@ class Cancellation:
         self._lock = threading.Lock()
         self._grace = grace_sec
 
-    def cancel(self) -> None:
+    def mark_cancelled(self) -> None:
+        """Publish cancellation immediately, without waiting for process I/O."""
         self._event.set()
+
+    def cancel(self) -> None:
+        self.mark_cancelled()
         with self._lock:
             procs = list(self._procs)
         for p in procs:
@@ -54,6 +60,119 @@ class Cancellation:
             already = self._event.is_set()
         if already:
             interrupt_group(proc, self._grace)
+
+
+class SteerError(RuntimeError):
+    """A steering message could not be delivered to a running agent."""
+
+
+class Steering:
+    """A live input channel into a turn that is already running.
+
+    `--input-format stream-json` is the only mechanism that reaches a turn in
+    progress: the agent reads JSON lines from its stdin and picks them up at
+    the next tool boundary. `--resume` cannot do this — it starts a *second*
+    agent on a stale copy of the transcript, and one of the two branches is
+    then discarded (docs/todo/01).
+
+    The adapter binds the child's stdin here and the worker publishes the
+    handle, so an HTTP steer can find the right process. A handle that was
+    never bound means the backend has no such channel — the caller is told
+    that rather than having the message silently dropped.
+    """
+
+    _ids = itertools.count(1)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stdin = None
+        self._open = False
+        self._bound = False
+
+    def bind(self, stdin) -> None:
+        with self._lock:
+            self._stdin = stdin
+            self._open = stdin is not None
+            self._bound = self._bound or self._open
+
+    def close(self) -> None:
+        """Stop accepting input, which is also what ends the run.
+
+        In streaming-input mode the agent stays alive waiting for more work
+        after it answers, so closing stdin is the signal that the job is over.
+        Idempotent — the adapter closes on the result record and again in its
+        `finally`, because a child still holding an open stdin never exits and
+        `proc.wait()` would block forever.
+        """
+        with self._lock:
+            self._open = False
+            stdin, self._stdin = self._stdin, None
+        if stdin is not None:
+            try:
+                stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    @property
+    def available(self) -> bool:
+        with self._lock:
+            return self._open
+
+    @property
+    def unavailable_reason(self) -> str:
+        with self._lock:
+            if self._open:
+                return ""
+            if self._bound:
+                return ("the agent's turn has already ended, so there is "
+                        "nothing left to steer")
+            return ("this job has no input channel — steering needs the claude "
+                    "adapter in 'direct' dispatch mode")
+
+    def send(self, text: str) -> None:
+        """Queue a user message into the running turn."""
+        self._write({
+            "type": "user",
+            "message": {"role": "user",
+                        "content": [{"type": "text", "text": text}]},
+            "parent_tool_use_id": None,
+        })
+
+    def interrupt(self) -> None:
+        """Stop the current turn in-band.
+
+        The agent acknowledges this on stdout within milliseconds and reports
+        what was still queued, which the signal ladder in `interrupt_group`
+        cannot do. Kept separate from `Cancellation` for now: cancel still goes
+        through signals, which also work on a child that has stopped reading.
+        """
+        self._write({
+            "type": "control_request",
+            "request_id": f"ab-{next(self._ids)}",
+            "request": {"subtype": "interrupt"},
+        })
+
+    def _write(self, obj: dict) -> None:
+        with self._lock:
+            if not self._open or self._stdin is None:
+                raise SteerError(self._unavailable_reason_locked())
+            try:
+                self._stdin.write(json.dumps(obj) + "\n")
+                self._stdin.flush()
+            except (OSError, ValueError) as e:
+                # A broken or closed pipe means the child stopped reading. That
+                # is the most reliable liveness signal available — better than
+                # the job row, which can sit at `running` after the agent died.
+                self._open = False
+                raise SteerError(
+                    f"the agent is no longer accepting input ({e}); its job row "
+                    f"may be stale") from e
+
+    def _unavailable_reason_locked(self) -> str:
+        if self._bound:
+            return "the agent's turn has already ended, so there is nothing left to steer"
+        return ("this job has no input channel — steering needs the claude "
+                "adapter in 'direct' dispatch mode")
 
 
 def interrupt_group(proc, grace_sec: float = INTERRUPT_GRACE_SEC) -> None:
@@ -82,14 +201,23 @@ def interrupt_group(proc, grace_sec: float = INTERRUPT_GRACE_SEC) -> None:
     _kill_group(proc)
 
 
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
 def _signal_all(pids, sig) -> None:
     """Send `sig` to each pid and to its process group."""
     for target in pids:
-        for send in (lambda t: os.killpg(t, sig), lambda t: os.kill(t, sig)):
+        for send in _signal_senders(target, sig):
             try:
                 send(target)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
+
+
+def _signal_senders(target: int, sig):
+    if hasattr(os, "killpg"):
+        yield lambda t: os.killpg(t, sig)
+    yield lambda t: os.kill(t, sig)
 
 
 def _alive(pid: int) -> bool:
@@ -111,34 +239,25 @@ def _settled(proc, victims: list[int], timeout: float) -> bool:
 
 
 def _kill_group(proc) -> None:
-    """SIGKILL the process and its ENTIRE descendant tree.
-
-    A plain killpg misses grandchildren that started their own session — e.g.
-    the dispatcher's nested `claude`, which would otherwise be orphaned and keep
-    running. So we enumerate descendants from /proc *before* killing (once the
-    parent dies they reparent to init and become unfindable), then kill each
-    process, each process's group, and the parent's group.
-    """
+    """Kill the process and its descendant tree (SIGKILL on POSIX, SIGTERM on
+    Windows where SIGKILL is absent)."""
     pid = proc.pid
-    victims = _descendants(pid)  # capture before anything dies
+    victims = _descendants(pid)
     for target in victims + [pid]:
-        # kill the process's own group (catches a child that called setsid)
+        for send in _signal_senders(target, _SIGKILL):
+            try:
+                send(target)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    if hasattr(os, "getpgid") and hasattr(os, "killpg"):
         try:
-            os.killpg(target, signal.SIGKILL)
+            os.killpg(os.getpgid(pid), _SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
-        try:
-            os.kill(target, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
 
 
 def _descendants(pid: int) -> list[int]:
-    """All transitive child PIDs of `pid`, via /proc PPID links."""
+    """All transitive child PIDs of `pid`, via /proc PPID links (POSIX only)."""
     children: dict[int, list[int]] = {}
     try:
         entries = os.listdir("/proc")
@@ -150,7 +269,6 @@ def _descendants(pid: int) -> list[int]:
         try:
             with open(f"/proc/{entry}/stat") as fh:
                 data = fh.read()
-            # fields after the "(comm)" group: state ppid ...
             after = data[data.rfind(")") + 2:].split()
             ppid = int(after[1])
         except (OSError, ValueError, IndexError):
@@ -174,6 +292,7 @@ class JobSpec:
     permission_mode: str | None    # override; None -> adapter default
     model: str | None              # override; None -> adapter default
     cancel: Cancellation | None = None  # set by the worker; adapter binds procs
+    steer: Steering | None = None  # set by the worker; adapter binds the child's stdin
     files: tuple[str, ...] = ()    # absolute paths of attached files (readable by the job)
     title: str = ""                # human handle for the job
     fork: bool = True              # False -> resume the target session in place
@@ -202,6 +321,10 @@ EmitFn = Callable[[Event], None]
 
 class AgentAdapter(Protocol):
     cfg: AgentConfig
+
+    def capabilities(self) -> dict:
+        """Machine-readable operations supported by this configured adapter."""
+        ...
 
     def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
         ...

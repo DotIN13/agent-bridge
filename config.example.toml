@@ -7,11 +7,14 @@ host = "127.0.0.1"   # keep localhost; reach it via `ssh -L 8787:localhost:8787 
 port = 8787
 
 [auth]
-# Shared bearer token. Leave empty to auto-generate one on first start
-# (it is printed to the log and written to .token in the data dir).
+# Shared bearer token. Leave empty to auto-generate one into `.token` in the
+# data dir (mode 0600). Startup does not print it; use --print-token explicitly.
 token = ""
 
 [worker]
+# Queued rows are re-enqueued after a gateway restart. A row that was running
+# is failed with an explicit gateway-restarted event; process recovery is not
+# guessed. Graceful shutdown interrupts and joins before SQLite closes.
 concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
 
 # Cancel interrupts rather than kills: SIGINT (what ESC maps to in the
@@ -30,7 +33,8 @@ path = "gateway.db"  # relative paths resolve against the data dir
 #
 # Batch jobs never write gateway.db directly: it runs in WAL mode, whose index
 # is mmap'd shared memory and so requires every writer on one host. Appending
-# JSONL with O_APPEND needs no locking; the gateway ingests it on read.
+# JSONL with O_APPEND needs no locking; the gateway ingests it on read and uses
+# the same monotonic event cursor. Give retries a stable --report-id.
 dir = "messages"
 
 [files]
@@ -82,10 +86,9 @@ allowed_dirs = [
 timeout_sec = 0            # 0 (or negative) = no wall-clock limit; jobs run unbounded
 max_sessions_in_index = 40 # how many recent sessions to show the dispatcher
 
-# Models this agent advertises at /v1/models (and by `ab models`) so a caller
-# can see what's supported before setting `model` on a job. A plain list of ids
-# — what gets passed to the agent's --model. `model` on a job is passed through
-# unchecked; this list is just what's advertised. Edits take effect on restart.
+# Models advertised by /v1/agents, /v1/models, `ab agents`, and `ab models`.
+# These are backend ids passed through verbatim, not aliases or pricing tiers.
+# Edits take effect on restart.
 models = [
     "claude-haiku-4-5",
     "claude-sonnet-5",

@@ -238,6 +238,13 @@ def _load_models(raw: list, agent: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+def _user_id() -> str:
+    try:
+        return str(os.getuid())
+    except AttributeError:
+        return os.environ.get("USERNAME", os.environ.get("USER", "unknown"))
+
+
 def _resolve_files_dir(cfg_dir: str, data_dir: Path) -> str:
     """Where uploads live:
         - [files].dir from config if set (absolute, or relative to the data dir)
@@ -247,7 +254,7 @@ def _resolve_files_dir(cfg_dir: str, data_dir: Path) -> str:
     if cfg_dir:
         d = Path(cfg_dir) if Path(cfg_dir).is_absolute() else data_dir / cfg_dir
     else:
-        d = Path(tempfile.gettempdir()) / f"agent-bridge-{os.getuid()}" / "files"
+        d = Path(tempfile.gettempdir()) / f"agent-bridge-{_user_id()}" / "files"
     return _prepare_store(d)
 
 

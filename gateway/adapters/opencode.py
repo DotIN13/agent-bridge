@@ -35,11 +35,33 @@ class OpenCodeAdapter:
     def __init__(self, cfg: AgentConfig) -> None:
         self.cfg = cfg
 
+    def capabilities(self) -> dict:
+        return {
+            "sessions": True,
+            "fork": True,
+            "in_place_resume": True,
+            "steering": False,
+            "thinking_events": True,
+            "file_attachments": True,
+            "permission_modes": ["auto", "acceptEdits"],
+            "model_policy": "advertised-passthrough",
+        }
+
     # -- sessions ---------------------------------------------------------
     def _db_path(self) -> Path:
         data = os.environ.get("XDG_DATA_HOME")
-        base = Path(data) if data else Path.home() / ".local" / "share"
-        return base / "opencode" / "opencode.db"
+        if data:
+            return Path(data) / "opencode" / "opencode.db"
+        base = Path.home() / ".local" / "share"
+        db = base / "opencode" / "opencode.db"
+        if db.is_file():
+            return db
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            win_db = Path(local_appdata) / "opencode" / "opencode.db"
+            if win_db.is_file():
+                return win_db
+        return db
 
     def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
         db = self._db_path()
@@ -132,11 +154,22 @@ class OpenCodeAdapter:
     # -- shared streaming -------------------------------------------------
     def _stream(self, args, cwd, prompt, emit, res: RunResult, text: list[str],
                 cancel=None):
-        proc = subprocess.Popen(
-            args, cwd=cwd, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, start_new_session=True,
-        )
+        if os.name == "nt":
+            # Windows: start_new_session requires CREATE_NEW_PROCESS_GROUP;
+            # .cmd/.ps1 binaries need shell=True to be found.
+            popen_kw: dict = dict(
+                cwd=cwd, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                shell=True,
+            )
+        else:
+            popen_kw: dict = dict(
+                cwd=cwd, stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1, start_new_session=True,
+            )
+        proc = subprocess.Popen(args, **popen_kw)
         if cancel is not None:
             cancel.bind(proc)  # kills the process group on cancel (even if already set)
         # timeout_sec <= 0 disables the wall-clock kill (jobs run unbounded).

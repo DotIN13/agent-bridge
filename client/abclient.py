@@ -1,23 +1,29 @@
-"""Shared agent-bridge client: gateway config + HTTP transport + a high-level
-Client. Used by both the `ab` CLI and the MCP server, so there's one source of
-truth for talking to gateways. Pure stdlib.
-
-Config (gateways.json): a `default` name plus per-gateway `base_url` and a token
-(`token`, or `token_env`, or `token_file`). Discovery order:
-    explicit path  >  $AGENT_BRIDGE_MCP_CONFIG  >
-    ~/.config/agent-bridge/gateways.json  >  ./gateways.json
-"""
+"""Shared stdlib-only transport and operations for the ``ab`` CLI."""
 from __future__ import annotations
 
 import json
+import ntpath
 import os
+import posixpath
+import socket
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Iterable, Iterator
+
+try:
+    from agent_bridge_version import __version__ as CLIENT_VERSION
+except ImportError:  # copied client/ directory, without the repository root
+    from _version import __version__ as CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+EVENT_TYPES = {
+    "assistant", "thinking", "tool_use", "tool_result", "result", "status",
+    "error", "log", "message", "steer",
+}
 
 
 class ConfigError(Exception):
@@ -28,19 +34,25 @@ class GatewayError(RuntimeError):
     pass
 
 
-# --------------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------------
 class Gateways:
     def __init__(self, cfg: dict) -> None:
-        self.default = cfg.get("default")
         self.gateways: dict[str, dict] = cfg.get("gateways", {}) or {}
         if not self.gateways:
             raise ConfigError("config has no 'gateways'")
-        if not self.default or self.default not in self.gateways:
+        if "default" in cfg:
+            self.default = cfg.get("default")
+            if not isinstance(self.default, str) or self.default not in self.gateways:
+                raise ConfigError(
+                    f"configured default gateway {self.default!r} is not in "
+                    f"{list(self.gateways)}")
+        elif len(self.gateways) == 1:
             self.default = next(iter(self.gateways))
+        else:
+            raise ConfigError(
+                "gateway config has multiple gateways but no default")
 
-    def client(self, name: str | None = None) -> "Client":
+    def client(self, name: str | None = None, *,
+               require_token: bool = True) -> "Client":
         name = name or self.default
         gw = self.gateways.get(name)
         if not gw:
@@ -49,13 +61,13 @@ class Gateways:
         base = (gw.get("base_url") or "").rstrip("/")
         if not base:
             raise ConfigError(f"gateway '{name}' has no base_url")
-        return Client(name, base, _token_for(gw))
+        return Client(name, base, _token_for(gw, required=require_token))
 
     def summary(self) -> list[dict]:
-        return [{"name": n, "base_url": g.get("base_url"),
-                 "default": n == self.default,
-                 "has_token": bool(_token_for(g, required=False))}
-                for n, g in self.gateways.items()]
+        return [{"name": name, "base_url": gw.get("base_url"),
+                 "default": name == self.default,
+                 "has_token": bool(_token_for(gw, required=False))}
+                for name, gw in self.gateways.items()]
 
 
 def _token_for(gw: dict, required: bool = True) -> str:
@@ -64,39 +76,37 @@ def _token_for(gw: dict, required: bool = True) -> str:
     if gw.get("token_env") and os.environ.get(gw["token_env"]):
         return os.environ[gw["token_env"]]
     if gw.get("token_file"):
-        p = Path(gw["token_file"]).expanduser()
-        if p.exists():
-            return p.read_text().strip()
+        path = Path(gw["token_file"]).expanduser()
+        if path.exists():
+            return path.read_text().strip()
     if required:
         raise ConfigError("no token (set token, token_env, or token_file)")
     return ""
 
 
 def load_gateways(explicit: str | None = None) -> Gateways:
-    for c in (explicit, os.environ.get("AGENT_BRIDGE_MCP_CONFIG"),
-              str(Path.home() / ".config" / "agent-bridge" / "gateways.json"),
-              "gateways.json"):
-        if not c:
+    if explicit and not Path(explicit).expanduser().exists():
+        raise ConfigError(f"explicit gateway config not found: {explicit}")
+    for candidate in (explicit, os.environ.get("AGENT_BRIDGE_CLIENT_CONFIG"),
+                      str(Path.home() / ".config" / "agent-bridge" / "gateways.json"),
+                      "gateways.json"):
+        if not candidate:
             continue
-        p = Path(c).expanduser()
-        if not p.exists():
+        path = Path(candidate).expanduser()
+        if not path.exists():
             continue
-        text = p.read_text()
-        cfg = _load_toml(text) if p.suffix == ".toml" else json.loads(text)
+        text = path.read_text()
+        if path.suffix == ".toml":
+            import tomllib
+            cfg = tomllib.loads(text)
+        else:
+            cfg = json.loads(text)
         return Gateways(cfg)
     raise ConfigError(
-        "no gateway config found (tried --config, $AGENT_BRIDGE_MCP_CONFIG, "
+        "no gateway config found (tried --config, $AGENT_BRIDGE_CLIENT_CONFIG, "
         "~/.config/agent-bridge/gateways.json, ./gateways.json)")
 
 
-def _load_toml(text: str) -> dict:
-    import tomllib
-    return tomllib.loads(text)
-
-
-# --------------------------------------------------------------------------
-# Transport
-# --------------------------------------------------------------------------
 def _parse(raw: bytes):
     try:
         return json.loads(raw or b"{}")
@@ -104,92 +114,221 @@ def _parse(raw: bytes):
         return (raw or b"").decode(errors="replace")
 
 
-def _unreachable(base: str, path: str, e: OSError) -> "GatewayError":
-    """A transport-level failure. Covers both a refused connect (URLError, which
-    carries .reason) and a connection dropped mid-response — the signature of a
-    live `ssh -L` whose far end has died, which raises a bare OSError."""
-    return GatewayError(f"cannot reach {base}{path}: {getattr(e, 'reason', e)} "
-                        f"(is the SSH port-forward up, and the gateway running?)")
+def _unreachable(base: str, path: str, exc: OSError) -> GatewayError:
+    return GatewayError(
+        f"cannot reach {base}{path}: {getattr(exc, 'reason', exc)} "
+        "(is the SSH port-forward up, and the gateway running?)")
+
+
+def _request(method: str, base: str, path: str, token: str, *, body=None,
+             accept="application/json", headers=None) -> urllib.request.Request:
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(base + path, data=data, method=method)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    req.add_header("Accept", accept)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    for key, value in (headers or {}).items():
+        if value is not None:
+            req.add_header(key, str(value))
+    return req
 
 
 def http(method: str, base: str, path: str, token: str, body: dict | None = None,
-         timeout: float = 60.0, accept: str = "application/json"):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(base + path, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", accept)
-    if data:
-        req.add_header("Content-Type", "application/json")
+         timeout: float = 60.0, accept: str = "application/json", headers=None):
+    req = _request(method, base, path, token, body=body, accept=accept,
+                   headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, _parse(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, _parse(e.read())
-    except OSError as e:
-        raise _unreachable(base, path, e) from e
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return response.status, _parse(response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, _parse(exc.read())
+    except OSError as exc:
+        raise _unreachable(base, path, exc) from exc
+
+
+def _multipart_filename(name: str) -> str:
+    """A conservative quoted-string value for Content-Disposition."""
+    if any(ch in name for ch in ("\x00", "\r", "\n")):
+        raise GatewayError(f"unsafe upload name: {name!r}")
+    return name.replace("\\", "\\\\").replace('"', '\\"')
+
+
+class _MultipartStream:
+    def __init__(self, stream) -> None:
+        self.stream = stream
+
+    def __iter__(self):
+        self.stream.seek(0)
+        while True:
+            chunk = self.stream.read(1 << 20)
+            if not chunk:
+                return
+            yield chunk
 
 
 def http_multipart(base: str, path: str, token: str, payload: dict,
-                   files: list[tuple[str, str]], timeout: float = 3600.0):
-    """POST multipart: a `payload` JSON field + file parts (field name `files`).
-    `files` is [(remote_filename, local_path)]."""
+                   files: list[tuple[str, str]], timeout: float = 3600.0,
+                   headers=None):
+    """Spool multipart with bounded reads, then stream it without RAM copies."""
     boundary = "----agentbridge" + os.urandom(12).hex()
     crlf = b"\r\n"
-    body = bytearray()
+    spool = tempfile.TemporaryFile()
 
-    def hdr(disp: str):
-        body.extend(f"--{boundary}".encode() + crlf)
-        body.extend(disp.encode() + crlf + crlf)
+    def write_header(disposition: str):
+        spool.write(f"--{boundary}".encode() + crlf)
+        spool.write(disposition.encode("utf-8") + crlf + crlf)
 
-    hdr('Content-Disposition: form-data; name="payload"')
-    body.extend(json.dumps(payload).encode() + crlf)
-    for fname, local in files:
-        with open(local, "rb") as fh:
-            data = fh.read()
-        hdr(f'Content-Disposition: form-data; name="files"; filename="{fname}"'
-            f'\r\nContent-Type: application/octet-stream')
-        body.extend(data + crlf)
-    body.extend(f"--{boundary}--".encode() + crlf)
-
-    req = urllib.request.Request(base + path, data=bytes(body), method="POST")
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, _parse(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, _parse(e.read())
-    except OSError as e:
-        raise _unreachable(base, path, e) from e
+        write_header('Content-Disposition: form-data; name="payload"')
+        spool.write(json.dumps(payload).encode() + crlf)
+        for remote_name, local in files:
+            quoted = _multipart_filename(remote_name)
+            write_header('Content-Disposition: form-data; name="files"; '
+                         f'filename="{quoted}"\r\n'
+                         'Content-Type: application/octet-stream')
+            with open(local, "rb") as source:
+                while True:
+                    chunk = source.read(1 << 20)
+                    if not chunk:
+                        break
+                    spool.write(chunk)
+            spool.write(crlf)
+        spool.write(f"--{boundary}--".encode() + crlf)
+        length = spool.tell()
+        req = urllib.request.Request(
+            base + path, data=_MultipartStream(spool), method="POST")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("Content-Length", str(length))
+        for key, value in (headers or {}).items():
+            if value is not None:
+                req.add_header(key, str(value))
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return response.status, _parse(response.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, _parse(exc.read())
+        except OSError as exc:
+            raise _unreachable(base, path, exc) from exc
+    finally:
+        spool.close()
 
 
 def http_download(base: str, token: str, remote_path: str, local_path: str,
-                  timeout: float = 3600.0) -> int:
+                  timeout: float = 3600.0, overwrite: bool = False) -> int:
+    """Download through a sibling temp file and atomically publish it."""
+    destination = Path(local_path)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise GatewayError(f"cannot create local download directory: {exc}") from exc
+    if destination.exists() and not overwrite:
+        raise GatewayError(f"refusing to overwrite existing file: {destination}")
     url = base + "/v1/files/content?" + urllib.parse.urlencode({"path": remote_path})
     req = urllib.request.Request(url, method="GET")
     req.add_header("Authorization", f"Bearer {token}")
-    os.makedirs(os.path.dirname(os.path.abspath(local_path)) or ".", exist_ok=True)
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.",
+                                         suffix=".part", dir=destination.parent)
+    except OSError as exc:
+        raise GatewayError(f"cannot create local download file: {exc}") from exc
     total = 0
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r, \
-                open(local_path, "wb") as out:
+        try:
+            response = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            os.close(fd)
+            raise GatewayError(
+                f"download {remote_path} failed: {exc.code} {_parse(exc.read())}") from exc
+        except OSError as exc:
+            os.close(fd)
+            raise _unreachable(base, "/v1/files/content", exc) from exc
+        with response, os.fdopen(fd, "wb") as out:
             while True:
-                chunk = r.read(1 << 20)
+                try:
+                    chunk = response.read(1 << 20)
+                except OSError as exc:
+                    raise _unreachable(base, "/v1/files/content", exc) from exc
                 if not chunk:
                     break
-                out.write(chunk)
+                try:
+                    out.write(chunk)
+                except OSError as exc:
+                    raise GatewayError(f"cannot write local download: {exc}") from exc
                 total += len(chunk)
-    except urllib.error.HTTPError as e:
-        raise GatewayError(f"download {remote_path} failed: "
-                           f"{e.code} {_parse(e.read())}") from e
-    except OSError as e:
-        raise _unreachable(base, "/v1/files/content", e) from e
-    return total
+            try:
+                out.flush()
+                os.fsync(out.fileno())
+            except OSError as exc:
+                raise GatewayError(f"cannot flush local download: {exc}") from exc
+        if destination.exists() and not overwrite:
+            raise GatewayError(f"refusing to overwrite existing file: {destination}")
+        try:
+            os.replace(temporary, destination)
+        except OSError as exc:
+            raise GatewayError(f"cannot publish local download: {exc}") from exc
+        return total
+    finally:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
 
 
-# --------------------------------------------------------------------------
-# High-level client
-# --------------------------------------------------------------------------
+def parse_sse(lines: Iterable[bytes | str], *,
+              include_comments: bool = False) -> Iterator[dict]:
+    """Parse SSE frames, including comments and multiline ``data:`` fields."""
+    event_id = None
+    event_name = None
+    data_lines: list[str] = []
+    for raw in lines:
+        line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        line = line.rstrip("\r\n")
+        if not line:
+            if data_lines:
+                text = "\n".join(data_lines)
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError as exc:
+                    raise GatewayError(f"invalid SSE JSON payload: {exc}") from exc
+                if not isinstance(payload, dict):
+                    raise GatewayError("invalid SSE payload: expected JSON object")
+                if event_id is not None and "seq" not in payload:
+                    try:
+                        payload["seq"] = int(event_id)
+                    except ValueError:
+                        pass
+                if event_name is not None and "type" not in payload:
+                    payload["type"] = event_name
+                yield payload
+            event_id = None
+            event_name = None
+            data_lines = []
+            continue
+        if line.startswith(":"):
+            if include_comments:
+                yield {"_comment": line[1:].lstrip()}
+            continue
+        field, separator, value = line.partition(":")
+        if separator and value.startswith(" "):
+            value = value[1:]
+        if field == "id":
+            event_id = value
+        elif field == "event":
+            event_name = value
+        elif field == "data":
+            data_lines.append(value)
+    if data_lines:
+        # Servers should terminate frames with a blank line; accepting EOF is
+        # friendlier to proxies which close immediately after the final event.
+        yield from parse_sse([f"id: {event_id or ''}\n", f"event: {event_name or ''}\n",
+                              *(f"data: {value}\n" for value in data_lines), "\n"],
+                             include_comments=include_comments)
+
+
 class Client:
     def __init__(self, name: str, base: str, token: str) -> None:
         self.name = name
@@ -201,143 +340,435 @@ class Client:
         _raise(code, data)
         return data
 
-    # -- capabilities --
+    # discovery
+    def health(self) -> dict:
+        return self._get("/health")
+
+    def remote_help(self) -> str:
+        code, data = http("GET", self.base, "/v1/help", self.token,
+                          accept="text/markdown")
+        _raise(code, data)
+        return data if isinstance(data, str) else json.dumps(data)
+
+    def agents(self) -> dict:
+        return self._get("/v1/agents")
+
     def info(self, refresh: bool = False) -> dict:
         return self._get("/v1/info" + ("?refresh=1" if refresh else ""))
 
     def sessions(self, cwd: str | None = None, agent: str | None = None) -> dict:
-        q = {}
-        if cwd:
-            q["cwd"] = cwd
-        if agent:
-            q["agent"] = agent
-        return self._get("/v1/sessions" + (("?" + urllib.parse.urlencode(q)) if q else ""))
+        query = {key: value for key, value in (("cwd", cwd), ("agent", agent)) if value}
+        return self._get("/v1/sessions" +
+                         (("?" + urllib.parse.urlencode(query)) if query else ""))
 
     def models(self, agent: str | None = None) -> dict:
-        q = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
-        return self._get("/v1/models" + q)
+        query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
+        return self._get("/v1/models" + query)
 
-    # -- jobs --
+    def capabilities(self) -> dict:
+        return {
+            "client": {"version": CLIENT_VERSION,
+                       "output_modes": ["human", "json", "jsonl"],
+                       "exit_codes": {"success": 0, "local_error": 1,
+                                      "invocation": 2, "remote_failure": 3,
+                                      "wait_timeout": 4},
+                       "streaming": "sse",
+                       "operations": ["gateways", "health", "agents", "capabilities",
+                                      "info", "models", "sessions", "run", "submit",
+                                      "jobs", "job", "wait", "events", "steer",
+                                      "cancel", "upload", "download", "ls"]},
+            "gateway": self.name,
+            "server": self.agents(),
+        }
+
+    # jobs
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
                session=None, permission_mode=None, files=None, upload=None,
-               title=None, fork=True, include_thinking=False) -> dict:
+               upload_names=None, title=None, fork=True, include_thinking=False,
+               idempotency_key=None) -> dict:
         payload = _job_payload(prompt, cwd, agent, model, session,
                                permission_mode, files, title, fork,
                                include_thinking)
-        uploads = [(os.path.basename(p), p) for p in (upload or [])]
+        uploads = _collect_local(upload, None, upload_names)
+        headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         if uploads:
             code, data = http_multipart(self.base, "/v1/jobs", self.token,
-                                        payload, uploads)
+                                        payload, uploads, headers=headers)
         else:
-            code, data = http("POST", self.base, "/v1/jobs", self.token, body=payload)
+            code, data = http("POST", self.base, "/v1/jobs", self.token,
+                              body=payload, headers=headers)
         _raise(code, data)
         return data
 
-    def list_jobs(self, limit: int = 50) -> dict:
-        return self._get(f"/v1/jobs?limit={int(limit)}")
+    def list_jobs(self, limit: int = 50, cursor: str | None = None) -> dict:
+        query = {"limit": int(limit)}
+        if cursor:
+            query["cursor"] = cursor
+        return self._get("/v1/jobs?" + urllib.parse.urlencode(query))
 
     def get_job(self, job_id: str) -> dict:
-        """Full id, or any unique id prefix (resolved gateway-side)."""
-        return self._get(f"/v1/jobs/{job_id}")
+        return self._get(f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}")
 
-    def events(self, job_id: str, after: int = 0) -> dict:
-        data = self._get(f"/v1/jobs/{job_id}/events?after={int(after)}")
-        evs = data.get("events", [])
-        return {"events": evs, "terminal": data.get("terminal"),
-                "status": (data.get("job") or {}).get("status"),
-                "next_after": evs[-1]["seq"] if evs else after}
+    def events(self, job_id: str, after: int = 0, limit: int = 500) -> dict:
+        query = urllib.parse.urlencode({"after": int(after), "limit": int(limit),
+                                        "legacy": "false"})
+        data = self._get(
+            f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/events?{query}")
+        events = data.get("events", [])
+        return {"events": events, "terminal": data.get("terminal"),
+                "status": data.get("status") or (data.get("job") or {}).get("status"),
+                "next_after": data.get("next_after",
+                    events[-1]["seq"] if events else after),
+                "has_more": bool(data.get("has_more"))}
+
+    def iter_events(self, job_id: str, after: int = 0, *, types=None,
+                    until: int | None = None, read_timeout: float = 30.0,
+                    reconnects: int = 2,
+                    deadline: float | None = None) -> Iterator[dict]:
+        """Yield faithful events from resumable SSE, with JSON-page fallback."""
+        cursor = int(after)
+        wanted = set(types or [])
+        path = f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/events"
+        attempts = 0
+        while True:
+            query = "?" + urllib.parse.urlencode({"after": cursor})
+            req = _request("GET", self.base, path + query, self.token,
+                           accept="text/event-stream",
+                           headers={"Last-Event-ID": cursor})
+            try:
+                with urllib.request.urlopen(req, timeout=read_timeout) as response:
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text/event-stream" not in content_type:
+                        page = _parse(response.read())
+                        if not isinstance(page, dict):
+                            raise GatewayError("event endpoint returned neither SSE nor JSON")
+                        for event in page.get("events", []):
+                            seq = int(event.get("seq", 0))
+                            if seq <= cursor:
+                                continue
+                            cursor = seq
+                            if until is not None and seq > until:
+                                return
+                            if not wanted or event.get("type") in wanted:
+                                yield event
+                            if until is not None and seq >= until:
+                                return
+                        if page.get("terminal"):
+                            return
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return
+                        time.sleep(0.5)
+                        continue
+                    received = False
+                    for event in parse_sse(response, include_comments=True):
+                        if deadline is not None and time.monotonic() >= deadline:
+                            return
+                        if "_comment" in event:
+                            continue
+                        seq = int(event.get("seq", 0))
+                        if seq <= cursor:
+                            continue
+                        received = True
+                        cursor = seq
+                        if until is not None and seq > until:
+                            return
+                        if not wanted or event.get("type") in wanted:
+                            yield event
+                        if until is not None and seq >= until:
+                            return
+                    job = self.get_job(job_id)
+                    if job.get("status") in TERMINAL:
+                        return
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return
+                    attempts = 0 if received else attempts + 1
+                    if attempts > reconnects:
+                        raise GatewayError(
+                            f"event stream ended while job {job_id} is still "
+                            f"{job.get('status')}; reconnect limit exceeded")
+                    continue
+            except urllib.error.HTTPError as exc:
+                data = _parse(exc.read())
+                # Old gateways may not honor SSE; their JSON response can still
+                # be consumed without a different operation.
+                if exc.code in {406, 415}:
+                    page = self.events(job_id, cursor)
+                    for event in page["events"]:
+                        cursor = int(event["seq"])
+                        if until is not None and cursor > until:
+                            return
+                        if not wanted or event.get("type") in wanted:
+                            yield event
+                        if until is not None and cursor >= until:
+                            return
+                    if page.get("terminal"):
+                        return
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return
+                    time.sleep(0.5)
+                    continue
+                _raise(exc.code, data)
+            except (TimeoutError, socket.timeout):
+                # A wait deliberately sets the socket timeout to its remaining
+                # deadline. Expiry there is a normal wait timeout, not a broken
+                # gateway or exhausted reconnect budget.
+                if deadline is not None and time.monotonic() >= deadline:
+                    return
+                attempts += 1
+                if attempts > reconnects:
+                    job = self.get_job(job_id)
+                    if job.get("status") in TERMINAL:
+                        return
+                    raise GatewayError(
+                        f"event stream timed out while job {job_id} is still "
+                        f"{job.get('status')}; reconnect limit exceeded")
+            except OSError as exc:
+                attempts += 1
+                if attempts > reconnects:
+                    raise _unreachable(self.base, path, exc) from exc
+
+    def wait(self, job_id: str, *, timeout: float = 900.0, on_event=None,
+             types=None, cancel_on_timeout: bool = False) -> dict:
+        deadline = time.monotonic() + timeout
+        after = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                job = self.get_job(job_id)
+                if cancel_on_timeout and job.get("status") not in TERMINAL:
+                    self.cancel(job_id)
+                    job = self._poll_terminal(job_id, 30.0, on_event, after)
+                return {**job, "timed_out_waiting": True}
+            for event in self.iter_events(
+                    job_id, after, types=types,
+                    read_timeout=max(0.1, min(30.0, remaining)), reconnects=2,
+                    deadline=deadline):
+                after = max(after, int(event.get("seq", 0)))
+                if on_event:
+                    on_event(event)
+                if time.monotonic() >= deadline:
+                    break
+            job = self.get_job(job_id)
+            if job.get("status") in TERMINAL:
+                return job
+
+    def _poll_terminal(self, job_id: str, timeout: float, on_event=None,
+                       after: int = 0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            page = self.events(job_id, after)
+            for event in page["events"]:
+                after = int(event["seq"])
+                if on_event:
+                    on_event(event)
+            if page["terminal"]:
+                return self.get_job(job_id)
+            time.sleep(0.25)
+        return self.get_job(job_id)
+
+    def run(self, prompt: str, *, timeout: float = 900.0, on_event=None,
+            cancel_on_timeout: bool = False, **submit_kw) -> dict:
+        accepted = self.submit(prompt, **submit_kw)
+        return self.wait(accepted["id"], timeout=timeout, on_event=on_event,
+                         cancel_on_timeout=cancel_on_timeout)
 
     def cancel(self, job_id: str) -> dict:
-        code, data = http("POST", self.base, f"/v1/jobs/{job_id}/cancel", self.token)
+        code, data = http("POST", self.base,
+                          f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/cancel",
+                          self.token)
         _raise(code, data)
         return data
 
-    def run(self, prompt: str, *, poll_interval: float = 1.5, timeout: float = 900,
-            on_event=None, **submit_kw) -> dict:
-        """Submit and wait; calls on_event(ev) for each event if given."""
-        job = self.submit(prompt, **submit_kw)
-        job_id = job["id"]
-        after = 0
-        deadline = time.monotonic() + timeout
-        while True:
-            ev = self.events(job_id, after)
-            for e in ev["events"]:
-                if on_event:
-                    on_event(e)
-                after = e["seq"]
-            if ev["terminal"]:
-                return self.get_job(job_id)
-            if time.monotonic() > deadline:
-                return {**self.get_job(job_id), "timed_out_waiting": True}
-            time.sleep(poll_interval)
+    def steer(self, job_id: str, prompt: str) -> dict:
+        code, data = http("POST", self.base,
+                          f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/steer",
+                          self.token, body={"prompt": prompt})
+        _raise(code, data)
+        return data
 
-    # -- files --
-    def upload_files(self, paths=None, dir=None) -> dict:
-        files = _collect_local(paths, dir)
+    # files
+    def upload_files(self, paths=None, dir=None, names=None) -> dict:
+        files = _collect_local(paths, dir, names)
         if not files:
             raise GatewayError("give paths or a dir to upload")
         code, data = http_multipart(self.base, "/v1/files", self.token, {}, files)
         _raise(code, data)
         return data
 
-    def list_files(self, dir: str, glob: str = "*", recursive: bool = False) -> dict:
-        q = urllib.parse.urlencode({"dir": dir, "glob": glob,
-                                    "recursive": str(bool(recursive)).lower()})
-        return self._get("/v1/files/list?" + q)
+    def list_files(self, dir: str, glob: str = "*", recursive: bool = False,
+                   limit: int = 1000, cursor: str | None = None) -> dict:
+        query = {"dir": dir, "glob": glob,
+                 "recursive": str(bool(recursive)).lower(), "limit": int(limit)}
+        if cursor:
+            query["cursor"] = cursor
+        return self._get("/v1/files/list?" + urllib.parse.urlencode(query))
 
     def download_files(self, local_dir: str, paths=None, dir=None, glob="*",
-                       recursive=False) -> list[dict]:
+                       recursive=False, *, flatten=False, overwrite=False) -> list[dict]:
         remote = list(paths or [])
         if dir:
-            remote += [f["path"] for f in
-                       self.list_files(dir, glob, recursive).get("files", [])
-                       if not f.get("is_dir")]
+            cursor = None
+            while True:
+                page = self.list_files(dir, glob, recursive, cursor=cursor)
+                remote.extend(row["path"] for row in page.get("files", [])
+                              if not row.get("is_dir"))
+                if not page.get("has_more"):
+                    break
+                cursor = page.get("next_cursor")
         if not remote:
             raise GatewayError("nothing to download (give paths or a dir)")
-        out = []
-        for rp in remote:
-            local = os.path.join(local_dir, os.path.basename(rp))
-            n = http_download(self.base, self.token, rp, local)
-            out.append({"remote": rp, "local": local, "bytes": n})
-        return out
+        plan = _download_plan(remote, local_dir, source_dir=dir, flatten=flatten)
+        for _remote, destination in plan:
+            if destination.exists() and not overwrite:
+                raise GatewayError(f"refusing to overwrite existing file: {destination}")
+        result = []
+        for remote_path, destination in plan:
+            size = http_download(self.base, self.token, remote_path,
+                                 str(destination), overwrite=overwrite)
+            result.append({"remote": remote_path, "local": str(destination),
+                           "bytes": size})
+        return result
 
 
 def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
                  title=None, fork=True, include_thinking=False) -> dict:
     body = {"prompt": prompt}
-    for k, v in (("cwd", cwd), ("agent", agent), ("model", model),
-                 ("session", session), ("permission_mode", permission_mode),
-                 ("title", title)):
-        if v:
-            body[k] = v
+    for key, value in (("cwd", cwd), ("agent", agent), ("model", model),
+                       ("session", session), ("permission_mode", permission_mode),
+                       ("title", title)):
+        if value:
+            body[key] = value
     if not fork:
-        body["fork"] = False   # only sent when it differs from the default
+        body["fork"] = False
     if include_thinking:
-        body["include_thinking"] = True  # only sent when it differs from the default
+        body["include_thinking"] = True
     if files:
-        body["files"] = [{"path": p} for p in files]
+        body["files"] = [{"path": path} for path in files]
     return body
 
 
-def _collect_local(paths, dir) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
-    for p in paths or []:
-        out.append((os.path.basename(p), p))
-    if dir:
-        for root, _dirs, fnames in os.walk(dir):
-            for fn in fnames:
-                full = os.path.join(root, fn)
-                out.append((os.path.relpath(full, dir), full))
-    return out
+def _normal_remote_name(name: str) -> str:
+    value = name.replace("\\", "/").strip("/")
+    if not value or value.startswith("../") or "/../" in f"/{value}/" or "/./" in f"/{value}/":
+        raise GatewayError(f"unsafe upload name: {name!r}")
+    return value
+
+
+def _collect_local(paths, directory, names=None) -> list[tuple[str, str]]:
+    explicit_names = names or {}
+    output: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(remote_name: str, local_name: str) -> None:
+        local = Path(local_name).expanduser()
+        if local.is_symlink() or not local.is_file():
+            raise GatewayError(f"upload is not a regular non-symlink file: {local}")
+        if not os.access(local, os.R_OK):
+            raise GatewayError(f"upload is not readable: {local}")
+        remote = _normal_remote_name(remote_name)
+        if remote in seen:
+            raise GatewayError(f"duplicate upload destination: {remote}")
+        seen.add(remote)
+        output.append((remote, str(local)))
+
+    for item in paths or []:
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            remote, local = item
+        elif isinstance(item, dict):
+            local = item.get("path") or item.get("local")
+            remote = item.get("name") or item.get("remote") or os.path.basename(local or "")
+        else:
+            local = str(item)
+            remote = explicit_names.get(str(item), os.path.basename(str(item)))
+        add(str(remote), str(local))
+    if directory:
+        root = Path(directory).expanduser()
+        if root.is_symlink() or not root.is_dir():
+            raise GatewayError(f"upload directory is not a non-symlink directory: {root}")
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = [name for name in dirs
+                       if not (Path(current) / name).is_symlink()]
+            for filename in files:
+                full = Path(current) / filename
+                if full.is_symlink():
+                    raise GatewayError(f"refusing directory symlink: {full}")
+                add(full.relative_to(root).as_posix(), str(full))
+    return output
+
+
+def _remote_module(path: str):
+    return ntpath if "\\" in path and "/" not in path else posixpath
+
+
+def _download_plan(remote: list[str], local_dir: str, *, source_dir=None,
+                   flatten=False) -> list[tuple[str, Path]]:
+    raw_root = Path(local_dir).expanduser()
+    if raw_root.is_symlink():
+        raise GatewayError(f"download destination is a symlink: {raw_root}")
+    raw_root.mkdir(parents=True, exist_ok=True)
+    root = raw_root.resolve()
+    explicit = list(dict.fromkeys(str(path) for path in remote))
+    if len(explicit) != len(remote):
+        raise GatewayError("duplicate remote download path")
+    common = None
+    if not flatten and not source_dir and len(explicit) > 1:
+        module = _remote_module(explicit[0])
+        try:
+            common = module.commonpath(explicit)
+            if common in explicit:
+                common = module.dirname(common)
+        except ValueError:
+            common = None
+    output: list[tuple[str, Path]] = []
+    seen: set[str] = set()
+    for remote_path in explicit:
+        module = _remote_module(remote_path)
+        if flatten:
+            relative = module.basename(remote_path)
+        elif source_dir:
+            try:
+                relative = module.relpath(remote_path, source_dir)
+            except ValueError:
+                relative = module.basename(remote_path)
+            if relative == ".." or relative.startswith(".." + module.sep):
+                relative = module.basename(remote_path)
+        elif common:
+            relative = module.relpath(remote_path, common)
+        else:
+            relative = module.basename(remote_path)
+        relative = relative.replace("\\", "/")
+        pure_parts = [part for part in relative.split("/") if part not in ("", ".")]
+        if not pure_parts or any(part == ".." or "\x00" in part for part in pure_parts):
+            raise GatewayError(f"unsafe remote download path: {remote_path!r}")
+        destination = root.joinpath(*pure_parts)
+        resolved = destination.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise GatewayError(f"download path escapes destination: {remote_path!r}") from exc
+        key = os.path.normcase(str(resolved))
+        if key in seen:
+            raise GatewayError(f"download destination collision: {resolved}")
+        seen.add(key)
+        output.append((remote_path, resolved))
+    return output
 
 
 def _raise(code: int, data) -> None:
-    if code >= 400:
-        # FastAPI's HTTPException serialises to {"detail": ...}; a few handlers
-        # return {"error": ...}. Fall back to the raw body so a message is never
-        # swallowed into "None".
-        if isinstance(data, dict):
-            msg = data.get("detail") or data.get("error") or json.dumps(data)
-        else:
-            msg = str(data)
-        raise GatewayError(f"gateway returned {code}: {msg}")
+    if code < 400:
+        return
+    message = None
+    if isinstance(data, dict):
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or json.dumps(error)
+        elif error:
+            message = str(error)
+        detail = data.get("detail")
+        if message is None and isinstance(detail, dict):
+            message = detail.get("message") or detail.get("error") or json.dumps(detail)
+        elif message is None and detail:
+            message = str(detail)
+    if message is None:
+        message = str(data)
+    raise GatewayError(f"gateway returned {code}: {message}")

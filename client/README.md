@@ -1,127 +1,146 @@
-# agent-bridge clients (CLI + MCP)
+# agent-bridge CLI client
 
-Laptop-side clients for driving one or more agent-bridge gateways over their SSH
-port-forwards. Pure stdlib (Python 3.8+; 3.11+ for a `.toml` config). Two front
-ends over one shared client (`abclient.py`):
+A stdlib-only client for driving one or more agent-bridge gateways through SSH
+port-forwards. `abclient.py` provides discovery, SSE streaming, waiting, errors,
+uploads, and safe downloads to the `ab` CLI.
 
-- **`ab`** — a CLI. The recommended way. Any shell, human, script, or agent
-  (Claude Code drives it via Bash) can use it.
-- **`agent_bridge_mcp.py`** — an MCP stdio server, for clients that prefer MCP.
+## Install or copy
 
+An editable/package install provides stable commands:
+
+```bash
+python -m pip install -e .
+ab --version                       # 0.3.0
 ```
-your shell / Claude Code ──▶ ab (CLI) ─┐
-local Claude Code (MCP)  ──▶ mcp server ┴─▶ abclient ──HTTP──▶ gateway @ localhost:8787 (ssh -L)
-                                                        └─────▶ gateway @ localhost:8788
+
+Legacy direct invocation remains supported:
+
+```bash
+python client/ab.py --version
 ```
 
-## Setup
+The copied `client/` directory remains dependency-free. TOML client config
+requires Python 3.11; JSON works on older supported Python versions.
 
-1. Copy the `client/` folder (or clone the repo) to your laptop.
-2. Open the tunnel(s): `ssh -L 8787:localhost:8787 midway5` (one Duo push each).
-3. Configure gateways in `~/.config/agent-bridge/gateways.json` (see
-   `gateways.example.json`):
+Configure `~/.config/agent-bridge/gateways.json`:
 
 ```json
 {
   "default": "midway5",
   "gateways": {
-    "midway5": { "base_url": "http://localhost:8787", "token_env": "AGENT_BRIDGE_TOKEN" },
-    "other":   { "base_url": "http://localhost:8788", "token_file": "~/.config/agent-bridge/other.token" }
+    "midway5": {
+      "base_url": "http://localhost:8787",
+      "token_env": "AGENT_BRIDGE_TOKEN"
+    }
   }
 }
 ```
 
-Token per gateway: `token` (inline), `token_env` (env var name), or `token_file`
-(path) — checked in that order. Config discovery: `--config` →
-`$AGENT_BRIDGE_MCP_CONFIG` → `~/.config/agent-bridge/gateways.json` →
-`./gateways.json`.
+Token order: `token`, `token_env`, `token_file`. Config discovery:
+`--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
+`~/.config/agent-bridge/gateways.json`, `./gateways.json`.
 
-## CLI (`ab`)
+## CLI
+
+Global flags work before or after the command:
 
 ```bash
-python3 client/ab.py <command> [flags]     # or: ln -s .../client/ab.py ~/bin/ab
+ab --gateway midway5 --output json jobs
+ab jobs --gateway midway5 --output json
 ```
 
-| Command | What it does |
+| Command | Purpose |
 |---|---|
-| `ab gateways` | list configured gateways + default |
-| `ab models [--agent A]` | model ids a gateway's agent accepts |
-| `ab info [--refresh]` | a gateway's cluster capabilities |
-| `ab sessions [--cwd DIR] [--agent A]` | sessions a gateway can fork |
-| `ab run PROMPT [...]` | submit **and wait**; prints the result |
-| `ab submit PROMPT [...]` | submit, print the job id (no wait) |
-| `ab job ID` | status/result |
-| `ab events ID [--after N] [--follow]` | event log; `--follow` streams live |
-| `ab cancel ID` | cancel a queued/running job |
-| `ab upload F... [--dir D]` | upload local files → remote paths |
-| `ab download [--file R...] [--dir D --glob G] --to LOCAL` | fetch artifacts |
-| `ab ls DIR [--glob G] [--recursive]` | list remote files |
+| `gateways` | local gateway config and token presence |
+| `health` | unauthenticated liveness/version probe |
+| `agents` | configured backends, models, and capability flags |
+| `capabilities` | structured client/server contract |
+| `help [--remote]` | local CLI help or live `/v1/help` |
+| `info [--refresh]` | cached host/cluster capabilities |
+| `models [--agent A]` | advertised model ids |
+| `sessions [--cwd D] [--agent A]` | resumable/forkable sessions |
+| `submit -F FILE [...]` | submit and return the job id immediately |
+| `run -F FILE [...]` | submit and wait |
+| `jobs [--limit N] [--cursor C]` | paged job summaries |
+| `job REF [--wait]` | job detail, optionally wait |
+| `wait REF` | wait for an existing job |
+| `events REF [-f]` | event page or resumable SSE follow |
+| `steer REF -F FILE` | message a running turn |
+| `cancel REF` | interrupt a queued/running job |
+| `upload`, `download`, `ls` | safe file transfer and listing |
 
-Global: `--gateway NAME`, `--config PATH`, `--json` (machine-readable output).
-`run`/`submit` take `--cwd --agent --model --session --permission-mode`, plus
-`--include-thinking` (keep the agent's reasoning events — hidden by default),
-`--upload LOCAL` (repeatable) and `--file REMOTE` (repeatable). `ab run` exits
-non-zero if the job doesn't succeed.
+`REF` is a full UUID, exact title, or unique UUID prefix. Ambiguity is an error.
+Use `-F/--prompt-file` for agent-generated prompts to avoid shell quoting.
+`--prompt-stdin` is the explicit stdin form.
 
-Examples:
+### Machine output
 
-```bash
-ab run "run the tests and summarize failures" --cwd /project/jevans/tzhang3/myrepo
-ab run "profile this dataset" --upload ./train.csv --stream
-ab submit "long job"; ab events <id> --follow; ab job <id>
-ab download --dir /project/jevans/tzhang3/myrepo/out --glob '*.csv' --to ./results
-```
+`--output` is the canonical output selector:
 
-**Choosing a backend and model.** `ab models` lists the model ids a gateway's
-agent accepts (plain strings), and `--model "$(...)"` pins one. The list lives
-in the **gateway's** config (`[agents.<name>] models = [...]` in its
-config.toml), not in this client, so it reflects what that agent is actually set
-up to accept and an operator can change it without redeploying clients.
-
-A gateway can run more than one agent (typically `claude` and `opencode`). Pick
-both at submit time: `--agent` names the backend, `--model` the model inside it.
-Scope `ab models` / `ab sessions` with `--agent` the same way:
+- `human` (default): readable tables/transcripts; long display text may be
+  elided unless `--full`.
+- `json`: exactly one complete, faithful JSON document. It is never mixed with
+  streamed assistant text. `--json` is an alias.
+- `jsonl`: one compact typed record per line, intended for `run`, `wait`, and
+  `events --follow`. Record kinds include `event`, `terminal`, `timeout`, and
+  `complete`.
 
 ```bash
-ab models --agent opencode   # -> deepseek/deepseek-v4-flash, deepseek/deepseek-v4-pro
-ab run -F task.md --agent opencode --model deepseek/deepseek-v4-flash --stream
-ab run -F task.md --agent claude --model claude-sonnet-5                  # default backend
+ab submit -F task.md --title nightly --output json
+ab events nightly --follow --type assistant --output jsonl
+ab wait nightly --timeout 900 --output json
 ```
 
-**Long / multiline prompts.** Avoid shell-quoting and `ARG_MAX` by passing the
-prompt on stdin or from a file instead of as an argument:
+Follow uses resumable SSE and honors `--after`, `--until`, and repeatable
+`--type`. A bounded `--until` can finish before the remote job is terminal.
+
+### Exit codes and timeouts
+
+| Code | Meaning |
+|---:|---|
+| 0 | command/query succeeded |
+| 1 | local config, transport, protocol, or file error |
+| 2 | invalid CLI invocation |
+| 3 | waited remote job failed or was canceled |
+| 4 | wait timed out while the remote job may still be running |
+
+`run`, `wait`, and `job --wait` do **not** cancel on timeout. Use
+`--cancel-on-timeout` only when cancellation is intended. Snapshot `job` and
+`events` queries return zero for inspectable failed jobs unless
+`--fail-on-job-failure` is supplied.
+
+### Submission and retry safety
+
+`run` and `submit` accept `--cwd`, `--agent`, `--model`, `--session`,
+`--no-fork`, `--title`, `--permission-mode`, `--include-thinking`, repeatable
+`--upload`/`--file`, and `--idempotency-key`.
+
+- `--no-fork` requires an **idle** `--session`; use `steer` for a running turn.
+- Reuse one `--idempotency-key` when retrying the same submission. The same key
+  with different content is rejected.
+- `agents --output json` reports which adapter/mode supports sessions,
+  in-place resume, steering, thinking, and attachments.
+
+### Safe files
+
+Uploads require readable regular non-symlink files. Use
+`--upload-as REMOTE=LOCAL` on a job or `upload --as REMOTE=LOCAL` to preserve an
+explicit remote name; duplicate destinations are rejected.
+
+Downloads preserve relative paths under `--to` by default, reject traversal,
+symlink roots, target collisions, and existing files, and publish each file via
+an atomic temporary file. Use `--overwrite` explicitly to replace existing
+files. `--flatten` is the legacy basename-only layout; collisions still fail.
 
 ```bash
-ab run --prompt-file ./task.md --cwd /project/...     # from a file (best for agents)
-ab run - <<'EOF'                                       # heredoc; literal, no expansion
-Multi-line prompt with "quotes", $vars, and `backticks` — all safe.
-EOF
-cat task.md | ab run -                                 # piped
+ab download --dir /project/x/out --glob '*.csv' --recursive --to ./out
+ab download --file /project/x/report.md --to ./out --overwrite
 ```
-
-`run`/`submit` accept the prompt as a positional arg, `-F/--prompt-file PATH`, or
-stdin (`-` or piped). An LLM agent should prefer `--prompt-file` — write the
-prompt to a file, then reference it (zero quoting).
-
-Using it from Claude Code: it already has Bash — just run `ab ...` (add a line to
-your CLAUDE.md so the agent reaches for it, and `--json` for reliable parsing).
-
-## MCP server
-
-For MCP clients. Same operations as the CLI, as tools:
-
-```bash
-claude mcp add agent-bridge -- \
-    python3 /path/to/client/agent_bridge_mcp.py --config ~/.config/agent-bridge/gateways.json
-```
-
-Tools: `list_gateways`, `cluster_info`, `list_sessions`, `submit_job`, `get_job`,
-`job_events`, `cancel_job`, `run_prompt`, `upload_files`, `download_files`,
-`list_remote_files`. Each takes an optional `gateway`; `run_prompt`/`submit_job`
-take `upload` (local) and `files` (remote).
 
 ## Notes
 
-- `gateways.json` and `*.token` are git-ignored (they reference tokens).
-- MCP diagnostics go to stderr; stdout is the JSON-RPC channel.
-- Both front ends share `abclient.py` — one place to fix transport/auth.
+- Open the tunnel first, for example
+  `ssh -o ServerAliveInterval=60 -L 8787:localhost:8787 midway5`.
+- `gateways` is offline config inspection; use `health` for reachability.
+- On Git Bash, prefix remote POSIX paths with `MSYS_NO_PATHCONV=1` to prevent
+  path rewriting. PowerShell needs no special flag.

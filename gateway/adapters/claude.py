@@ -26,7 +26,7 @@ from typing import Callable
 
 from ..config import AgentConfig
 from ..sessions import SessionInfo, scan
-from .base import Event, JobSpec, RunResult, interrupt_group
+from .base import Event, JobSpec, RunResult, Steering, interrupt_group
 
 _RESUME_RE = re.compile(r"--resume[= ]+([0-9a-fA-F-]{36})")
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
@@ -141,6 +141,19 @@ class ClaudeAdapter:
     def __init__(self, cfg: AgentConfig) -> None:
         self.cfg = cfg
 
+    def capabilities(self) -> dict:
+        direct = self.cfg.dispatch_mode == "direct"
+        return {
+            "sessions": True,
+            "fork": True,
+            "in_place_resume": direct,
+            "steering": direct,
+            "thinking_events": True,
+            "file_attachments": True,
+            "permission_modes": ["default", "acceptEdits", "bypassPermissions", "plan"],
+            "model_policy": "advertised-passthrough",
+        }
+
     # -- sessions ---------------------------------------------------------
     def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
         return scan(limit=self.cfg.max_sessions_in_index, cwd_filter=cwd_filter)
@@ -184,10 +197,23 @@ class ClaudeAdapter:
         session it wants; it should just say so.
 
         No session given means start a fresh one.
+
+        The prompt goes in over streaming stdin rather than as `-p <prompt>`,
+        because that is the only launch shape that can accept a *second*
+        message later: `--input-format stream-json` keeps the child reading
+        JSON lines for the life of the turn, so `POST /v1/jobs/{id}/steer` can
+        reach a run that is already underway. Every job pays one stdin pipe for
+        that; nothing else about the run changes.
         """
         perm = spec.permission_mode or self.cfg.permission_mode
-        args = [self.cfg.bin, "-p", spec.prompt,
+        args = [self.cfg.bin, "-p",
+                "--input-format", "stream-json",
                 "--output-format", "stream-json", "--verbose",
+                # Echo accepted stdin back on stdout. This is the delivery
+                # receipt for a steer, and it lands in the event log at the
+                # point the agent actually took the message rather than when
+                # HTTP handed it over.
+                "--replay-user-messages",
                 "--permission-mode", perm]
         if spec.requested_session:
             args += ["--resume", spec.requested_session]
@@ -207,10 +233,12 @@ class ClaudeAdapter:
 
         emit(Event("status", {"stage": "direct",
                               "session": spec.requested_session or "NEW",
-                              "fork": spec.fork}))
+                              "fork": spec.fork,
+                              "steerable": True}))
         res = RunResult(ok=False, chosen_session=spec.requested_session)
         self._stream(args, spec.cwd, emit, res, capture_nested=False,
-                     cancel=spec.cancel)
+                     cancel=spec.cancel, steer=spec.steer,
+                     first_message=spec.prompt)
         return res
 
     def _model_flag(self, spec: JobSpec) -> str:
@@ -342,19 +370,38 @@ class ClaudeAdapter:
 
     # -- shared streaming -------------------------------------------------
     def _stream(self, args, cwd, emit, res: RunResult, *, capture_nested: bool,
-                cancel=None):
-        proc = subprocess.Popen(
-            args, cwd=cwd, text=True, bufsize=1,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+                cancel=None, steer: Steering | None = None,
+                first_message: str | None = None):
+        streaming_in = first_message is not None
+        if os.name == "nt":
+            popen_kw: dict = dict(
+                cwd=cwd, text=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                shell=True,
+            )
+        else:
+            popen_kw: dict = dict(
+                cwd=cwd, text=True, bufsize=1, start_new_session=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        if streaming_in:
+            popen_kw["stdin"] = subprocess.PIPE
+        proc = subprocess.Popen(args, **popen_kw)
         if cancel is not None:
             cancel.bind(proc)  # kills the process group on cancel (even if already set)
+        if streaming_in:
+            if steer is None:
+                steer = Steering()   # keeps the close path uniform
+            steer.bind(proc.stdin)
+            steer.send(first_message)
         # timeout_sec <= 0 disables the wall-clock kill (jobs run unbounded).
         timer = None
         if self.cfg.timeout_sec and self.cfg.timeout_sec > 0:
             timer = threading.Timer(self.cfg.timeout_sec, _kill, [proc])
             timer.start()
+        # `--replay-user-messages` echoes our own stdin back; the first echo is
+        # the prompt above, so only later ones are steers.
+        replay = {"n": 0}
         try:
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -366,10 +413,19 @@ class ClaudeAdapter:
                 except json.JSONDecodeError:
                     emit(Event("log", {"raw": line[:2000]}))
                     continue
-                self._handle_record(rec, emit, res, capture_nested)
+                self._handle_record(rec, emit, res, capture_nested, replay)
+                if rec.get("type") == "result" and steer is not None:
+                    # Streaming input keeps the agent alive waiting for more
+                    # work after it answers. Closing stdin is what ends the run
+                    # — without it the loop below blocks forever.
+                    steer.close()
         finally:
             if timer is not None:
                 timer.cancel()
+            # Also on the error path: a child still holding an open stdin never
+            # exits, so skipping this would hang proc.wait() indefinitely.
+            if steer is not None:
+                steer.close()
             rc = proc.wait()
             stderr = proc.stderr.read() if proc.stderr else ""
 
@@ -381,7 +437,8 @@ class ClaudeAdapter:
             res.error = (stderr or f"claude exited with code {rc}").strip()[:4000]
         emit(Event("error", {"message": res.error, "returncode": rc}))
 
-    def _handle_record(self, rec, emit, res: RunResult, capture_nested: bool):
+    def _handle_record(self, rec, emit, res: RunResult, capture_nested: bool,
+                       replay: dict | None = None):
         rtype = rec.get("type")
         if rtype == "system":
             # The init record is the only place the *actual* session id shows
@@ -412,7 +469,18 @@ class ClaudeAdapter:
                         if m:
                             res.chosen_session = m.group(1)
         elif rtype == "user":
-            for block in _as_list(rec.get("message", {}).get("content")):
+            blocks = _as_list(rec.get("message", {}).get("content"))
+            texts = [b.get("text", "") for b in blocks
+                     if isinstance(b, dict) and b.get("type") == "text"]
+            if texts and replay is not None:
+                # An echo of our own stdin, meaning the agent has accepted it.
+                # #1 is the job's prompt; anything after it is a steer that
+                # landed mid-turn, logged here so the event stream shows where
+                # in the run the agent actually took it.
+                replay["n"] += 1
+                if replay["n"] > 1:
+                    emit(Event("steer", {"text": "\n".join(texts)}))
+            for block in blocks:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     text = _flatten(block.get("content"))
                     # Stored whole, deliberately. This used to clip at 8k, which

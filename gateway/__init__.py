@@ -4,4 +4,4 @@ agents (Claude Code and opencode today; more via the adapter interface).
 Runs on an HPC login node behind an SSH port-forward. See README.md.
 """
 
-__version__ = "0.1.0"
+from agent_bridge_version import __version__

@@ -1,7 +1,7 @@
 [project]
 name = "agent-bridge"
-version = "0.2.0"
-description = "HTTP gateway that dispatches prompts to coding agents by forking the right session"
+dynamic = ["version"]
+description = "HTTP gateway and stdlib clients for dispatching prompts to coding agents"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
@@ -9,7 +9,25 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
-# The gateway (server side) needs these. The clients (client/, CLI + MCP) are
-# stdlib-only and have no dependencies. Create the env with:
-#     uv venv .venv && uv pip install -e .
-# or  uv pip install fastapi uvicorn python-multipart
+[project.scripts]
+ab = "client.ab:main"
+agent-bridge = "gateway.__main__:main"
+ab-notify = "client.ab_notify:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[tool.setuptools]
+py-modules = ["agent_bridge_version"]
+
+[tool.setuptools.packages.find]
+include = ["gateway*", "client*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "client._version.__version__"}
+
+# The gateway needs the dependencies above. The client modules remain stdlib
+# only at runtime and can still be copied/invoked directly without installing.

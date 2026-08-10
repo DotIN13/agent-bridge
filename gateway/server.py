@@ -1,57 +1,94 @@
-"""HTTP surface (FastAPI + uvicorn): bearer-authed JSON API, multipart file
-upload, streamed download, and SSE.
-
-Routes:
-  GET  /health                       -> {"ok": true}                    (no auth)
-  GET  /llms.txt | /v1/help          -> agent usage doc                 (no auth)
-  GET  /v1/agents                    -> configured/known agents
-  GET  /v1/models[?agent=]           -> models this agent offers, by complexity
-  GET  /v1/info[?refresh=1]          -> cluster capabilities (cached)
-  GET  /v1/sessions?cwd=&agent=      -> session index the dispatcher sees
-  POST /v1/jobs                      -> enqueue a job. JSON body, OR multipart
-                                        (form field `payload`=JSON + file parts).
-                                        `files[]` may be inline/path refs too.
-  GET  /v1/jobs                      -> recent jobs
-  GET  /v1/jobs/{id}                 -> job row
-  POST /v1/jobs/{id}/cancel          -> cancel a queued/running job
-  GET  /v1/jobs/{id}/events?after=N  -> SSE (Accept: text/event-stream) or JSON
-  POST /v1/files                     -> upload files (JSON inline or multipart);
-                                        returns remote paths to reference later
-  GET  /v1/files/list?dir=&glob=&recursive=
-  GET  /v1/files/content?path=       -> stream a file back (artifacts, CSVs)
-
-Files, cwd, and downloads are sandboxed to allowed_dirs. SSE resumes via
-?after=<seq> or Last-Event-ID.
-"""
+"""Typed FastAPI HTTP surface for agent-bridge."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import socket
 import sys
-import time
 import uuid
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
 
 from . import __version__, files as filemod
 from .adapters import build as build_adapter, known_agents
+from .adapters.base import SteerError
+from .api_models import (
+    ERROR_RESPONSES, AgentDescription, AgentsResponse, CancelResponse,
+    EventsPage, FileItem, FilesPage, JobAccepted, JobCreate, JobDetail, JobsPage,
+    MessageRequest, MessageResponse, ModelsResponse, SessionsResponse,
+    SteerRequest, SteerResponse, UploadResponse,
+)
 from .bus import Bus
 from .cluster import ClusterInfo
 from .config import Config
-from .db import Database, TERMINAL
+from .db import (Database, IdempotencyConflict, ReportConflict, TERMINAL,
+                 derive_title)
 from .docs import render_llms_txt
 from .files import FileError
 from .worker import WorkerPool
 
-_SSE_POLL = 0.3          # seconds between DB polls while streaming
-_SSE_HEARTBEAT = 15.0    # comment ping when idle
+_SSE_POLL = 0.3
+_SSE_HEARTBEAT = 15.0
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, code: str, message: str,
+                 details: dict | None = None) -> None:
+        self.status = status
+        self.code = code
+        self.message = message
+        self.details = details
+        super().__init__(message)
+
+
+def _error_content(code: str, message: str,
+                   details: dict | None = None) -> dict:
+    return {"error": {"code": code, "message": message, "details": details}}
+
+
+def _inline_model_schema(model) -> dict:
+    """Return a standalone schema whose references resolve in-place."""
+    schema = model.model_json_schema()
+    definitions = schema.pop("$defs", {})
+
+    def expand(value):
+        if isinstance(value, list):
+            return [expand(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            name = reference.rsplit("/", 1)[-1]
+            merged = dict(definitions[name])
+            merged.update({key: item for key, item in value.items()
+                           if key != "$ref"})
+            return expand(merged)
+        return {key: expand(item) for key, item in value.items()
+                if key != "$defs"}
+
+    return expand(schema)
+
+
+def _content_disposition(name: str) -> str:
+    fallback = "".join(
+        char if char.isascii() and (char.isalnum() or char in "._-") else "_"
+        for char in name).strip("._") or "download"
+    encoded = urllib.parse.quote(name, safe="")
+    return (f'attachment; filename="{fallback}"; '
+            f"filename*=UTF-8''{encoded}")
 
 
 class Gateway:
@@ -60,33 +97,22 @@ class Gateway:
         self.db = Database(cfg.db_path)
         self.bus = Bus()
         self.pool = WorkerPool(cfg, self.db, self.bus)
-        self.cluster = ClusterInfo(cfg.cluster_probe_timeout,
-                                   cfg.cluster_env_presence) if cfg.cluster_enabled else None
+        self.cluster = ClusterInfo(
+            cfg.cluster_probe_timeout, cfg.cluster_env_presence
+        ) if cfg.cluster_enabled else None
 
     def publish_endpoint(self) -> dict:
-        """Record how a *remote* node should reach this gateway.
-
-        `ab-notify` runs on compute nodes, where `127.0.0.1` is that node — not
-        us. Rather than making every sbatch hardcode a hostname, the gateway
-        writes its own reachable URL into the shared data dir (the same place
-        `.token` already lives) and ab-notify reads it.
-
-        When bound to loopback there is no reachable URL, so `url` is null and
-        ab-notify skips its HTTP path immediately instead of burning a timeout
-        per call.
-        """
         loopback = self.cfg.host in ("127.0.0.1", "localhost", "::1", "")
         info = {
             "bound": self.cfg.host,
             "port": self.cfg.port,
             "fqdn": socket.getfqdn(),
-            "url": None if loopback else f"http://{socket.getfqdn()}:{self.cfg.port}",
+            "url": None if loopback else
+                f"http://{socket.getfqdn()}:{self.cfg.port}",
         }
         if loopback:
-            info["note"] = ("bound to loopback — unreachable from other nodes; "
-                            "ab-notify will fall back to the shared filesystem. "
-                            "Set [server] host to an internal address to enable "
-                            "HTTP messages from compute nodes.")
+            info["note"] = (
+                "bound to loopback; compute-node reports use shared storage")
         path = Path(self.cfg.data_dir) / "gateway-endpoint.json"
         try:
             path.write_text(json.dumps(info, indent=2) + "\n")
@@ -106,130 +132,85 @@ def create_app(gw: Gateway) -> FastAPI:
     cfg = gw.cfg
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        gw.pool.start()
+    async def lifespan(_app: FastAPI):
+        filemod.cleanup_staging(cfg)
+        filemod.cleanup_orphan_job_dirs(cfg, gw.db.job_ids())
+        await run_in_threadpool(gw.pool.start)
         if gw.cluster:
             gw.cluster.start_async()
         print(f"agent-bridge {__version__} listening on "
               f"http://{cfg.host}:{cfg.port}  (db: {cfg.db_path})", flush=True)
         yield
-        gw.pool.stop()
+        await run_in_threadpool(gw.pool.stop)
         gw.db.close()
 
     app = FastAPI(title="agent-bridge", version=__version__, lifespan=lifespan)
+    security = HTTPBearer(auto_error=False)
 
-    def require_auth(authorization: str | None = Header(default=None)) -> None:
-        tok = authorization[7:] if authorization and authorization.startswith("Bearer ") else ""
-        if not tok or not hmac.compare_digest(tok, cfg.token):
-            raise HTTPException(401, "unauthorized")
+    @app.middleware("http")
+    async def bounded_request_body(request: Request, call_next):
+        """Enforce limits for chunked bodies too, not only Content-Length."""
+        if request.method not in {"POST", "PUT", "PATCH"}:
+            return await call_next(request)
+        maximum_mb = 1 if request.url.path.endswith("/message") else \
+            cfg.files_max_request_mb
+        maximum = maximum_mb << 20
+        original_receive = request._receive
+        seen = 0
+
+        async def receive():
+            nonlocal seen
+            message = await original_receive()
+            seen += len(message.get("body", b""))
+            if seen > maximum:
+                raise ApiError(413, "payload_too_large",
+                               f"request exceeds {maximum_mb} MiB")
+            return message
+
+        request._receive = receive
+        try:
+            return await call_next(request)
+        except ApiError as exc:
+            return JSONResponse(status_code=exc.status, content=_error_content(
+                exc.code, exc.message, exc.details))
+
+    @app.exception_handler(ApiError)
+    async def api_error_handler(_request: Request, exc: ApiError):
+        return JSONResponse(status_code=exc.status, content=_error_content(
+            exc.code, exc.message, exc.details))
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(_request: Request,
+                                         exc: RequestValidationError):
+        details = json.loads(json.dumps(exc.errors(), default=str))
+        return JSONResponse(status_code=422, content=_error_content(
+            "validation_error", "request validation failed", {"errors": details}))
+
+    @app.exception_handler(HTTPException)
+    async def http_error_handler(_request: Request, exc: HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or detail.get("error") or "http_error")
+            message = str(detail.get("message") or detail.get("error") or detail)
+            details = {key: value for key, value in detail.items()
+                       if key not in {"code", "message", "error"}} or None
+        else:
+            code = "http_error"
+            message = str(detail)
+            details = None
+        return JSONResponse(status_code=exc.status_code,
+                            content=_error_content(code, message, details))
+
+    def require_auth(credentials: HTTPAuthorizationCredentials | None =
+                     Depends(security)) -> None:
+        token = credentials.credentials if credentials and \
+            credentials.scheme.lower() == "bearer" else ""
+        if not token or not hmac.compare_digest(token, cfg.token):
+            raise ApiError(401, "unauthorized", "missing or invalid bearer token")
 
     auth = Depends(require_auth)
 
-    # -- public -----------------------------------------------------------
-    @app.get("/health")
-    async def health():
-        return {"ok": True, "version": __version__}
-
-    @app.get("/llms.txt")
-    @app.get("/v1/help")
-    async def help_doc():
-        return PlainTextResponse(render_llms_txt(cfg),
-                                 media_type="text/markdown; charset=utf-8")
-
-    # -- capabilities -----------------------------------------------------
-    @app.get("/v1/agents", dependencies=[auth])
-    async def agents():
-        return {"configured": sorted(cfg.agents), "known": known_agents(),
-                "default": cfg.default_agent}
-
-    @app.get("/v1/models", dependencies=[auth])
-    async def models(agent: str | None = None):
-        """Model ids this agent advertises, so a caller can see what's
-        supported before setting `model` on a job. Config-driven — a simple
-        `models = ["..."]` list under [agents.<name>] in config.toml."""
-        acfg = cfg.agents.get(agent or cfg.default_agent)
-        if not acfg:
-            raise HTTPException(400, f"unknown agent '{agent}'")
-        return {"agent": acfg.name, "models": list(acfg.models),
-                "default": acfg.model}
-
-    @app.get("/v1/info", dependencies=[auth])
-    async def info(refresh: bool = False):
-        if not gw.cluster:
-            raise HTTPException(404, "cluster probing disabled")
-        if refresh:
-            gw.cluster.refresh_async()
-        return gw.cluster.get()
-
-    @app.get("/v1/sessions", dependencies=[auth])
-    async def sessions(cwd: str | None = None, agent: str | None = None):
-        acfg = cfg.agents.get(agent or cfg.default_agent)
-        if not acfg:
-            raise HTTPException(400, f"unknown agent '{agent}'")
-        infos = await run_in_threadpool(build_adapter(acfg).list_sessions, cwd)
-        return {"sessions": [s.to_public() for s in infos]}
-
-    # -- jobs -------------------------------------------------------------
-    @app.post("/v1/jobs", dependencies=[auth])
-    async def create_job(request: Request):
-        _reject_oversize(request)
-        spec, uploads = await _parse_submission(request)
-        prompt = (spec.get("prompt") or "").strip()
-        if not prompt:
-            raise HTTPException(400, "prompt is required")
-        agent = spec.get("agent") or cfg.default_agent
-        acfg = cfg.agents.get(agent)
-        if not acfg:
-            raise HTTPException(400, f"unknown agent '{agent}'")
-        try:
-            cwd = acfg.resolve_cwd(spec.get("cwd"))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        items = spec.get("files") or []
-        if (items or uploads) and not cfg.files_enabled:
-            raise HTTPException(400, "file attachments are disabled")
-
-        fork = spec.get("fork", True)
-        if not isinstance(fork, bool):
-            raise HTTPException(400, "fork must be a boolean")
-        if not fork and not spec.get("session"):
-            # Without a named target there is nothing to check for liveness
-            # before dispatch, so the no-race guarantee cannot be made.
-            raise HTTPException(400, "fork=false requires 'session': name the "
-                                     "session to resume in place")
-
-        include_thinking = spec.get("include_thinking", False)
-        if not isinstance(include_thinking, bool):
-            raise HTTPException(400, "include_thinking must be a boolean")
-
-        job_id = gw.db.create_job(
-            agent=agent, prompt=prompt, cwd=cwd,
-            requested_session=spec.get("session"),
-            permission_mode=spec.get("permission_mode"), model=spec.get("model"),
-            title=spec.get("title"), fork=fork,
-            include_thinking=include_thinking)
-        paths = await _save_all(items, uploads, filemod.job_dir(cfg, job_id))
-        if paths:
-            gw.db.set_job_files(job_id, paths)
-        row = gw.db.get_job(job_id)
-        gw.pool.submit(job_id)   # only now is it visible to a worker
-        return JSONResponse(status_code=202, content={
-            "id": job_id, "status": "queued", "agent": agent, "cwd": cwd,
-            "title": row.get("title") if row else None, "fork": fork,
-            "include_thinking": include_thinking, "files": paths})
-
-    def _resolve_job(ref: str) -> dict:
-        """Resolve a job reference: full id, then title, then id prefix.
-
-        Ids are uuid4s and people write down the leading 8 characters or, more
-        often, remember what the job was called. Exact-match-only lookup makes
-        both unaddressable and answers with the same "not found" a nonexistent
-        job gets, which reads as data loss rather than a short reference.
-
-        Ambiguity is always an error, never a silent pick of the newest — the
-        same reference reaching `cancel` must not act on a job the caller
-        didn't mean.
-        """
+    def resolve_job(ref: str) -> dict:
         job = gw.db.get_job(ref)
         if job:
             return job
@@ -239,162 +220,500 @@ def create_app(gw: Gateway) -> FastAPI:
             if len(matches) == 1:
                 return matches[0]
             if matches:
-                raise HTTPException(409, {
-                    "error": f"{kind} '{ref}' is ambiguous ({len(matches)} jobs)",
-                    "matches": [{"id": m["id"], "title": m.get("title"),
-                                 "status": m.get("status"),
-                                 "created_at": m.get("created_at")}
-                                for m in matches],
-                })
-        raise HTTPException(404, f"no job matching id, title, or id-prefix '{ref}'")
+                raise ApiError(409, "ambiguous_reference",
+                               f"{kind} '{ref}' is ambiguous",
+                               {"matches": [{
+                                   "id": item["id"], "title": item.get("title"),
+                                   "status": item.get("status"),
+                                   "created_at": item.get("created_at")}
+                                   for item in matches]})
+        raise ApiError(404, "not_found",
+                       f"no job matching id, title, or id-prefix '{ref}'")
 
-    @app.get("/v1/jobs", dependencies=[auth])
-    async def list_jobs(limit: int = 50):
-        return {"jobs": gw.db.list_jobs(limit=limit)}
+    @app.get("/health", response_model=dict[str, Any])
+    async def health():
+        return {"ok": True, "version": __version__}
 
-    @app.post("/v1/jobs/{job_id}/message", dependencies=[auth])
-    async def add_message(job_id: str, request: Request):
-        """A running batch job reporting its own lifecycle (see `ab-notify`).
+    @app.get("/llms.txt", response_class=PlainTextResponse)
+    @app.get("/v1/help", response_class=PlainTextResponse)
+    async def help_doc():
+        return PlainTextResponse(render_llms_txt(cfg),
+                                 media_type="text/markdown; charset=utf-8")
 
-        This is the preferred path: the event lands immediately and is
-        published to the Bus, so SSE subscribers see it. The shared-filesystem
-        JSONL is only the fallback for nodes that cannot reach this endpoint.
-        """
-        job = _resolve_job(job_id)
+    @app.get("/v1/agents", dependencies=[auth],
+             response_model=AgentsResponse, responses=ERROR_RESPONSES)
+    async def agents():
+        rows = []
+        for name in sorted(cfg.agents):
+            agent_cfg = cfg.agents[name]
+            adapter = build_adapter(agent_cfg)
+            rows.append(AgentDescription(
+                name=name,
+                default_model=agent_cfg.model or None,
+                models=list(agent_cfg.models),
+                default_cwd=agent_cfg.default_cwd,
+                capabilities=adapter.capabilities()))
+        return AgentsResponse(
+            configured=sorted(cfg.agents), known=known_agents(),
+            default=cfg.default_agent, agents=rows,
+            features={"files": cfg.files_enabled,
+                      "cluster_info": cfg.cluster_enabled,
+                      "event_stream": "sse"})
+
+    @app.get("/v1/models", dependencies=[auth],
+             response_model=ModelsResponse, responses=ERROR_RESPONSES)
+    async def models(agent: str | None = None):
+        agent_cfg = cfg.agents.get(agent or cfg.default_agent)
+        if not agent_cfg:
+            raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
+        return {"agent": agent_cfg.name, "models": list(agent_cfg.models),
+                "default": agent_cfg.model or None}
+
+    @app.get("/v1/info", dependencies=[auth], response_model=dict[str, Any],
+             responses=ERROR_RESPONSES)
+    async def info(refresh: bool = False):
+        if not gw.cluster:
+            raise ApiError(404, "cluster_info_disabled",
+                           "cluster probing is disabled")
+        if refresh:
+            gw.cluster.refresh_async()
+        return gw.cluster.get()
+
+    @app.get("/v1/sessions", dependencies=[auth],
+             response_model=SessionsResponse, responses=ERROR_RESPONSES)
+    async def sessions(cwd: str | None = None, agent: str | None = None):
+        agent_cfg = cfg.agents.get(agent or cfg.default_agent)
+        if not agent_cfg:
+            raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
+        infos = await run_in_threadpool(build_adapter(agent_cfg).list_sessions, cwd)
+        return {"sessions": [session.to_public() for session in infos]}
+
+    @app.post(
+        "/v1/jobs", dependencies=[auth], response_model=JobAccepted,
+        status_code=202, responses=ERROR_RESPONSES,
+        openapi_extra={"requestBody": {"required": True, "content": {
+            "application/json": {"schema": _inline_model_schema(JobCreate)},
+            "multipart/form-data": {"schema": {"type": "object",
+                "properties": {"payload": {"type": "string"},
+                               "files": {"type": "array", "items": {
+                                   "type": "string", "format": "binary"}}}}}}}})
+    async def create_job(request: Request,
+                         idempotency_key: str | None = Header(
+                             default=None, alias="Idempotency-Key",
+                             min_length=1, max_length=200)):
+        _reject_oversize(request, cfg)
+        raw, uploads = await _parse_submission(request)
         try:
-            data = await request.json()
-        except Exception:
-            raise HTTPException(400, "body must be JSON")
-        if not isinstance(data, dict):
-            raise HTTPException(400, "body must be a JSON object")
-        row = await run_in_threadpool(gw.db.add_message, job["id"], data)
-        gw.bus.publish(job["id"], row)
-        return {"id": job["id"], "seq": row["seq"]}
+            spec = JobCreate.model_validate(raw)
+        except ValidationError as exc:
+            raise ApiError(400, "validation_error", "invalid job submission",
+                           {"errors": json.loads(exc.json())}) from exc
+        agent_name = spec.agent or cfg.default_agent
+        agent_cfg = cfg.agents.get(agent_name)
+        if not agent_cfg:
+            raise ApiError(400, "unknown_agent",
+                           f"unknown agent '{agent_name}'")
+        try:
+            cwd = agent_cfg.resolve_cwd(spec.cwd)
+        except ValueError as exc:
+            raise ApiError(400, "cwd_not_allowed", str(exc)) from exc
+        if (spec.files or uploads) and not cfg.files_enabled:
+            raise ApiError(400, "files_disabled", "file attachments are disabled")
+        if not spec.fork:
+            holder = gw.pool.claimant(spec.session or "")
+            if holder:
+                raise ApiError(409, "session_busy",
+                    f"session {spec.session} is being written by a running job",
+                    {"session": spec.session, "held_by": holder,
+                     "steer_ref": f"/v1/jobs/{holder}/steer"})
 
-    @app.get("/v1/jobs/{job_id}", dependencies=[auth])
+        request_hash = await _submission_hash(spec, uploads)
+        if idempotency_key:
+            try:
+                replay = gw.db.idempotency_lookup(
+                    "jobs", idempotency_key, request_hash)
+            except IdempotencyConflict as exc:
+                raise ApiError(409, "idempotency_conflict", str(exc)) from exc
+            if replay:
+                _status, body = replay
+                body["replayed"] = True
+                return JSONResponse(status_code=202, content=body,
+                    headers={"Location": f"/v1/jobs/{body['id']}"})
+
+        job_id = str(uuid.uuid4())
+        items = [item.model_dump(exclude_none=True) for item in spec.files]
+        paths: list[str] = []
+        promoted = False
+        persisted = False
+        try:
+            paths, promoted = await _save_job_files(
+                cfg, job_id, items, uploads)
+            title = (spec.title or "").strip() or derive_title(spec.prompt)
+            response = {
+                "id": job_id, "status": "queued", "agent": agent_name,
+                "cwd": cwd, "title": title, "fork": spec.fork,
+                "include_thinking": spec.include_thinking, "files": paths,
+                "replayed": False}
+            job_data = dict(
+                job_id=job_id, agent=agent_name, prompt=spec.prompt, cwd=cwd,
+                requested_session=spec.session,
+                permission_mode=spec.permission_mode, model=spec.model,
+                title=title, fork=spec.fork,
+                include_thinking=spec.include_thinking, files=paths)
+            if idempotency_key:
+                try:
+                    response, created = gw.db.create_job_idempotent(
+                        scope="jobs", key=idempotency_key,
+                        request_hash=request_hash, response=response, job=job_data)
+                except IdempotencyConflict as exc:
+                    raise ApiError(409, "idempotency_conflict", str(exc)) from exc
+                if not created:
+                    if promoted:
+                        filemod.remove_tree(filemod.job_dir(cfg, job_id))
+                    return JSONResponse(status_code=202, content=response,
+                        headers={"Location": f"/v1/jobs/{response['id']}"})
+                persisted = True
+            else:
+                gw.db.create_job(**job_data)
+                persisted = True
+            gw.pool.submit(response["id"])
+            return JSONResponse(status_code=202, content=response,
+                headers={"Location": f"/v1/jobs/{response['id']}"})
+        except ApiError:
+            if promoted and not persisted:
+                filemod.remove_tree(filemod.job_dir(cfg, job_id))
+            raise
+        except (FileError, OSError, ValueError) as exc:
+            filemod.remove_tree(filemod.job_staging_dir(cfg, job_id))
+            if promoted and not persisted:
+                filemod.remove_tree(filemod.job_dir(cfg, job_id))
+            raise ApiError(400, "file_error", str(exc)) from exc
+        except Exception:
+            filemod.remove_tree(filemod.job_staging_dir(cfg, job_id))
+            if promoted and not persisted:
+                filemod.remove_tree(filemod.job_dir(cfg, job_id))
+            raise
+
+    @app.get("/v1/jobs", dependencies=[auth], response_model=JobsPage,
+             responses=ERROR_RESPONSES)
+    async def list_jobs(limit: int = Query(50, ge=1, le=200),
+                        cursor: str | None = None):
+        try:
+            rows, next_cursor, has_more = gw.db.list_jobs_page(limit, cursor)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_cursor", str(exc)) from exc
+        return {"jobs": rows, "next_cursor": next_cursor,
+                "has_more": has_more}
+
+    @app.post("/v1/jobs/{job_id}/message", dependencies=[auth],
+              response_model=MessageResponse, responses=ERROR_RESPONSES)
+    async def add_message(job_id: str, message: MessageRequest,
+                          request: Request):
+        _reject_oversize(request, cfg, maximum_mb=1)
+        job = resolve_job(job_id)
+        data = message.model_dump(exclude_none=True)
+        try:
+            row = await run_in_threadpool(
+                gw.db.add_message, job["id"], data, message.report_id)
+        except ReportConflict as exc:
+            raise ApiError(409, "report_id_conflict", str(exc)) from exc
+        if not row.get("duplicate"):
+            gw.bus.publish(job["id"], row)
+        return {"id": job["id"], "seq": row["seq"],
+                "duplicate": bool(row.get("duplicate"))}
+
+    @app.post("/v1/jobs/{job_id}/steer", dependencies=[auth],
+              response_model=SteerResponse, status_code=202,
+              responses=ERROR_RESPONSES)
+    async def steer_job(job_id: str, body: SteerRequest):
+        job = resolve_job(job_id)
+        jid = job["id"]
+        if job["status"] in TERMINAL:
+            raise ApiError(409, "job_terminal", "job already finished",
+                           {"id": jid, "status": job["status"]})
+        handle = gw.pool.steering(jid)
+        if handle is None or not handle.available:
+            reason = handle.unavailable_reason if handle else \
+                "job is not running on this gateway"
+            raise ApiError(409, "steering_unavailable", reason,
+                           {"id": jid, "status": job["status"]})
+        try:
+            await run_in_threadpool(handle.send, body.prompt)
+        except SteerError as exc:
+            raise ApiError(409, "steering_unavailable", str(exc)) from exc
+        return {"id": jid, "delivered": True,
+                "note": "the agent picks this up at its next tool boundary"}
+
+    @app.get("/v1/jobs/{job_id}", dependencies=[auth],
+             response_model=JobDetail, responses=ERROR_RESPONSES)
     async def get_job(job_id: str):
-        job = _resolve_job(job_id)
-        # Pick up anything ab-notify had to drop on the shared filesystem.
-        # Deliberately here and not in db.get_job(): the worker, _resolve_job
-        # and cancel all call that internally, and ingest must not fire on
-        # every internal lookup.
-        await run_in_threadpool(gw.db.ingest_messages, job["id"], cfg.messages_dir)
+        job = resolve_job(job_id)
+        await run_in_threadpool(
+            gw.db.ingest_messages, job["id"], cfg.messages_dir)
         return gw.db.get_job(job["id"])
 
-    @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth])
+    @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth],
+              response_model=CancelResponse, status_code=202,
+              responses={200: {"model": CancelResponse,
+                               "description": "Already canceled"},
+                         **ERROR_RESPONSES})
     async def cancel_job(job_id: str):
-        job = _resolve_job(job_id)
-        job_id = job["id"]          # a prefix must not reach the worker pool
+        job = resolve_job(job_id)
+        jid = job["id"]
+        if job["status"] == "canceled":
+            return JSONResponse(status_code=200,
+                content={"id": jid, "status": "canceled",
+                         "already_terminal": True})
         if job["status"] in TERMINAL:
-            return JSONResponse(status_code=409, content={
-                "id": job_id, "status": job["status"], "error": "job already finished"})
-        was = await run_in_threadpool(gw.pool.cancel, job_id)
-        return JSONResponse(status_code=202,
-                            content={"id": job_id, "canceling": True, "was": was})
+            raise ApiError(409, "job_terminal", "job already finished",
+                           {"id": jid, "status": job["status"]})
+        was = await run_in_threadpool(gw.pool.cancel, jid)
+        if was == "canceled":
+            return JSONResponse(status_code=200,
+                content={"id": jid, "status": "canceled",
+                         "already_terminal": True})
+        if was in {"succeeded", "failed"}:
+            raise ApiError(409, "job_terminal", "job already finished",
+                           {"id": jid, "status": was})
+        return {"id": jid, "canceling": True, "was": was,
+                "status": "canceling"}
 
-    @app.get("/v1/jobs/{job_id}/events", dependencies=[auth])
-    async def job_events(job_id: str, request: Request, after: int = 0):
-        job = _resolve_job(job_id)
-        job_id = job["id"]          # events are keyed by the full id
-        await run_in_threadpool(gw.db.ingest_messages, job_id, cfg.messages_dir)
+    @app.get("/v1/jobs/{job_id}/events", dependencies=[auth],
+             response_model=EventsPage,
+             responses={200: {"description": "Event page or live stream",
+                 "content": {
+                     "application/json": {"schema": {
+                         "$ref": "#/components/schemas/EventsPage"}},
+                     "text/event-stream": {"schema": {"type": "string"}}}},
+                 **ERROR_RESPONSES})
+    async def job_events(job_id: str, request: Request,
+                         after: int = Query(0, ge=0),
+                         limit: int = Query(500, ge=1, le=1000),
+                         legacy: bool = True):
+        job = resolve_job(job_id)
+        jid = job["id"]
+        await run_in_threadpool(gw.db.ingest_messages, jid, cfg.messages_dir)
         start = _parse_after(after, request.headers.get("last-event-id"))
         if "text/event-stream" not in request.headers.get("accept", ""):
-            evs = gw.db.events_after(job_id, start)
-            return {"job": job, "events": evs, "terminal": job["status"] in TERMINAL}
+            events = gw.db.events_after(jid, start, limit + 1)
+            has_more = len(events) > limit
+            visible = events[:limit]
+            current = gw.db.get_job(jid)
+            return {
+                "job": current if legacy else None,
+                "events": visible, "status": current["status"],
+                "terminal": current["status"] in TERMINAL,
+                "next_after": visible[-1]["seq"] if visible else start,
+                "has_more": has_more}
         return StreamingResponse(
-            _sse_stream(gw, job_id, start, request),
+            _sse_stream(gw, jid, start, request),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # -- files ------------------------------------------------------------
-    @app.post("/v1/files", dependencies=[auth])
+    @app.post(
+        "/v1/files", dependencies=[auth], response_model=UploadResponse,
+        responses=ERROR_RESPONSES,
+        openapi_extra={"requestBody": {"required": True, "content": {
+            "application/json": {"schema": {"type": "object",
+                "properties": {"files": {"type": "array", "items":
+                    _inline_model_schema(FileItem)}}, "required": ["files"],
+                "additionalProperties": False}},
+            "multipart/form-data": {"schema": {"type": "object"}}}}})
     async def upload(request: Request):
         if not cfg.files_enabled:
-            raise HTTPException(400, "file uploads are disabled")
-        _reject_oversize(request)
-        spec, uploads = await _parse_submission(request)
-        items = spec.get("files") or []
+            raise ApiError(400, "files_disabled", "file uploads are disabled")
+        _reject_oversize(request, cfg)
+        raw, uploads = await _parse_submission(request)
+        raw_items = raw.get("files") or []
+        if set(raw) - {"files"}:
+            raise ApiError(400, "validation_error",
+                           "upload body accepts only the files field")
+        if not isinstance(raw_items, list):
+            raise ApiError(400, "validation_error", "files must be an array")
+        try:
+            items = [FileItem.model_validate(item).model_dump(exclude_none=True)
+                     for item in raw_items]
+        except ValidationError as exc:
+            raise ApiError(400, "validation_error", "invalid file item",
+                           {"errors": json.loads(exc.json())}) from exc
+        if not items and not uploads:
+            raise ApiError(400, "empty_upload", "give at least one file")
         upload_id = uuid.uuid4().hex
         dest = filemod.upload_dir(cfg, upload_id)
-        paths = await _save_all(items, uploads, dest)
+        try:
+            filemod.validate_upload_names(items, uploads)
+            paths = await _save_all(cfg, items, uploads, dest)
+        except (FileError, OSError, ValueError) as exc:
+            filemod.remove_tree(dest)
+            raise ApiError(400, "file_error", str(exc)) from exc
         return {"upload_id": upload_id, "dir": str(dest), "paths": paths}
 
-    @app.get("/v1/files/list", dependencies=[auth])
-    async def files_list(dir: str, glob: str = "*", recursive: bool = False):
+    @app.get("/v1/files/list", dependencies=[auth], response_model=FilesPage,
+             responses=ERROR_RESPONSES)
+    async def files_list(dir: str, glob: str = "*", recursive: bool = False,
+                         limit: int = Query(200, ge=1, le=1000),
+                         cursor: str | None = None):
         try:
-            rows = await run_in_threadpool(filemod.list_files, cfg, dir, glob, recursive)
-        except FileError as e:
-            raise HTTPException(400, str(e))
-        return {"dir": dir, "files": rows}
+            rows, next_cursor, has_more = await run_in_threadpool(
+                filemod.list_files_page, cfg, dir, glob, recursive, limit, cursor)
+        except FileError as exc:
+            raise ApiError(400, "file_error", str(exc)) from exc
+        return {"dir": dir, "files": rows, "next_cursor": next_cursor,
+                "has_more": has_more}
 
-    @app.get("/v1/files/content", dependencies=[auth])
+    @app.get("/v1/files/content", dependencies=[auth],
+             responses={200: {"description": "File bytes", "content": {
+                 "application/octet-stream": {"schema": {
+                     "type": "string", "format": "binary"}}}},
+                 **ERROR_RESPONSES})
     async def files_content(path: str):
         try:
-            p, size = filemod.open_for_download(cfg, path)
-        except FileError as e:
-            raise HTTPException(400, str(e))
+            target, size = filemod.open_for_download(cfg, path)
+        except FileError as exc:
+            raise ApiError(400, "file_error", str(exc)) from exc
         return StreamingResponse(
-            filemod.iter_file(p), media_type="application/octet-stream",
+            filemod.iter_file(target), media_type="application/octet-stream",
             headers={"Content-Length": str(size),
-                     "Content-Disposition": f'attachment; filename="{p.name}"'})
-
-    # -- helpers ----------------------------------------------------------
-    def _reject_oversize(request: Request) -> None:
-        clen = int(request.headers.get("content-length") or 0)
-        if clen and clen > (cfg.files_max_request_mb << 20):
-            raise HTTPException(413,
-                f"request exceeds max_request_mb ({cfg.files_max_request_mb} MiB); "
-                f"for large data use scp into an allowed dir and pass its path")
-
-    async def _save_all(items, uploads, dest) -> list[str]:
-        def work():
-            out = [filemod.save_inline_item(cfg, dest, it) for it in items]
-            for up in uploads:
-                out.append(filemod.save_stream(cfg, dest, up.filename, up.file).path)
-            return out
-        try:
-            return await run_in_threadpool(work)
-        except FileError as e:
-            raise HTTPException(400, str(e))
+                     "Content-Disposition": _content_disposition(target.name)})
 
     return app
 
 
+def _reject_oversize(request: Request, cfg: Config,
+                     maximum_mb: int | None = None) -> None:
+    maximum = maximum_mb or cfg.files_max_request_mb
+    try:
+        length = int(request.headers.get("content-length") or 0)
+    except ValueError as exc:
+        raise ApiError(400, "invalid_content_length", "invalid Content-Length") from exc
+    if length and length > (maximum << 20):
+        raise ApiError(413, "payload_too_large",
+                       f"request exceeds {maximum} MiB")
+
+
 async def _parse_submission(request: Request) -> tuple[dict, list]:
-    """Return (payload_dict, [UploadFile...]) from JSON or multipart."""
-    ctype = request.headers.get("content-type", "")
-    if ctype.startswith("multipart/form-data"):
-        form = await request.form()
-        raw = form.get("payload")
-        spec = json.loads(raw) if raw else {}
-        uploads = [v for _k, v in form.multi_items() if hasattr(v, "filename")]
-        return spec, uploads
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        try:
+            form = await request.form()
+        except Exception as exc:
+            raise ApiError(400, "invalid_multipart",
+                           "invalid multipart form data") from exc
+        raw_payload = None
+        uploads = []
+        for key, value in form.multi_items():
+            if key == "payload":
+                if raw_payload is not None:
+                    raise ApiError(400, "validation_error",
+                                   "multipart requires exactly one payload field")
+                if isinstance(value, UploadFile) or not isinstance(value, str):
+                    raise ApiError(400, "validation_error",
+                                   "multipart payload must be a text field")
+                raw_payload = value
+            elif key == "files":
+                if not isinstance(value, UploadFile):
+                    raise ApiError(400, "validation_error",
+                                   "multipart files fields must be file parts")
+                uploads.append(value)
+            else:
+                raise ApiError(400, "validation_error",
+                               f"unknown multipart field: {key}")
+        if raw_payload is None:
+            raise ApiError(400, "validation_error",
+                           "multipart requires exactly one text payload field")
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ApiError(400, "invalid_json", "invalid multipart payload JSON") from exc
+        if not isinstance(payload, dict):
+            raise ApiError(400, "validation_error", "payload must be a JSON object")
+        return payload, uploads
     try:
         body = await request.json()
-    except Exception:
-        raise HTTPException(400, "invalid JSON body")
+    except Exception as exc:
+        raise ApiError(400, "invalid_json", "invalid JSON body") from exc
     if not isinstance(body, dict):
-        raise HTTPException(400, "body must be a JSON object")
+        raise ApiError(400, "validation_error", "body must be a JSON object")
     return body, []
 
 
-async def _sse_stream(gw: Gateway, job_id: str, after: int, request: Request):
+async def _submission_hash(spec: JobCreate, uploads: list) -> str:
+    def work() -> str:
+        upload_rows = []
+        for upload in uploads:
+            stream = upload.file
+            position = stream.tell()
+            digest = hashlib.sha256()
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            stream.seek(position)
+            upload_rows.append({"filename": upload.filename,
+                                "sha256": digest.hexdigest()})
+        semantic = {"payload": spec.model_dump(exclude_none=True),
+                    "uploads": upload_rows}
+        return hashlib.sha256(json.dumps(
+            semantic, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return await run_in_threadpool(work)
+
+
+async def _save_all(cfg: Config, items: list[dict], uploads: list,
+                    dest: Path) -> list[str]:
+    def work():
+        paths = [filemod.save_inline_item(cfg, dest, item) for item in items]
+        for upload in uploads:
+            paths.append(filemod.save_stream(
+                cfg, dest, upload.filename, upload.file).path)
+        return paths
+    return await run_in_threadpool(work)
+
+
+async def _save_job_files(cfg: Config, job_id: str, items: list[dict],
+                          uploads: list) -> tuple[list[str], bool]:
+    if not items and not uploads:
+        return [], False
+    staging = filemod.job_staging_dir(cfg, job_id)
+    final = filemod.job_dir(cfg, job_id)
+    filemod.remove_tree(staging)
+    try:
+        filemod.validate_upload_names(items, uploads)
+        staged = await _save_all(cfg, items, uploads, staging)
+        old, new = filemod.promote_staging(cfg, job_id)
+        return filemod.promoted_paths(staged, old, new), True
+    except Exception:
+        filemod.remove_tree(staging)
+        filemod.remove_tree(final)
+        raise
+
+
+async def _sse_stream(gw: Gateway, job_id: str, after: int,
+                      request: Request):
     last = after
     idle = 0.0
     while True:
         if await request.is_disconnected():
             return
-        evs = await run_in_threadpool(gw.db.events_after, job_id, last)
-        for ev in evs:
-            yield _sse_format(ev)
-            last = ev["seq"]
-        if evs:
+        events = await run_in_threadpool(
+            gw.db.events_after, job_id, last, 500)
+        for event in events:
+            yield _sse_format(event)
+            last = event["seq"]
+        if events:
             idle = 0.0
+            if len(events) == 500:
+                continue
         job = await run_in_threadpool(gw.db.get_job, job_id)
         if job and job["status"] in TERMINAL:
-            tail = await run_in_threadpool(gw.db.events_after, job_id, last)
-            for ev in tail:
-                yield _sse_format(ev)
+            while True:
+                tail = await run_in_threadpool(
+                    gw.db.events_after, job_id, last, 500)
+                if not tail:
+                    break
+                for event in tail:
+                    yield _sse_format(event)
+                    last = event["seq"]
             return
         await asyncio.sleep(_SSE_POLL)
         idle += _SSE_POLL
@@ -403,17 +722,23 @@ async def _sse_stream(gw: Gateway, job_id: str, after: int, request: Request):
             yield b": ping\n\n"
 
 
-def _sse_format(ev: dict) -> bytes:
-    payload = json.dumps({"seq": ev["seq"], "ts": ev["ts"],
-                          "type": ev["type"], "data": ev["data"]})
-    return (f"id: {ev['seq']}\nevent: {ev['type']}\ndata: {payload}\n\n").encode()
+def _sse_format(event: dict) -> bytes:
+    payload = json.dumps({
+        "seq": event["seq"], "ts": event["ts"],
+        "type": event["type"], "data": event["data"]})
+    return (f"id: {event['seq']}\nevent: {event['type']}\n"
+            f"data: {payload}\n\n").encode()
 
 
-def _parse_after(after, last_event_id) -> int:
-    for src in (last_event_id, after):
-        if src is not None:
-            try:
-                return int(src)
-            except (TypeError, ValueError):
-                pass
-    return int(after or 0)
+def _parse_after(after: int, last_event_id: str | None) -> int:
+    if last_event_id is None:
+        return after
+    try:
+        value = int(last_event_id)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "invalid_event_cursor",
+                       "Last-Event-ID must be an integer") from exc
+    if value < 0:
+        raise ApiError(400, "invalid_event_cursor",
+                       "Last-Event-ID must be non-negative")
+    return value
