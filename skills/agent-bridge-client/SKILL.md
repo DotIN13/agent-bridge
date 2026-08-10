@@ -10,22 +10,97 @@ Use this skill for remote GPUs, schedulers, long jobs, or delegated work on
 another host. The local session plans and verifies; the remote agent inventories,
 executes, and reports evidence.
 
-## Setup and reachability
+## Finding `ab`
 
-Installed command:
+Resolve the command once, at the start of the session, and reuse it. Do not
+assume it is installed.
+
+1. **On `PATH`** — the normal case once the package is installed:
+   ```bash
+   ab --version
+   ```
+2. **A repo checkout** — search the workspaces you can see before asking. The
+   entry point is `client/ab.py`:
+   ```bash
+   ls ~/agent-bridge/client/ab.py ./client/ab.py ../agent-bridge/client/ab.py 2>/dev/null
+   # or, if those miss:
+   find ~ /workspace /srv -maxdepth 4 -path '*/client/ab.py' 2>/dev/null | head
+   ```
+   Then invoke it as `python3 <repo>/client/ab.py` — no install needed, stdlib
+   only.
+3. **Ask.** If neither turns it up, ask the user where the checkout is (or
+   whether to `pip install -e` it) rather than guessing a path or giving up.
+
+Set `AB` once and reuse it, so the rest of the session reads the same whichever
+form you found:
 
 ```bash
-ab --version
-ab gateways                         # local config only
-ab health --gateway <name>          # real reachability/version probe
+AB="ab"                                    # or: AB="python3 /path/to/client/ab.py"
+$AB health
 ```
 
-Legacy invocation is `python3 <repo>/client/ab.py`. Client config discovery is
-`--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
+Examples below write plain `ab` for brevity; substitute whichever form resolved.
+
+## Reachability
+
+```bash
+$AB gateways        # local config only
+$AB health          # the real probe: liveness + version
+```
+
+**`ab gateways` succeeding tells you nothing about the gateway.** It reads local
+config and reports whether a token loaded — nothing leaves the machine. `ab
+health` is the reachability probe; use it before concluding anything is up.
+
+When it fails, the error distinguishes two causes, and they need different
+fixes:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| connection **refused** (`WinError 10061`, `ECONNREFUSED`) | no local listener — the SSH forward is down | reopen the tunnel |
+| connection **reset** / dropped mid-response | forward is up, nothing serving at the far end | restart the gateway on its host |
+
+Open the tunnel with keepalives, because an idle forward drops silently:
+
+```bash
+ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -L <port>:localhost:<port> <host>
+```
+
+`autossh -M 0` with the same flags reconnects on its own. If the gateway can
+move between hosts, confirm which one is serving before repointing the forward —
+`ab info` prints the host.
+
+Client config discovery is `--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
 `~/.config/agent-bridge/gateways.json`, then `./gateways.json`.
 
-Open the SSH tunnel with keepalives. On Windows Git Bash, prefix calls containing
-remote POSIX paths with `MSYS_NO_PATHCONV=1`; PowerShell needs no prefix.
+## Windows: `MSYS_NO_PATHCONV=1` on every Git Bash call
+
+Every path `ab` takes is a **remote POSIX path**, and Git Bash rewrites
+POSIX-looking arguments into Windows paths before the program sees them:
+
+```
+you type:   --cwd /project/data/x
+ab sees:    'C:/Program Files/Git/project/data/x'
+```
+
+This hits `--cwd`, `--file`, `--dir`, `--to`, and every other path argument.
+Usually it surfaces as a `400` — but a rewritten path **can also resolve
+somewhere real and wrong**, which is the case that costs you an afternoon.
+
+```bash
+MSYS_NO_PATHCONV=1 $AB submit -F task.md --cwd /project/data/x
+```
+
+Two things that trip people up:
+
+- **`MSYS2_ARG_CONV_EXCL='*'` does not work here.** It is MSYS2-proper; Git for
+  Windows ignores it silently and rewrites the paths anyway. Verified against a
+  live gateway.
+- **Shell state does not persist between tool calls**, so set it inline on every
+  invocation rather than exporting it once.
+
+**PowerShell needs no prefix** — it does no path rewriting, and is the simpler
+fallback if the escaping gets tiresome.
 
 ## Agent-safe command surface
 
@@ -154,6 +229,61 @@ cursor. One open stream does not wait forever for external compute.
 `report_id` deduplicates retries. A local-only fallback exits zero because the
 message is durably written, but it is not ingestible until that file is moved to
 the shared messages directory; read stderr.
+
+### Prompt shape for scheduler work, learned the hard way
+
+Put these in the brief. Each one corresponds to a way this has actually failed:
+
+- **Lead with the action, not the prohibition.** Opening with "do NOT wait for
+  the job" primes the agent to relay status instead of working. Say "submit it
+  and report the job id" first.
+- **Say explicitly that there is no background job to report on** — otherwise a
+  turn ends on a promise to check back, which the gateway records as success.
+- **Require interleaved evidence**: print each result as it is known, not in a
+  closing summary that may never be reached.
+- **Give permission to ship incomplete** — a submitted job with known gaps beats
+  a perfect plan that never ran.
+- **`mkdir -p` the scheduler's output directory from the submitting shell,
+  before submitting.** Slurm opens `--output` *before* the script runs, so an
+  in-script `mkdir` is too late: the job dies in about a second with no logs at
+  all, which reads exactly like "never queued".
+- **Heartbeat as the script's first action**, so an empty output directory means
+  *died* rather than *queued*.
+
+### Three states, not two
+
+When inferring a job's state from the filesystem, keep these distinct:
+
+| Observation | Means |
+|---|---|
+| can't reach the gateway | **nothing** about the job |
+| reached it, nothing there | not submitted, or died before writing |
+| files present | running |
+
+Collapsing the first into the second is how a live job gets reported as dead.
+Prefer `ab events` over mtime inference wherever `ab-notify` is wired up.
+
+## Recovering output when the job row can't help
+
+If the row is stale or the run wrote no artifact, the session transcript is the
+fallback — and its shape depends on the backend:
+
+- **Claude Code** keeps one file per session, reachable with `ab ls` /
+  `ab download`:
+  ```
+  <remote home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl
+  ```
+  A growing file means the agent is still working. Downloading it recovers the
+  text even when the job row says nothing useful.
+- **opencode** keeps sessions in one SQLite database
+  (`<remote home>/.local/share/opencode/opencode.db`) with no per-session files,
+  so `ab download` cannot help. Read it on the gateway host with
+  `opencode export <sessionID>` or `opencode session list`; the id to export is
+  the job's `forked_session`.
+
+This is the most expensive read available — a transcript is every tool call and
+every tool result. Filter on the remote host and download the extract, not the
+whole file.
 
 ## Safe files
 
