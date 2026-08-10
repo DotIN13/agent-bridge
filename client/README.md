@@ -51,8 +51,8 @@ ab jobs --gateway midway5 --output json
 
 | Command | Purpose |
 |---|---|
-| `gateways` | local gateway config and token presence |
-| `health` | unauthenticated liveness/version probe |
+| `gateways [--no-probe]` | every configured gateway: token presence **and** live reachability |
+| `health` | unauthenticated liveness/version probe of one gateway |
 | `agents` | configured backends, models, and capability flags |
 | `capabilities` | structured client/server contract |
 | `help [--remote]` | local CLI help or live `/v1/help` |
@@ -141,6 +141,10 @@ ab download --file /project/x/report.md --to ./out --overwrite
 
 - Open the tunnel first, for example
   `ssh -o ServerAliveInterval=60 -L 8787:localhost:8787 midway5`.
-- `gateways` is offline config inspection; use `health` for reachability.
+- `gateways` probes every gateway concurrently and always exits 0 — a down
+  gateway is data, not a command failure. Branch on `ab health` (exit 1 when
+  unreachable) or on `state`/`reachable` in `--output json`.
+- `gateways --no-probe` is pure offline config inspection and cannot tell you
+  anything is working.
 - On Git Bash, prefix remote POSIX paths with `MSYS_NO_PATHCONV=1` to prevent
   path rewriting. PowerShell needs no special flag.

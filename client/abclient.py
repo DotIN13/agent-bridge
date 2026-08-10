@@ -1,6 +1,7 @@
 """Shared stdlib-only transport and operations for the ``ab`` CLI."""
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import ntpath
 import os
@@ -20,6 +21,9 @@ except ImportError:  # copied client/ directory, without the repository root
     from _version import __version__ as CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+# Short by design: `ab gateways` probes every configured gateway, so this is
+# the worst case a listing waits on one dead entry, not a request budget.
+PROBE_TIMEOUT = 3.0
 EVENT_TYPES = {
     "assistant", "thinking", "tool_use", "tool_result", "result", "status",
     "error", "log", "message", "steer",
@@ -64,10 +68,27 @@ class Gateways:
         return Client(name, base, _token_for(gw, required=require_token))
 
     def summary(self) -> list[dict]:
+        """Configured gateways, from local config only. Reaches nothing."""
         return [{"name": name, "base_url": gw.get("base_url"),
                  "default": name == self.default,
                  "has_token": bool(_token_for(gw, required=False))}
                 for name, gw in self.gateways.items()]
+
+    def probe(self, timeout: float = PROBE_TIMEOUT) -> list[dict]:
+        """`summary()` plus a real liveness check of every gateway.
+
+        Fanned out concurrently: one unreachable gateway must not make the
+        others wait out its timeout. Config order is preserved so the output
+        is stable between runs.
+        """
+        rows = self.summary()
+        if not rows:
+            return rows
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(8, len(rows))) as pool:
+            checks = list(pool.map(
+                lambda row: probe_gateway(row["base_url"], timeout=timeout), rows))
+        return [{**row, **check} for row, check in zip(rows, checks)]
 
 
 def _token_for(gw: dict, required: bool = True) -> str:
@@ -118,6 +139,61 @@ def _unreachable(base: str, path: str, exc: OSError) -> GatewayError:
     return GatewayError(
         f"cannot reach {base}{path}: {getattr(exc, 'reason', exc)} "
         "(is the SSH port-forward up, and the gateway running?)")
+
+
+def _classify_transport(exc: BaseException) -> tuple[str, str]:
+    """Name the failure so the caller knows which thing to go fix.
+
+    Refused and reset look alike in a stack trace and need opposite actions:
+    refused means nothing is listening locally (the forward is down), reset
+    means the forward is up and the far end is not serving.
+    """
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "timeout", "no response before the probe timeout"
+    if isinstance(reason, ConnectionRefusedError):
+        return "refused", "nothing is listening; SSH forward or gateway is down"
+    if isinstance(reason, ConnectionResetError):
+        return "reset", "forward is up but the gateway is not serving"
+    return "unreachable", str(reason)
+
+
+def probe_gateway(base_url: str | None, timeout: float = PROBE_TIMEOUT) -> dict:
+    """Liveness-check one gateway. Never raises — the result *is* the answer.
+
+    `/health` needs no auth, so a gateway with no token configured is still
+    probeable; token presence and reachability are independent facts and are
+    reported separately.
+    """
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return {"state": "no_base_url", "reachable": False,
+                "detail": "no base_url configured", "version": None,
+                "latency_ms": None}
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(
+                _request("GET", base, "/health", ""), timeout=timeout) as response:
+            payload = _parse(response.read())
+    except urllib.error.HTTPError as exc:
+        # Something answered, but not with a healthy agent-bridge.
+        return {"state": "http_error", "reachable": True,
+                "detail": f"HTTP {exc.code} from /health; is this an agent-bridge?",
+                "version": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1)}
+    except (OSError, urllib.error.URLError) as exc:
+        state, detail = _classify_transport(exc)
+        return {"state": state, "reachable": False, "detail": detail,
+                "version": None, "latency_ms": None}
+    latency = round((time.monotonic() - started) * 1000, 1)
+    ok = isinstance(payload, dict) and payload.get("ok") is True
+    return {
+        "state": "up" if ok else "unhealthy",
+        "reachable": True,
+        "detail": None if ok else f"unexpected /health payload: {payload!r}"[:200],
+        "version": payload.get("version") if isinstance(payload, dict) else None,
+        "latency_ms": latency,
+    }
 
 
 def _request(method: str, base: str, path: str, token: str, *, body=None,
@@ -342,7 +418,17 @@ class Client:
 
     # discovery
     def health(self) -> dict:
-        return self._get("/health")
+        """Liveness of *this* gateway, annotated with which one it was.
+
+        The server payload is `{ok, version}` and carries no identity, which
+        makes it useless in a multi-gateway script — you cannot tell from the
+        response which target answered. The name and URL are added here rather
+        than server-side, since only the client knows the local alias.
+        """
+        payload = self._get("/health")
+        if isinstance(payload, dict):
+            return {**payload, "gateway": self.name, "base_url": self.base}
+        return payload
 
     def remote_help(self) -> str:
         code, data = http("GET", self.base, "/v1/help", self.token,

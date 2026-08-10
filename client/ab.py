@@ -16,8 +16,8 @@ _CLIENT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
-    CLIENT_VERSION, EVENT_TYPES, TERMINAL, Client, ConfigError, GatewayError,
-    load_gateways,
+    CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL, Client, ConfigError,
+    GatewayError, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -145,21 +145,49 @@ def _remote_exit(job: dict) -> None:
 
 # discovery -----------------------------------------------------------------
 def cmd_gateways(args):
+    """Configured gateways and, by default, whether each one is actually up.
+
+    The status column used to report token presence as `[ok]`, which reads as
+    health and is not — a fleet that is entirely down still printed `[ok]` and
+    exited 0. Token presence and reachability are now separate columns, and
+    the reachability one is real.
+    """
     gateways = load_gateways(args.config)
-    data = {"gateways": gateways.summary(), "default": gateways.default}
+    rows = gateways.probe(timeout=args.probe_timeout) if args.probe \
+        else gateways.summary()
+    data = {"gateways": rows, "default": gateways.default,
+            "probed": bool(args.probe)}
 
     def human(value):
         for gateway in value["gateways"]:
             mark = "*" if gateway["default"] else " "
-            token = "ok" if gateway["has_token"] else "NO TOKEN"
-            print(f" {mark} {gateway['name']:16} {gateway['base_url']:32} [{token}]")
+            token = "token" if gateway["has_token"] else "no token"
+            status = _probe_status(gateway) if value["probed"] else "not probed"
+            print(f" {mark} {gateway['name']:16} "
+                  f"{gateway['base_url'] or '(no base_url)':32} {token:9} {status}")
     _emit(args, data, human)
+
+
+def _probe_status(gateway: dict) -> str:
+    """One column that answers 'can I use this right now'."""
+    if gateway.get("state") == "up":
+        version = gateway.get("version") or "?"
+        latency = gateway.get("latency_ms")
+        return f"up {version}" + (f" ({latency:g} ms)" if latency is not None else "")
+    label = str(gateway.get("state", "unknown")).upper()
+    detail = gateway.get("detail")
+    return f"{label}" + (f" — {detail}" if detail else "")
 
 
 def cmd_health(args):
     client = load_gateways(args.config).client(args.gateway, require_token=False)
-    _emit(args, client.health(),
-          lambda value: print("ok" if value.get("ok") else json.dumps(value)))
+
+    def human(value):
+        if value.get("ok"):
+            print(f"ok {value.get('gateway', '')} {value.get('version', '')}".rstrip())
+        else:
+            print(json.dumps(value))
+    _emit(args, client.health(), human)
 
 
 def cmd_agents(args):
@@ -550,8 +578,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--idempotency-key",
                         help="stable retry key for exactly-one job creation")
 
-    command("gateways", "list locally configured gateways").set_defaults(func=cmd_gateways)
-    command("health", "probe gateway liveness and version").set_defaults(func=cmd_health)
+    sp = command("gateways", "list configured gateways and whether each is up")
+    # Probing is the default because the unprobed view is the one that misleads:
+    # it can only ever say "configured", and readers hear "working".
+    sp.add_argument("--no-probe", dest="probe", action="store_false", default=True,
+                    help="list local config only; contact nothing")
+    sp.add_argument("--probe-timeout", type=_positive_float, default=PROBE_TIMEOUT,
+                    metavar="SECONDS",
+                    help=f"per-gateway probe timeout (default {PROBE_TIMEOUT:g}s)")
+    sp.set_defaults(func=cmd_gateways)
+    command("health", "probe one gateway's liveness and version").set_defaults(func=cmd_health)
     command("agents", "list configured agent backends and capabilities").set_defaults(func=cmd_agents)
     command("capabilities", "print the structured client/server contract").set_defaults(func=cmd_capabilities)
     sp = command("help", "show local or live gateway help")

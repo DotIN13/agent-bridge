@@ -44,16 +44,29 @@ Examples below write plain `ab` for brevity; substitute whichever form resolved.
 ## Reachability
 
 ```bash
-$AB gateways        # local config only
-$AB health          # the real probe: liveness + version
+$AB gateways        # every configured gateway: token, reachability, version
+$AB gateways --no-probe   # local config only; contacts nothing
+$AB health          # one gateway; exit code carries the answer
 ```
 
-**`ab gateways` succeeding tells you nothing about the gateway.** It reads local
-config and reports whether a token loaded — nothing leaves the machine. `ab
-health` is the reachability probe; use it before concluding anything is up.
+`ab gateways` probes each gateway concurrently and reports two independent
+facts per row — whether a **token** loaded, and whether it is actually **up**:
 
-When it fails, the error distinguishes two causes, and they need different
-fixes:
+```
+ * alpha   http://127.0.0.1:8799   token     up 0.3.0 (47 ms)
+   beta    http://127.0.0.1:8801   token     HTTP_ERROR — HTTP 404 from /health; is this an agent-bridge?
+   gamma   http://127.0.0.1:8802   no token  REFUSED — nothing is listening; SSH forward or gateway is down
+```
+
+It **always exits 0** — a down gateway is data, not a command failure. To
+branch in a script, use `ab health` (exit 1 when unreachable) or read
+`state`/`reachable` from `ab gateways --output json`.
+
+**`--no-probe` reports configuration only and cannot tell you anything is
+working.** It is for the "is my config even loading" question, and it is the
+one command that works with no network.
+
+Reachability failures name their own cause, and the two need opposite fixes:
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -106,8 +119,8 @@ fallback if the escaping gets tiresome.
 
 | Command | Use |
 |---|---|
-| `gateways` | local gateways/token presence |
-| `health` | liveness and version |
+| `gateways` | every gateway: token presence **and** live reachability |
+| `health` | one gateway's liveness/version; exit code carries it |
 | `agents` | backends, models, capability flags |
 | `capabilities` | structured client/server contract |
 | `info` | host, GPU, scheduler, allocation info |
@@ -316,8 +329,8 @@ data, use `rsync` into an allowed directory and attach the remote path.
   submitted external work.
 - Prefer structured `job`, `events`, and downloaded artifacts to filesystem
   mtime inference.
-- Distinguish tunnel failure from gateway failure; `gateways` succeeding proves
-  neither.
+- Distinguish tunnel failure from gateway failure; `gateways --no-probe`
+  succeeding proves neither.
 - Cancellation interrupts first so the transcript can flush; escalation is a
   fallback.
 - A gateway restart explicitly fails formerly running rows and requeues queued
