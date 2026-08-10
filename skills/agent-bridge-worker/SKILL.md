@@ -35,6 +35,27 @@ names one, work within it and say so if you had to deviate.
 - **Say what you could not do.** Mark unrun work `NOT-RUN` rather than inferring
   a plausible value. A partial honest result beats a complete-looking one.
 
+## The caller can interrupt you mid-turn
+
+A new user message can arrive **while you are working** — the caller sends it
+with `ab steer`, and it reaches you at your next tool boundary, in this same
+turn. It is not a new task and not a separate session; it is the caller
+watching your run and correcting it.
+
+Treat it as authoritative and current: it was written with more information
+than your brief was, usually because they can see something going wrong.
+
+- **Re-plan from where you are.** Don't finish the old plan first out of
+  tidiness. If it says stop before an expensive step, stop before that step.
+- **Say what you dropped.** Name the work you abandoned and anything already
+  half-done, so the caller knows the state they left you in.
+- **A steer that contradicts the brief wins** — but say that it did, and what
+  the conflict was. Silent compliance with a contradiction is how two people
+  end up with different ideas of what ran.
+
+Note the asymmetry: the caller can reach into your turn, but you cannot pause
+and ask them anything — see *Finishing your turn* below. Decide and report.
+
 ## Finishing your turn
 
 **A turn that ends with "I'll report back when X finishes" is a failed turn.**
@@ -92,20 +113,23 @@ outlives your turn must report its own lifecycle, or the only signal available
 to the caller is output-file mtimes — which cannot distinguish *queued* from
 *died before writing* from *the filesystem is unreachable*.
 
-`ab-notify` lives at `<repo>/bin/ab-notify`, is executable, and needs no
-install — but the batch job has to find it. Prepend the repo's `bin/` to `PATH`
-in the script (safer than `~/.local/bin`, which on this cluster already shadows
-things), or call it by absolute path.
+`ab-notify` is installed as a console script (from `client/ab_notify.py`), so on
+a host with the package installed it is simply on `PATH`. Where it isn't, call
+the legacy shim `<repo>/bin/ab-notify` by absolute path, or prepend the repo's
+`bin/` to `PATH` in the script — safer than `~/.local/bin`, which on many
+clusters already shadows things. **Check which form resolves before relying on
+it**; a batch script that can't find `ab-notify` reports nothing and fails
+silently.
 
 ```bash
 #SBATCH --export=ALL,AB_JOB_ID=<the ab job uuid>,AB_DATA_DIR=<gateway data dir>
 
-export PATH="<repo>/bin:$PATH"
+command -v ab-notify >/dev/null || export PATH="<repo>/bin:$PATH"
 
-ab-notify --status running  --msg "server up, starting generation"
-ab-notify --status running  --msg "12/24 sources done"
-ab-notify --status finished --report "$RUNS/RESULTS.md"
-ab-notify --status failed   --msg-file "$RUNS/error.log"
+ab-notify --status running  --msg "server up, starting generation" --report-id start
+ab-notify --status running  --msg "12/24 sources done"             --report-id p12
+ab-notify --status finished --report "$RUNS/RESULTS.md"            --report-id done
+ab-notify --status failed   --msg-file "$RUNS/error.log"           --report-id fail
 ```
 
 | Flag | Use |
@@ -115,6 +139,7 @@ ab-notify --status failed   --msg-file "$RUNS/error.log"
 | `--status finished --report PATH` | name the artifact a reader should open |
 | `--status failed --msg-file PATH` | the error text, from a file — don't cram a stack trace through a shell argument |
 | `--msg-file` | any long or multi-line message; avoids quoting bugs |
+| `--report-id ID` | **stable id for retry deduplication.** Give every call one. A requeued or retried step then updates its report instead of appending a duplicate |
 
 **`AB_JOB_ID` and `AB_DATA_DIR` must both be exported into the job.** The first
 identifies the job. The second is how `ab-notify` finds two things it needs:
@@ -130,12 +155,30 @@ submit lines show up in scheduler metadata and accounting records that other
 users on a shared cluster can often read. Let it be read from `.token`, which is
 mode `0600` and already protected by the filesystem.
 
-`ab-notify` tries HTTP, then a shared-filesystem JSONL, then local `/tmp`, and
-prints where it wrote. **It exits 0 even when every path fails**, so it will
-never take your job down; check its stderr if you care which path was used.
+`ab-notify` tries HTTP, then a shared-filesystem JSONL, then a local temporary
+JSONL, and prints where it wrote. **It exits 0 in all three cases**, so it can
+never take your job down — but the tiers are not equivalent, and only stderr
+tells you which one you got. A **local-only** fallback exits zero because the
+message is durably written, yet it is *not ingestible* until that file is moved
+to the shared messages directory. Treat a local-tier write as "recorded, not
+delivered" and say so in your own final message.
 
-Messages land in the same event stream as your own output, so the caller polls
-one reference for the whole lifecycle.
+Messages land in the same event stream as your own output, so one reference
+covers the whole lifecycle — but note **when** they land:
+
+**Your `message` events are annotations on a job that has usually already
+finished.** The gateway job records *your turn*, and your turn ends when you
+submit the batch work. So the caller's job row may read `succeeded` — and their
+`events --follow` may have closed at that terminal state — hours before your
+`finished` report arrives. That is working as designed, not a bug. The caller
+picks later reports up with a fresh event query from their last cursor. Do not
+assume anyone is still watching a live stream when your job finally reports;
+write each message to stand on its own.
+
+Reports also survive a gateway restart, because they are keyed by job id — even
+though a restart marks the agent's own row `failed` with `gateway_restarted`.
+So a batch job that reports properly stays observable through an outage that
+lost the turn which launched it. One more reason the reporting is yours to own.
 
 ## Submitting Slurm work
 
@@ -255,5 +298,8 @@ Slurm-specific except the flag names.
 - [ ] Did I name every substitution and deviation?
 - [ ] Did I mark unrun work `NOT-RUN`?
 - [ ] Does the batch script `ab-notify` at start, milestones, and finish/fail?
+- [ ] Does every `ab-notify` call carry a `--report-id`, so a retry updates
+      rather than duplicates?
+- [ ] Did I confirm `ab-notify` actually resolves inside the job environment?
 - [ ] Did I create the output dir before `sbatch`, and heartbeat first?
 - [ ] Am I ending with results — ids, paths, numbers — and not a promise?
