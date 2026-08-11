@@ -110,6 +110,23 @@ def _scan_file(path: Path, max_lines: int = 4000) -> SessionInfo | None:
     )
 
 
+def find(session_id: str) -> SessionInfo | None:
+    """One session by id, looked up directly.
+
+    Deliberately not built on `scan()`: that parses only a bounded window of the
+    most recently modified transcripts, so a session outside the window would
+    come back as "not found" and the caller would silently fall back to a
+    default. A glob on the id is exact and costs one directory walk.
+    """
+    if not session_id or not _PROJECTS.is_dir():
+        return None
+    for path in _PROJECTS.glob(f"*/{session_id}.jsonl"):
+        info = _scan_file(path)
+        if info:
+            return info
+    return None
+
+
 def scan(limit: int = 40, cwd_filter: str | None = None) -> list[SessionInfo]:
     """Return up to `limit` most-recently-active sessions, newest first.
 

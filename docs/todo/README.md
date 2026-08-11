@@ -10,19 +10,13 @@ records refer to them.
 
 | # | Item | Severity | Blocked on |
 |---|---|---|---|
-| [03](03-direct-mode-resumes-in-wrong-cwd.md) | `direct` mode resumes a pinned session in the caller's cwd | high | a small API question |
 | [04](04-session-index-cwd-is-sort-only.md) | `cwd` only sorts the session index; the parse window truncates before it | medium | nothing |
 | [05](05-session-index-hygiene.md) | Index advertises non-resumable ids and empty stub sessions | low | nothing |
 | [09](09-steer-vs-resume-is-a-race.md) | Steer-vs-resume is a race the caller has to arbitrate | medium | a design decision |
 
 ## Suggested order
 
-**03 first.** It is the only one that silently does the wrong thing rather than
-merely showing less than it could, and its blast radius grew when the production
-gateway took `C:\Users\tiger` into `allowed_dirs`: a job pinning a session whose
-real cwd was elsewhere runs the agent against the wrong tree.
-
-**04 next, and sooner than its severity suggests.** It is latent only because the
+**04 first, and sooner than its severity suggests.** It is latent only because the
 store is still under the window. Measured 2026-08-11: **110 transcripts against a
 120-file pre-parse window.** Past that, sessions under the requested `cwd` start
 disappearing from the index, which quietly defeats the resume-first policy both

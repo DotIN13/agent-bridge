@@ -124,6 +124,12 @@ event. A turn mid-generation with no tool calls sees it only when that finishes.
 later flush wins — the other branch is silently lost. The gateway refuses with
 `409 session_busy` naming `held_by` and `steer_ref`. **Follow the pointer.**
 
+**A named session runs in its own directory.** Resuming or forking carries that
+session's history, so the gateway runs it in the project it was created in —
+overriding `--cwd` and the configured default, and saying so with a `status`
+event (`stage: "cwd"`, naming the directory used and the one replaced). To work
+in a *different* tree, start a fresh job rather than pinning a session.
+
 **Getting the session to reuse:** `submit` waits for it and prints it
 (`session: <id> (ready)`); `--no-wait` skips the wait. On any job row, `session`
 is the single canonical field to pass back to `--session` — prefer it over

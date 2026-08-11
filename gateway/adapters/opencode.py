@@ -26,7 +26,7 @@ from typing import Callable
 
 from ..config import AgentConfig
 from ..sessions import SessionInfo
-from .base import Event, JobSpec, RunResult, interrupt_group
+from .base import Event, JobSpec, RunResult, interrupt_group, resume_cwd
 
 _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
 
@@ -113,9 +113,42 @@ class OpenCodeAdapter:
                 f"Claude-only flags")
         return self._run_direct(spec, emit)
 
+    def _session_cwd(self, session_id: str) -> str | None:
+        """One session's recorded directory, by id.
+
+        A targeted query rather than a scan of `list_sessions()`, which returns
+        only a bounded window — a session outside it would look absent and the
+        caller would fall back to a default.
+        """
+        db = self._db_path()
+        if not db.is_file():
+            return None
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return None
+        try:
+            row = con.execute("SELECT directory FROM session WHERE id=?",
+                              (session_id,)).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            con.close()
+        return (row[0] or None) if row else None
+
+    def _cwd_for(self, spec: JobSpec, emit) -> str:
+        if not spec.requested_session:
+            return spec.cwd
+        return resume_cwd(self.cfg, spec.requested_session,
+                          self._session_cwd(spec.requested_session),
+                          spec.cwd, emit)
+
     def _run_direct(self, spec: JobSpec, emit) -> RunResult:
         perm = spec.permission_mode or self.cfg.permission_mode
-        args = [self.cfg.bin, "run", "-", "--format", "json", "--dir", spec.cwd]
+        # A named session runs in its own directory: `--dir` and the process cwd
+        # must agree, or the agent's history and its filesystem disagree.
+        cwd = self._cwd_for(spec, emit)
+        args = [self.cfg.bin, "run", "-", "--format", "json", "--dir", cwd]
         # Non-interactive: without pre-approval opencode denies every tool it
         # hasn't been told to allow, which reads as a failed run. `--auto` is
         # the opencode spelling of the gateway's default bypassPermissions.
@@ -147,7 +180,7 @@ class OpenCodeAdapter:
                               "fork": spec.fork}))
         text: list[str] = []
         res = RunResult(ok=False, chosen_session=spec.requested_session)
-        self._stream(args, spec.cwd, spec.prompt, emit, res, text,
+        self._stream(args, cwd, spec.prompt, emit, res, text,
                      cancel=spec.cancel)
         return res
 

@@ -25,8 +25,9 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import AgentConfig
-from ..sessions import SessionInfo, scan
-from .base import Event, JobSpec, RunResult, Steering, interrupt_group
+from ..sessions import SessionInfo, find as find_session, scan
+from .base import (Event, JobSpec, RunResult, Steering, interrupt_group,
+                   resume_cwd)
 
 _RESUME_RE = re.compile(r"--resume[= ]+([0-9a-fA-F-]{36})")
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
@@ -236,10 +237,24 @@ class ClaudeAdapter:
                               "fork": spec.fork,
                               "steerable": True}))
         res = RunResult(ok=False, chosen_session=spec.requested_session)
-        self._stream(args, spec.cwd, emit, res, capture_nested=False,
-                     cancel=spec.cancel, steer=spec.steer,
+        self._stream(args, self._cwd_for(spec, emit), emit, res,
+                     capture_nested=False, cancel=spec.cancel, steer=spec.steer,
                      first_message=spec.prompt)
         return res
+
+    def _cwd_for(self, spec: JobSpec, emit) -> str:
+        """Where to run. A named session's own directory wins.
+
+        Resuming or forking carries that session's history, so the run belongs
+        in the project it was created in — `--resume` itself is not cwd-scoped,
+        which is precisely why this has to be set deliberately. A fresh job has
+        no session and keeps the requested cwd.
+        """
+        if not spec.requested_session:
+            return spec.cwd
+        info = find_session(spec.requested_session)
+        return resume_cwd(self.cfg, spec.requested_session,
+                          info.cwd if info else None, spec.cwd, emit)
 
     def _model_flag(self, spec: JobSpec) -> str:
         model = spec.model or self.cfg.model
