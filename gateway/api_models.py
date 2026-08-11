@@ -7,10 +7,10 @@ all HTTP responses pass through these models or the normalisers below.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import (BaseModel, ConfigDict, Field, computed_field,
-                      model_validator)
+from pydantic import (BaseModel, BeforeValidator, ConfigDict, Field,
+                      computed_field, model_validator)
 
 
 # Every event type the gateway can emit. Lives here rather than in the client
@@ -29,12 +29,31 @@ def iso_local(epoch: float | None) -> str | None:
     always present, so the value stays unambiguous even though "local" here
     means the *gateway's* zone, which for a tunnelled client is not their own.
 
-    Epoch floats are kept alongside these: they are cursors and arithmetic
-    inputs, and `Last-Event-ID` is derived from them.
+    Every timestamp the API hands out goes through this. Epoch floats are not
+    published alongside: cursors are `seq`-based (`next_after`,
+    `Last-Event-ID`), and job pagination hides `created_at` inside an opaque
+    cursor, so nothing a caller reads needs the raw number. Durations stay
+    numeric -- see `EventRecord.elapsed`.
     """
     if epoch is None:
         return None
     return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="milliseconds")
+
+
+def _as_iso(value):
+    """Accept an epoch float from storage, publish ISO.
+
+    Applied with `mode="before"` so the models keep taking the raw database
+    dicts unchanged; already-formatted strings and None pass through, which
+    makes the conversion idempotent.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return iso_local(float(value))
+    return value
+
+
+# Reusable for any published timestamp field.
+IsoTimestamp = Annotated[str | None, BeforeValidator(_as_iso)]
 
 
 class StrictModel(BaseModel):
@@ -137,10 +156,10 @@ class JobSummary(BaseModel):
     fork: bool = True
     include_thinking: bool = False
     cost_usd: float | None = None
-    created_at: float
-    started_at: float | None = None
-    finished_at: float | None = None
-    last_event_at: float | None = None
+    created_at: IsoTimestamp = None
+    started_at: IsoTimestamp = None
+    finished_at: IsoTimestamp = None
+    last_event_at: IsoTimestamp = None
 
     @computed_field
     @property
@@ -155,26 +174,6 @@ class JobSummary(BaseModel):
         fallbacks for a row that has not reached its init record yet.
         """
         return self.forked_session or self.chosen_session or self.requested_session
-
-    @computed_field
-    @property
-    def created_at_iso(self) -> str | None:
-        return iso_local(self.created_at)
-
-    @computed_field
-    @property
-    def started_at_iso(self) -> str | None:
-        return iso_local(self.started_at)
-
-    @computed_field
-    @property
-    def finished_at_iso(self) -> str | None:
-        return iso_local(self.finished_at)
-
-    @computed_field
-    @property
-    def last_event_at_iso(self) -> str | None:
-        return iso_local(self.last_event_at)
 
 
 class JobDetail(JobSummary):
@@ -212,7 +211,7 @@ class JobsPage(BaseModel):
 
 class EventRecord(BaseModel):
     seq: int
-    ts: float
+    ts: IsoTimestamp = None
     type: str
     data: dict[str, Any]
     job_id: str | None = None
@@ -221,11 +220,6 @@ class EventRecord(BaseModel):
     # happen" is the question a reader actually has, and deriving it otherwise
     # means fetching event #1 first.
     elapsed: float | None = None
-
-    @computed_field
-    @property
-    def ts_iso(self) -> str | None:
-        return iso_local(self.ts)
 
     @computed_field
     @property
@@ -308,7 +302,7 @@ class FileRow(BaseModel):
     path: str
     is_dir: bool
     size: int
-    mtime: float
+    mtime: IsoTimestamp = None
 
 
 class FilesPage(BaseModel):

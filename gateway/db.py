@@ -15,6 +15,8 @@ import sqlite3
 import threading
 import time
 import uuid
+
+from .api_models import iso_local
 from typing import Any
 
 _SCHEMA = """
@@ -556,6 +558,16 @@ class Database:
     def add_message(self, job_id: str, data: dict,
                     report_id: str | None = None) -> dict:
         report_id = report_id or data.get("report_id")
+        # `ab-notify` sends an epoch `ts`. Keep the number for the event's own
+        # timestamp, but publish ISO inside `data` too: a report is otherwise the
+        # one place a bare epoch still reaches a reader, hidden in a passthrough
+        # dict the models never touch. Rewritten before hashing so a retry with
+        # the same payload keeps the same dedup identity.
+        raw_ts = data.get("ts")
+        epoch = float(raw_ts) if isinstance(raw_ts, (int, float)) \
+            and not isinstance(raw_ts, bool) else time.time()
+        if raw_ts is not None:
+            data = {**data, "ts": iso_local(epoch)}
         request_hash = hashlib.sha256(
             json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         with self._lock:
@@ -566,7 +578,7 @@ class Database:
                         job_id, "report", str(report_id), request_hash, data)
                 else:
                     row = self._append_event_locked(
-                        job_id, "message", data, float(data.get("ts") or time.time()))
+                        job_id, "message", data, epoch)
                     duplicate = False
                 self._conn.commit()
                 row["duplicate"] = duplicate

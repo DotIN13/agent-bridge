@@ -9,6 +9,8 @@ import json
 import os
 import re
 from dataclasses import dataclass, asdict
+
+from .api_models import iso_local
 from pathlib import Path
 
 _PROJECTS = Path.home() / ".claude" / "projects"
@@ -35,6 +37,9 @@ class SessionInfo:
     def to_public(self) -> dict:
         d = asdict(self)
         d.pop("path", None)
+        # Published as ISO like every other timestamp the API hands out; the
+        # epoch float stays on the dataclass for sorting the index.
+        d["last_active"] = iso_local(self.last_active)
         return d
 
 

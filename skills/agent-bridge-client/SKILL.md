@@ -193,8 +193,11 @@ ab events REF -f                     # follow; primes with a short tail
 - `--output json` is faithful/unelided: narrow with `--type` before widening
   `--tail`, or a long job's tool results will flood you.
 
-Each event carries `ts` (epoch), `ts_iso` (gateway-local, offset attached), and
-`elapsed`/`elapsed_hms` — position in the run, usually the actual question.
+**Every timestamp is ISO 8601** with the gateway's UTC offset attached — job
+`created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`, session
+`last_active`, file `mtime`. No epoch floats to decode. Durations stay numeric:
+`elapsed`/`elapsed_hms` on each event give position in the run, usually the
+actual question.
 
 **Transcripts are the last resort** — every tool call *and result*, megabytes.
 Filter on the remote host, download the extract:

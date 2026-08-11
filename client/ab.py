@@ -94,11 +94,30 @@ def _clip(value: str, size: int = ELIDE_AT) -> str:
         f"{value[:size]}… [+{len(value) - size} chars, --full]"
 
 
+def _epoch(value) -> float | None:
+    """Seconds since the epoch from whatever a timestamp field holds.
+
+    The API publishes ISO strings; older gateways published epoch floats, and
+    the two are worth tolerating side by side so a new client still reads an
+    un-upgraded gateway rather than rendering every time as unknown.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    import datetime
+    try:
+        return datetime.datetime.fromisoformat(str(value)).timestamp()
+    except ValueError:
+        return None
+
+
 def _ts(value) -> str:
-    if not value:
+    epoch = _epoch(value)
+    if epoch is None:
         return "--:--:--"
     import datetime
-    return datetime.datetime.fromtimestamp(value).strftime("%H:%M:%S")
+    return datetime.datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
 
 
 def _resolve_prompt(args) -> str:
@@ -351,9 +370,10 @@ def cmd_jobs(args):
             return
         now = time.time()
         def ago(timestamp):
-            if not timestamp:
+            epoch = _epoch(timestamp)
+            if epoch is None:
                 return "-"
-            minutes = (now - timestamp) / 60.0
+            minutes = (now - epoch) / 60.0
             return f"{minutes:.0f}m" if minutes < 120 else f"{minutes / 60:.1f}h"
         print(f"{'ID':<36} {'STATUS':<10} {'AGE':>6} {'SEEN':>6}  TITLE")
         for job in rows:

@@ -206,7 +206,7 @@ and `1 <= L <= 1000`:
 
 ```json
 {
-  "events": [{"seq":12,"ts":1785.0,"ts_iso":"2026-08-11T14:52:40.572-05:00",
+  "events": [{"seq":12,"ts":"2026-08-11T14:52:40.572-05:00",
               "elapsed":6.689,"elapsed_hms":"+00:00:06",
               "type":"assistant","data":{"text":"…"}}],
   "status": "running", "terminal": false,
@@ -226,11 +226,22 @@ right, and with repeatable `type=T`, which filters **inside** the window; a
 `type` applied afterwards would make `tail=3&type=result` empty on any long job.
 `ab events` defaults to a tail; `--after 0` restores top-down reading.
 
-**Timestamps.** `ts` stays an epoch float — it is the cursor and the arithmetic
-input. `ts_iso` is the same instant in the **gateway's local** time with the UTC
-offset attached, and `elapsed`/`elapsed_hms` give position within the run, which
-is usually the question being asked. Job rows carry the same `*_iso` siblings for
-`created_at`, `started_at`, `finished_at` and `last_event_at`.
+**Timestamps are ISO 8601, everywhere.** Every timestamp the API publishes is a
+string in the **gateway's local** time with the UTC offset attached
+(`2026-08-11T14:52:40.572-05:00`) — no bare epoch floats reach a caller. That
+covers job `created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`,
+session `last_active`, file `mtime`, and the `ts` inside an `ab-notify` report
+payload.
+
+Local rather than UTC because the reader correlating a job against an sbatch log
+holds a local clock; the offset keeps it unambiguous, and "local" means the
+gateway's zone, which for a tunnelled client is not their own.
+
+Cursors are unaffected — `next_after` and `Last-Event-ID` are `seq`-based, and
+job pagination hides `created_at` inside an opaque cursor, so nothing a caller
+reads needed the raw number. **Durations stay numeric:** `elapsed` (seconds
+since the job's first event) with `elapsed_hms` alongside, because position
+within the run is usually the real question.
 
 All event sources share one transactional, per-job monotonic sequence allocator.
 `next_after` and SSE `Last-Event-ID` are safe cursors with no sequence bands.

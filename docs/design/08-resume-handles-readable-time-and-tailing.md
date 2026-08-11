@@ -121,12 +121,14 @@ specifically a machine-output gap — the `--output json` path an agent uses.
 
 ### Proposed
 
-**Add, do not replace.** The floats are cursors and arithmetic inputs; removing
-them breaks clients and the SSE `Last-Event-ID` relationship. Add siblings:
-
-- `EventRecord.ts_iso`
-- `JobSummary.created_at_iso`, `started_at_iso`, `finished_at_iso`,
-  `last_event_at_iso`
+**Superseded: ISO replaces the floats rather than accompanying them.** This part
+shipped first as `*_iso` siblings, on the belief that the floats were cursors.
+They are not -- `next_after` and `Last-Event-ID` are `seq`-based, and job
+pagination hides `created_at` in an opaque cursor -- so nothing a caller reads
+needed the number, and publishing both left a float as the first thing a reader
+saw. Every published timestamp is now an ISO string in place, including two this
+section missed: session `last_active` and file `mtime`, plus the `ts` inside an
+`ab-notify` report payload.
 
 **Decided: local time, with the UTC offset attached** — e.g.
 `2026-08-10T16:07:23.451-05:00`, not a `Z`-suffixed UTC rendering. Local is the

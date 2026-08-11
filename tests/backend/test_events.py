@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import json
 import sqlite3
 import threading
@@ -184,7 +186,7 @@ def test_tail_and_after_cannot_be_combined(client, auth, gateway):
     assert response.json()["error"]["code"] == "invalid_request"
 
 
-def test_events_carry_local_iso_and_elapsed(client, auth, gateway):
+def test_event_timestamps_are_iso_and_carry_elapsed(client, auth, gateway):
     accepted = client.post("/v1/jobs", headers=auth,
                            json={"prompt": "stamps"}).json()
     jid = accepted["id"]
@@ -193,12 +195,40 @@ def test_events_carry_local_iso_and_elapsed(client, auth, gateway):
     rows = client.get(f"/v1/jobs/{jid}/events?legacy=false",
                       headers=auth).json()["events"]
     first, last = rows[0], rows[-1]
+    # `ts` is published as ISO, not an epoch float -- no bare number reaches a
+    # reader, and the offset keeps local time unambiguous.
+    assert isinstance(first["ts"], str)
+    datetime.fromisoformat(first["ts"])
+    assert ("+" in first["ts"][10:] or "-" in first["ts"][10:])
+    # Durations stay numeric: they are arithmetic, not timestamps.
     assert first["elapsed"] == 0.0
     assert first["elapsed_hms"] == "+00:00:00"
     assert last["elapsed"] >= 0.0
-    # Local rendering carries an explicit offset, so it stays unambiguous.
-    assert first["ts_iso"] and ("+" in first["ts_iso"][10:]
-                                or "-" in first["ts_iso"][10:])
+
+
+def test_every_published_timestamp_is_iso(client, auth, gateway):
+    """No epoch float should reach a caller from any surface."""
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "sweep"}).json()
+    jid = accepted["id"]
+    gateway.db.add_message(jid, {"status": "running", "msg": "hi", "ts": 1786490297.5})
+
+    detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
+    for field in ("created_at", "started_at", "finished_at", "last_event_at"):
+        assert not isinstance(detail.get(field), (int, float)), field
+        if detail.get(field) is not None:
+            datetime.fromisoformat(detail[field])
+
+    summary = client.get("/v1/jobs?limit=1", headers=auth).json()["jobs"][0]
+    assert isinstance(summary["created_at"], str)
+
+    events = client.get(f"/v1/jobs/{jid}/events?legacy=false",
+                        headers=auth).json()["events"]
+    message = [e for e in events if e["type"] == "message"][0]
+    # The report payload is an opaque passthrough, so its own `ts` is the one
+    # place a bare epoch could still surface.
+    assert isinstance(message["data"]["ts"], str)
+    datetime.fromisoformat(message["data"]["ts"])
 
 
 def test_submit_reports_the_session_it_can_already_know(client, auth):
