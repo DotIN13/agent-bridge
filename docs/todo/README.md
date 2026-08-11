@@ -1,23 +1,37 @@
-# Todo
+# Todo — open work
 
-One file per fix, worked through in order. Each states the problem, the
-evidence it is real, and the proposed change — so the fix can be argued with
-before it is written.
+Only unfinished items live here. Shipped work moves to [`../design/`](../design/),
+which keeps the reasoning behind behaviour that already exists.
 
-Findings are from an empirical session against Claude Code **2.1.226** on
-2026-08-09; the experiments are described inline in each item.
+Each file states the problem, the evidence it is real, and the proposed change,
+so the fix can be argued with before it is written. Numbers are historical
+identity and are never reused or renumbered — commit messages and the design
+records refer to them.
 
-| # | Item | Severity | Status |
+| # | Item | Severity | Blocked on |
 |---|---|---|---|
-| [01](01-correct-mid-turn-steering-claims.md) | Docs claim `fork=false` queues into a live turn; it does not | high | **done** |
-| [02](02-mid-turn-steering-or-liveness-gate.md) | No mid-turn steering, and no liveness gate either | high | **done** |
-| [03](03-direct-mode-resumes-in-wrong-cwd.md) | `direct` mode resumes a pinned session in the caller's cwd | high | open — small API question |
-| [04](04-session-index-cwd-is-sort-only.md) | `cwd` only sorts the index; the parse window truncates before it | medium | open |
-| [05](05-session-index-hygiene.md) | Index advertises non-resumable ids and empty stub sessions | low | open |
-| [06](06-agent-first-cli-api.md) | Make the CLI contract agent-first | medium | **done** (0.3.0) |
-| [07](07-backend-api-contract.md) | Harden backend machine contract and lifecycle | high | **done** (0.3.0) |
-| [08](08-resume-handles-readable-time-and-tailing.md) | Resume handle absent from submit; epoch-float timestamps; logs only readable from the top | medium-high | **done** |
+| [03](03-direct-mode-resumes-in-wrong-cwd.md) | `direct` mode resumes a pinned session in the caller's cwd | high | a small API question |
+| [04](04-session-index-cwd-is-sort-only.md) | `cwd` only sorts the session index; the parse window truncates before it | medium | nothing |
+| [05](05-session-index-hygiene.md) | Index advertises non-resumable ids and empty stub sessions | low | nothing |
+| [09](09-steer-vs-resume-is-a-race.md) | Steer-vs-resume is a race the caller has to arbitrate | medium | a design decision |
 
-01 and 02 were the same subject split by cost and shipped together: the docs
-correction plus the behaviour behind it — a liveness gate on `fork=false`, and
-`POST /v1/jobs/{id}/steer` for reaching a turn already running.
+## Suggested order
+
+**03 first.** It is the only one that silently does the wrong thing rather than
+merely showing less than it could, and its blast radius grew when the production
+gateway took `C:\Users\tiger` into `allowed_dirs`: a job pinning a session whose
+real cwd was elsewhere runs the agent against the wrong tree.
+
+**04 next, and sooner than its severity suggests.** It is latent only because the
+store is still under the window. Measured 2026-08-11: **110 transcripts against a
+120-file pre-parse window.** Past that, sessions under the requested `cwd` start
+disappearing from the index, which quietly defeats the resume-first policy both
+skills push hardest — and the failure looks like "no relevant session exists".
+
+**09 when the shape of the CLI is being revisited anyway.** It is friction and a
+lost race, not corruption; the guards added in
+[design/02](../design/02-mid-turn-steering-or-liveness-gate.md) keep it safe.
+
+**05 last.** Real but currently latent — the orphaned transcripts on disk have
+aged out of the window, so exposure today is 0 unusable ids and 3 empty rows.
+It returns whenever a recent transcript gets orphaned.
