@@ -129,6 +129,43 @@ later flush wins — the other branch is silently lost. The gateway refuses with
 is the single canonical field to pass back to `--session` — prefer it over
 `forked_session`/`chosen_session`/`requested_session`.
 
+## Briefing the worker: separate what you know from what you assume
+
+You cannot see the remote filesystem, installed versions, cluster state, or
+prior runs. The worker cannot see this conversation, the user's goal, or what you
+already ruled out. Neither side can see its own blind spot, so say yours out
+loud. A brief has four parts:
+
+| Part | Content |
+|---|---|
+| **Known** | the goal, the constraints, what has been tried and ruled out, why this approach |
+| **Assumed** | paths, module names, versions, data shapes you believe exist but have *not* verified — labelled as assumptions |
+| **Unknown** | what you want discovered and reported back |
+| **Deliverable** | what the answer must contain to be usable without a follow-up |
+
+**The Assumed section is the one that earns its keep.** An assumption written as
+a fact ("edit `src/train.py`") makes the worker comply with something broken or
+silently substitute. Written as an assumption ("I believe the entry point is
+`src/train.py` — confirm, and say what you found if not") it makes the worker
+verify and report. Every path, version, and dataset name you did not personally
+read belongs here.
+
+```markdown
+## Known
+Goal: cut eval wall-clock. Batching is already ruled out — it changed the metric.
+## Assumed (verify these)
+- entry point `src/eval.py`; a `--workers` flag exists
+- torch 2.x with CUDA already in the shared env
+## Unknown — report back
+Actual GPU model on the partition, and whether the env's torch sees it.
+## Deliverable
+The command you ran, the before/after timing, and the versions in play.
+```
+
+Also state what you **cannot fetch**: anything outside the gateway's
+`allowed_dirs` is unreachable to you, so ask for extracts inline rather than
+file paths you cannot open.
+
 ## Reading a job
 
 **`ab job REF` first.** The result is stored and printed whole — usually all you
