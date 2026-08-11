@@ -460,6 +460,57 @@ class Database:
         """Compatibility wrapper; caller sequence is intentionally ignored."""
         return self.append_event(job_id, etype, data)
 
+    def event_bounds(self, job_id: str) -> dict:
+        """Total count and extent of a job's log.
+
+        Without this a caller cannot tell how far it is from the end, which is
+        why reading a long log meant paging forward blind. `first_ts` is here
+        too so the events route can stamp each record's elapsed time from one
+        query rather than re-reading event #1.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS total, MIN(seq) AS first_seq, "
+                "MAX(seq) AS last_seq, MIN(ts) AS first_ts "
+                "FROM events WHERE job_id=?", (job_id,)).fetchone()
+        return {"total": int(row["total"] or 0),
+                "first_seq": row["first_seq"], "last_seq": row["last_seq"],
+                "first_ts": row["first_ts"]}
+
+    def events_tail(self, job_id: str, limit: int, *, until_seq: int | None = None,
+                    types: tuple[str, ...] = ()) -> list[dict]:
+        """The last `limit` events, oldest-first.
+
+        Selected descending then reversed, so the returned page is in the same
+        chronological order as `events_after` — the response shape must not
+        depend on which end the caller read from.
+
+        `types` filters *inside* the limit. Applying it afterwards would make
+        `--type result --tail 5` return nothing on any long job, because the
+        last five events are rarely all results.
+        """
+        if not 1 <= int(limit) <= 1001:
+            raise ValueError("limit must be between 1 and 1001")
+        sql = "SELECT seq,ts,type,data FROM events WHERE job_id=?"
+        params: list = [job_id]
+        if until_seq is not None:
+            sql += " AND seq<=?"
+            params.append(int(until_seq))
+        if types:
+            sql += f" AND type IN ({','.join('?' * len(types))})"
+            params.extend(types)
+        sql += " ORDER BY seq DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        out = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["data"] = json.loads(item["data"])
+            item["job_id"] = job_id
+            out.append(item)
+        return out
+
     def events_after(self, job_id: str, after_seq: int,
                      limit: int = 500) -> list[dict]:
         if after_seq < 0:

@@ -16,8 +16,8 @@ _CLIENT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
-    CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL, Client, ConfigError,
-    GatewayError, load_gateways,
+    AWAIT_SESSION_TIMEOUT, CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL,
+    Client, ConfigError, GatewayError, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -25,6 +25,14 @@ EXIT_INVOCATION = 2
 EXIT_REMOTE = 3
 EXIT_TIMEOUT = 4
 ELIDE_AT = 200
+# `ab events REF` with no paging flags reads the last N rather than the first
+# page: the end of a log is where the result, the failure and the last action
+# are. `total` in the response keeps the truncation visible.
+DEFAULT_TAIL = 50
+# How much history `--follow` replays before streaming. Following used to start
+# at seq 0 and replay the whole job, which floods a caller on exactly the
+# long-running jobs follow exists for.
+FOLLOW_PRIME_TAIL = 20
 
 
 def _err(message: str, code: int = EXIT_LOCAL):
@@ -304,12 +312,31 @@ def cmd_run(args):
 
 
 def cmd_submit(args):
-    job = _client(args).submit(_resolve_prompt(args), **_submission(args))
+    client = _client(args)
+    job = client.submit(_resolve_prompt(args), **_submission(args))
+    # Wait for the session id by default: it is what makes the *next* call
+    # possible (a follow-up, a steer, a fork), and without it every caller pays
+    # a discover-the-session round trip it almost always wants. This waits for
+    # the id only, not for the work. `--no-wait` opts out.
+    if args.await_session:
+        job = client.await_session(job, timeout=args.await_timeout)
 
     def human(value):
+        # The bare id stays the whole of stdout: `id=$(ab submit -F t.md)` is a
+        # documented contract. Everything else is metadata on stderr.
         print(value["id"])
         if value.get("title"):
             print(f"title: {value['title']}", file=sys.stderr)
+        state = value.get("session_state", "pending")
+        if value.get("session"):
+            print(f"session: {value['session']} ({state})", file=sys.stderr)
+        elif state == "failed":
+            print(f"session: none — job {value.get('status', 'failed')} before it "
+                  f"started: {value.get('error') or 'no error recorded'}",
+                  file=sys.stderr)
+        else:
+            print("session: pending — read it from `ab job <ref> --output json`",
+                  file=sys.stderr)
     _emit(args, job, human)
 
 
@@ -397,11 +424,15 @@ def cmd_events(args):
     client = _client(args)
     mode = _mode(args)
     if not args.follow:
-        data = client.events(args.id, args.after, limit=args.limit)
-        events = [event for event in data["events"]
-                  if (args.until is None or event["seq"] <= args.until)
-                  and (not args.type or event["type"] in set(args.type))]
-        data = {**data, "events": events}
+        # A read with no paging flags is almost always "what did it just do",
+        # and the interesting end of a log is the bottom. So default to a tail
+        # rather than the first page; `--after 0` restores top-down reading, and
+        # `total` in the output makes the truncation visible rather than silent.
+        tail = args.tail
+        if tail is None and not args.after:
+            tail = DEFAULT_TAIL
+        data = client.events(args.id, args.after, limit=args.limit, tail=tail,
+                             until=args.until, types=args.type or ())
         _emit(args, data, lambda value: [
             print(f"{event['seq']:4} {_ts(event.get('ts'))} {event['type']}: "
                   f"{_event_text(event, args.full)}")
@@ -411,10 +442,27 @@ def cmd_events(args):
         return
 
     collected = []
-    last_seq = args.after
     human_printer = _human_stream_printer()
     wanted = set(args.type or [])
-    for event in client.iter_events(args.id, args.after, until=args.until):
+    # Follow used to start at seq 0 and replay every historical event before
+    # streaming. Prime with a short tail instead, so following a job that has
+    # been running for an hour costs a few lines rather than its whole log.
+    # `--after 0` asks for the full replay explicitly; `--tail N` sizes it.
+    start = args.after
+    if not start:
+        prime = args.tail if args.tail is not None else FOLLOW_PRIME_TAIL
+        recent = client.events(args.id, tail=prime, until=args.until,
+                               types=args.type or ())
+        for event in recent["events"]:
+            if mode == "jsonl":
+                _emit_event(args, args.id, event)
+            elif mode == "json":
+                collected.append(event)
+            else:
+                human_printer(event)
+        start = recent["next_after"] or 0
+    last_seq = start
+    for event in client.iter_events(args.id, start, until=args.until):
         last_seq = max(last_seq, int(event.get("seq", 0)))
         if wanted and event.get("type") not in wanted:
             continue
@@ -614,8 +662,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cancel-on-timeout", action="store_true")
     sp.set_defaults(func=cmd_run)
 
-    sp = command("submit", "submit a prompt and return immediately")
-    prompt_flags(sp); job_flags(sp); sp.set_defaults(func=cmd_submit)
+    sp = command("submit", "submit a prompt, waiting only for its session id")
+    prompt_flags(sp); job_flags(sp)
+    sp.add_argument("--no-wait", dest="await_session", action="store_false",
+                    default=True,
+                    help="return as soon as the job is queued, without waiting "
+                         "for the session id (session_state stays 'pending')")
+    sp.add_argument("--await-timeout", type=_positive_float,
+                    default=AWAIT_SESSION_TIMEOUT, metavar="SECONDS",
+                    help=f"how long to wait for the session id "
+                         f"(default {AWAIT_SESSION_TIMEOUT:g}s). Exceeding it is "
+                         f"not an error; the job keeps running")
+    sp.set_defaults(func=cmd_submit)
 
     sp = command("jobs", "list recent job summaries with full ids")
     sp.add_argument("--limit", type=_positive_int, default=50)
@@ -639,10 +697,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = command("events", "read or follow a job event stream")
     sp.add_argument("id", metavar="REF", help=reference)
-    sp.add_argument("--after", type=int, default=0, help="only seq > N")
+    sp.add_argument("--tail", type=_positive_int, metavar="N",
+                    help=f"read the last N events (default {DEFAULT_TAIL} when "
+                         f"no --after is given); cannot be combined with --after")
+    sp.add_argument("--after", type=int, default=0,
+                    help="only seq > N; reads forward from the top")
     sp.add_argument("--until", type=int, help="stop at seq N")
     sp.add_argument("--type", action="append", choices=sorted(EVENT_TYPES),
-                    help="event type filter (repeatable)")
+                    help="event type filter (repeatable); applied within --tail")
     sp.add_argument("--limit", type=_positive_int, default=500)
     sp.add_argument("--follow", "-f", action="store_true", help="use resumable SSE")
     sp.add_argument("--fail-on-job-failure", action="store_true")
@@ -686,8 +748,17 @@ def _validate(args) -> None:
         _err("--no-fork requires --session", EXIT_INVOCATION)
     if getattr(args, "after", 0) < 0:
         _err("--after must be non-negative", EXIT_INVOCATION)
+    if getattr(args, "tail", None) is not None and getattr(args, "after", 0):
+        # Anchoring from both ends at once has no single sensible reading. The
+        # server rejects this too; catching it locally keeps it an invocation
+        # error (exit 2) rather than a transport one (exit 1).
+        _err("--tail conflicts with --after; choose which end to read from",
+             EXIT_INVOCATION)
     if getattr(args, "until", None) is not None:
-        if args.until < 0 or args.until < getattr(args, "after", 0):
+        # --until pairs with --tail as a bounded window from the right, so only
+        # compare against --after when that is the anchor in use.
+        floor = 0 if getattr(args, "tail", None) is not None else getattr(args, "after", 0)
+        if args.until < 0 or args.until < floor:
             _err("--until must be non-negative and >= --after", EXIT_INVOCATION)
     if getattr(args, "prompt_file", None) and getattr(args, "prompt", None):
         _err("PROMPT conflicts with --prompt-file", EXIT_INVOCATION)

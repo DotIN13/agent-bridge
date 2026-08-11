@@ -139,9 +139,17 @@ Successful submission returns `202`, a `Location: /v1/jobs/<id>` header, and:
 {
   "id": "…", "status": "queued", "agent": "claude", "cwd": "/project/x",
   "title": "run tests", "fork": true, "include_thinking": false,
-  "files": [], "replayed": false
+  "files": [], "replayed": false,
+  "session": null, "session_state": "pending"
 }
 ```
+
+`session` is the id to reuse as `session` on a later job. A pinned target is
+echoed straight back with `session_state: "pinned"`, so continuing a thread
+needs no extra round trip. A fresh or forked run has no id yet — it first
+appears in the agent's init record — so it returns `"pending"`, and the id shows
+up as `session` on the job row once the run starts. `ab submit` waits for it by
+default (`--no-wait` opts out).
 
 #### Retry idempotency
 
@@ -198,11 +206,31 @@ and `1 <= L <= 1000`:
 
 ```json
 {
-  "events": [{"seq":12,"ts":1785.0,"type":"assistant","data":{"text":"…"}}],
+  "events": [{"seq":12,"ts":1785.0,"ts_iso":"2026-08-11T14:52:40.572-05:00",
+              "elapsed":6.689,"elapsed_hms":"+00:00:06",
+              "type":"assistant","data":{"text":"…"}}],
   "status": "running", "terminal": false,
-  "next_after": 12, "has_more": false, "job": null
+  "next_after": 12, "has_more": false,
+  "total": 27, "first_seq": 1, "last_seq": 27, "job": null
 }
 ```
+
+`total`, `first_seq` and `last_seq` describe the whole log, so a caller can place
+its window without paging forward to discover the end.
+
+**Reading from the end.** `?tail=N` returns the last N events instead of paging
+forward from `after`, still in chronological order. `tail` and `after` cannot be
+combined (`400 invalid_request`) — anchoring from both ends has no single
+sensible reading. `tail` pairs with `until=S` for a bounded window from the
+right, and with repeatable `type=T`, which filters **inside** the window; a
+`type` applied afterwards would make `tail=3&type=result` empty on any long job.
+`ab events` defaults to a tail; `--after 0` restores top-down reading.
+
+**Timestamps.** `ts` stays an epoch float — it is the cursor and the arithmetic
+input. `ts_iso` is the same instant in the **gateway's local** time with the UTC
+offset attached, and `elapsed`/`elapsed_hms` give position within the run, which
+is usually the question being asked. Job rows carry the same `*_iso` siblings for
+`created_at`, `started_at`, `finished_at` and `last_event_at`.
 
 All event sources share one transactional, per-job monotonic sequence allocator.
 `next_after` and SSE `Last-Event-ID` are safe cursors with no sequence bands.

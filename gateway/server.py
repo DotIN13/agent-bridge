@@ -26,10 +26,10 @@ from . import __version__, files as filemod
 from .adapters import build as build_adapter, known_agents
 from .adapters.base import SteerError
 from .api_models import (
-    ERROR_RESPONSES, AgentDescription, AgentsResponse, CancelResponse,
-    EventsPage, FileItem, FilesPage, JobAccepted, JobCreate, JobDetail, JobsPage,
-    MessageRequest, MessageResponse, ModelsResponse, SessionsResponse,
-    SteerRequest, SteerResponse, UploadResponse,
+    ERROR_RESPONSES, EVENT_TYPES, AgentDescription, AgentsResponse,
+    CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
+    JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
+    SessionsResponse, SteerRequest, SteerResponse, UploadResponse,
 )
 from .bus import Bus
 from .cluster import ClusterInfo
@@ -353,7 +353,9 @@ def create_app(gw: Gateway) -> FastAPI:
                 "id": job_id, "status": "queued", "agent": agent_name,
                 "cwd": cwd, "title": title, "fork": spec.fork,
                 "include_thinking": spec.include_thinking, "files": paths,
-                "replayed": False}
+                "replayed": False,
+                "session": spec.session,
+                "session_state": "pinned" if spec.session else "pending"}
             job_data = dict(
                 job_id=job_id, agent=agent_name, prompt=spec.prompt, cwd=cwd,
                 requested_session=spec.session,
@@ -489,22 +491,56 @@ def create_app(gw: Gateway) -> FastAPI:
     async def job_events(job_id: str, request: Request,
                          after: int = Query(0, ge=0),
                          limit: int = Query(500, ge=1, le=1000),
+                         tail: int | None = Query(None, ge=1, le=1000),
+                         until: int | None = Query(None, ge=1),
+                         type: list[str] | None = Query(None),
                          legacy: bool = True):
         job = resolve_job(job_id)
         jid = job["id"]
         await run_in_threadpool(gw.db.ingest_messages, jid, cfg.messages_dir)
         start = _parse_after(after, request.headers.get("last-event-id"))
+        if tail is not None and after:
+            # Anchoring from both ends at once has no single sensible reading;
+            # make the caller pick rather than guessing which they meant.
+            raise ApiError(400, "invalid_request",
+                           "tail and after cannot be combined; choose one end")
+        if type:
+            unknown = sorted(set(type) - EVENT_TYPES)
+            if unknown:
+                raise ApiError(400, "invalid_request",
+                               f"unknown event type(s): {', '.join(unknown)}",
+                               {"known": sorted(EVENT_TYPES)})
         if "text/event-stream" not in request.headers.get("accept", ""):
-            events = gw.db.events_after(jid, start, limit + 1)
-            has_more = len(events) > limit
-            visible = events[:limit]
+            bounds = gw.db.event_bounds(jid)
+            if tail is not None:
+                visible = gw.db.events_tail(jid, tail, until_seq=until,
+                                            types=tuple(type or ()))
+                # A tail is anchored at the end, so there is nothing after it to
+                # page to; `has_more` describes older events it skipped.
+                has_more = bool(visible) and visible[0]["seq"] > (bounds["first_seq"] or 0)
+            else:
+                events = gw.db.events_after(jid, start, limit + 1)
+                has_more = len(events) > limit
+                visible = events[:limit]
+                if until is not None:
+                    visible = [e for e in visible if e["seq"] <= until]
+                if type:
+                    keep = set(type)
+                    visible = [e for e in visible if e["type"] in keep]
+            first_ts = bounds["first_ts"]
+            if first_ts is not None:
+                for event in visible:
+                    event["elapsed"] = round(event["ts"] - first_ts, 3)
             current = gw.db.get_job(jid)
             return {
                 "job": current if legacy else None,
                 "events": visible, "status": current["status"],
                 "terminal": current["status"] in TERMINAL,
                 "next_after": visible[-1]["seq"] if visible else start,
-                "has_more": has_more}
+                "has_more": has_more,
+                "total": bounds["total"],
+                "first_seq": bounds["first_seq"],
+                "last_seq": bounds["last_seq"]}
         return StreamingResponse(
             _sse_stream(gw, jid, start, request),
             media_type="text/event-stream",

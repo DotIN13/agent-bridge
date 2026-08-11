@@ -16,6 +16,7 @@ Findings are from an empirical session against Claude Code **2.1.226** on
 | [05](05-session-index-hygiene.md) | Index advertises non-resumable ids and empty stub sessions | low | open |
 | [06](06-agent-first-cli-api.md) | Make the CLI contract agent-first | medium | **done** (0.3.0) |
 | [07](07-backend-api-contract.md) | Harden backend machine contract and lifecycle | high | **done** (0.3.0) |
+| [08](08-resume-handles-readable-time-and-tailing.md) | Resume handle absent from submit; epoch-float timestamps; logs only readable from the top | medium-high | **done** |
 
 01 and 02 were the same subject split by cost and shipped together: the docs
 correction plus the behaviour behind it — a liveness gate on `fork=false`, and
