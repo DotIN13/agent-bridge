@@ -26,10 +26,11 @@ from . import __version__, files as filemod
 from .adapters import build as build_adapter, known_agents
 from .adapters.base import SteerError
 from .api_models import (
-    ERROR_RESPONSES, AgentDescription, AgentsResponse, CancelResponse,
-    EventsPage, FileItem, FilesPage, JobAccepted, JobCreate, JobDetail, JobsPage,
-    MessageRequest, MessageResponse, ModelsResponse, SessionsResponse,
-    SteerRequest, SteerResponse, UploadResponse,
+    ERROR_RESPONSES, EVENT_TYPES, AgentDescription, AgentsResponse,
+    CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
+    JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
+    SessionDirsResponse, SessionsResponse, SteerRequest, SteerResponse,
+    UploadResponse,
 )
 from .bus import Bus
 from .cluster import ClusterInfo
@@ -279,14 +280,42 @@ def create_app(gw: Gateway) -> FastAPI:
             gw.cluster.refresh_async()
         return gw.cluster.get()
 
-    @app.get("/v1/sessions", dependencies=[auth],
-             response_model=SessionsResponse, responses=ERROR_RESPONSES)
-    async def sessions(cwd: str | None = None, agent: str | None = None):
+    @app.get("/v1/session-dirs", dependencies=[auth],
+             response_model=SessionDirsResponse, responses=ERROR_RESPONSES)
+    async def session_dirs(agent: str | None = None):
+        """Directories that hold sessions — the "where is there work" view.
+
+        Returned whole. Its size is bounded by how many projects exist rather
+        than by a page window, so unlike the old flat session list it cannot
+        quietly omit a project just because another one has been busy.
+        """
         agent_cfg = cfg.agents.get(agent or cfg.default_agent)
         if not agent_cfg:
             raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
-        infos = await run_in_threadpool(build_adapter(agent_cfg).list_sessions, cwd)
-        return {"sessions": [session.to_public() for session in infos]}
+        dirs = await run_in_threadpool(build_adapter(agent_cfg).list_dirs)
+        return {"dirs": [d.to_public() for d in dirs], "total": len(dirs)}
+
+    @app.get("/v1/sessions", dependencies=[auth],
+             response_model=SessionsResponse, responses=ERROR_RESPONSES)
+    async def sessions(cwd: str | None = None, agent: str | None = None,
+                       limit: int = Query(40, ge=1, le=200),
+                       cursor: str | None = None):
+        """Sessions, newest first. `cwd` is an **exact** directory match.
+
+        Paged rather than truncated: `total` is the real size of the selection,
+        so a short page is visibly a page and never a silent sample.
+        """
+        agent_cfg = cfg.agents.get(agent or cfg.default_agent)
+        if not agent_cfg:
+            raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
+        try:
+            page = await run_in_threadpool(
+                build_adapter(agent_cfg).list_sessions, cwd, limit, cursor)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        return {"sessions": [s.to_public() for s in page.sessions],
+                "total": page.total, "next_cursor": page.next_cursor,
+                "has_more": page.next_cursor is not None}
 
     @app.post(
         "/v1/jobs", dependencies=[auth], response_model=JobAccepted,
@@ -353,7 +382,9 @@ def create_app(gw: Gateway) -> FastAPI:
                 "id": job_id, "status": "queued", "agent": agent_name,
                 "cwd": cwd, "title": title, "fork": spec.fork,
                 "include_thinking": spec.include_thinking, "files": paths,
-                "replayed": False}
+                "replayed": False,
+                "session": spec.session,
+                "session_state": "pinned" if spec.session else "pending"}
             job_data = dict(
                 job_id=job_id, agent=agent_name, prompt=spec.prompt, cwd=cwd,
                 requested_session=spec.session,
@@ -489,22 +520,56 @@ def create_app(gw: Gateway) -> FastAPI:
     async def job_events(job_id: str, request: Request,
                          after: int = Query(0, ge=0),
                          limit: int = Query(500, ge=1, le=1000),
+                         tail: int | None = Query(None, ge=1, le=1000),
+                         until: int | None = Query(None, ge=1),
+                         type: list[str] | None = Query(None),
                          legacy: bool = True):
         job = resolve_job(job_id)
         jid = job["id"]
         await run_in_threadpool(gw.db.ingest_messages, jid, cfg.messages_dir)
         start = _parse_after(after, request.headers.get("last-event-id"))
+        if tail is not None and after:
+            # Anchoring from both ends at once has no single sensible reading;
+            # make the caller pick rather than guessing which they meant.
+            raise ApiError(400, "invalid_request",
+                           "tail and after cannot be combined; choose one end")
+        if type:
+            unknown = sorted(set(type) - EVENT_TYPES)
+            if unknown:
+                raise ApiError(400, "invalid_request",
+                               f"unknown event type(s): {', '.join(unknown)}",
+                               {"known": sorted(EVENT_TYPES)})
         if "text/event-stream" not in request.headers.get("accept", ""):
-            events = gw.db.events_after(jid, start, limit + 1)
-            has_more = len(events) > limit
-            visible = events[:limit]
+            bounds = gw.db.event_bounds(jid)
+            if tail is not None:
+                visible = gw.db.events_tail(jid, tail, until_seq=until,
+                                            types=tuple(type or ()))
+                # A tail is anchored at the end, so there is nothing after it to
+                # page to; `has_more` describes older events it skipped.
+                has_more = bool(visible) and visible[0]["seq"] > (bounds["first_seq"] or 0)
+            else:
+                events = gw.db.events_after(jid, start, limit + 1)
+                has_more = len(events) > limit
+                visible = events[:limit]
+                if until is not None:
+                    visible = [e for e in visible if e["seq"] <= until]
+                if type:
+                    keep = set(type)
+                    visible = [e for e in visible if e["type"] in keep]
+            first_ts = bounds["first_ts"]
+            if first_ts is not None:
+                for event in visible:
+                    event["elapsed"] = round(event["ts"] - first_ts, 3)
             current = gw.db.get_job(jid)
             return {
                 "job": current if legacy else None,
                 "events": visible, "status": current["status"],
                 "terminal": current["status"] in TERMINAL,
                 "next_after": visible[-1]["seq"] if visible else start,
-                "has_more": has_more}
+                "has_more": has_more,
+                "total": bounds["total"],
+                "first_seq": bounds["first_seq"],
+                "last_seq": bounds["last_seq"]}
         return StreamingResponse(
             _sse_stream(gw, jid, start, request),
             media_type="text/event-stream",

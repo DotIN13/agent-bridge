@@ -37,7 +37,8 @@ validation. Unknown job-submission fields are rejected rather than ignored.
 | GET | `/v1/agents` | agents, models, defaults, capabilities, server features |
 | GET | `/v1/models?agent=` | retained model-catalog projection |
 | GET | `/v1/info?refresh=1` | cached cluster capabilities; optional background refresh |
-| GET | `/v1/sessions?cwd=&agent=` | resumable session index |
+| GET | `/v1/session-dirs?agent=` | directories holding sessions; complete, unpaged |
+| GET | `/v1/sessions?cwd=&agent=&limit=&cursor=` | sessions in one directory (exact match), paged |
 | POST | `/v1/jobs` | validate, persist, and enqueue a job |
 | GET | `/v1/jobs?limit=&cursor=` | paged job summaries |
 | GET | `/v1/jobs/{ref}` | full public job detail |
@@ -91,11 +92,56 @@ Capabilities are adapter/mode-specific. Consult them before steering or
 resuming. `/v1/models` remains for compatibility; configured model ids are
 advertised strings and are passed to the backend verbatim.
 
-### `GET /v1/sessions?cwd=<dir>&agent=<name>`
+### `GET /v1/session-dirs?agent=<name>`
 
-Returns `{"sessions":[...]}`. `agent` defaults to the gateway default. `cwd`
-prioritizes matching sessions; it is not authorization. Job cwd and file paths
-are still constrained by configured allowed directories.
+Directories that hold sessions — the "where is there work to continue" view,
+needed before you know which project to ask about.
+
+```json
+{ "dirs": [
+    {"cwd": "/project/x", "sessions": 88,
+     "last_active": "2026-08-11T18:22:04.113-05:00",
+     "latest_session_id": "3cf736d5-…", "latest_title": "fix the parser"}
+  ], "total": 12 }
+```
+
+**Returned whole, never paged.** Its size is bounded by how many projects exist
+(tens), not by a window, so a project cannot silently drop out of it.
+
+### `GET /v1/sessions?cwd=<dir>&agent=<name>&limit=&cursor=`
+
+Sessions, newest first. Returns
+`{"sessions":[...], "total", "next_cursor", "has_more"}`.
+
+**`cwd` is an exact directory match, not a prefix.** A project and a
+sub-project keep separate indexes, so a count means what it says. Paths are
+compared normalised, so `D:\x`, `D:/x` and `d:\X` are the same directory — the
+two backends genuinely spell them differently.
+
+Omit `cwd` for every session, still paged. `total` is the real size of the
+selection either way, so a short page is visibly a page rather than a silent
+sample.
+
+**Paging is by opaque `cursor`, not `after=N`.** Sessions have no monotonic
+sequence; ordering on a timestamp alone would skip or repeat rows whenever two
+share a millisecond.
+
+**Both routes list a session only if a human spoke or the agent acted**, and the
+counts match the listings. Three kinds of transcript exist without anything
+having happened in them: subagent files (Claude Code writes one per subagent but
+records its turns in the parent), slash-command residue (`/login`, `/resume` —
+the caveat, command and stdout are each stored as a `user` record, so a naive
+count reads 3 messages), and opencode sessions created and never used. Each has a
+real id and looks resumable. `GET /v1/jobs` and a resume by explicit id are
+unaffected — only the recommendations are filtered.
+
+> Superseded shape: this route used to return a bare `{"sessions":[...]}` in
+> which `cwd` only *sorted*, after the newest `limit * 3` sessions had already
+> been selected across all directories. On a real store that hid entire
+> projects — two holding 33 and 88 sessions returned nothing at all.
+
+Neither route is authorization: job cwd and file paths remain constrained by the
+configured allowed directories.
 
 ## Jobs
 
@@ -139,9 +185,17 @@ Successful submission returns `202`, a `Location: /v1/jobs/<id>` header, and:
 {
   "id": "…", "status": "queued", "agent": "claude", "cwd": "/project/x",
   "title": "run tests", "fork": true, "include_thinking": false,
-  "files": [], "replayed": false
+  "files": [], "replayed": false,
+  "session": null, "session_state": "pending"
 }
 ```
+
+`session` is the id to reuse as `session` on a later job. A pinned target is
+echoed straight back with `session_state: "pinned"`, so continuing a thread
+needs no extra round trip. A fresh or forked run has no id yet — it first
+appears in the agent's init record — so it returns `"pending"`, and the id shows
+up as `session` on the job row once the run starts. `ab submit` waits for it by
+default (`--no-wait` opts out).
 
 #### Retry idempotency
 
@@ -198,11 +252,42 @@ and `1 <= L <= 1000`:
 
 ```json
 {
-  "events": [{"seq":12,"ts":1785.0,"type":"assistant","data":{"text":"…"}}],
+  "events": [{"seq":12,"ts":"2026-08-11T14:52:40.572-05:00",
+              "elapsed":6.689,"elapsed_hms":"+00:00:06",
+              "type":"assistant","data":{"text":"…"}}],
   "status": "running", "terminal": false,
-  "next_after": 12, "has_more": false, "job": null
+  "next_after": 12, "has_more": false,
+  "total": 27, "first_seq": 1, "last_seq": 27, "job": null
 }
 ```
+
+`total`, `first_seq` and `last_seq` describe the whole log, so a caller can place
+its window without paging forward to discover the end.
+
+**Reading from the end.** `?tail=N` returns the last N events instead of paging
+forward from `after`, still in chronological order. `tail` and `after` cannot be
+combined (`400 invalid_request`) — anchoring from both ends has no single
+sensible reading. `tail` pairs with `until=S` for a bounded window from the
+right, and with repeatable `type=T`, which filters **inside** the window; a
+`type` applied afterwards would make `tail=3&type=result` empty on any long job.
+`ab events` defaults to a tail; `--after 0` restores top-down reading.
+
+**Timestamps are ISO 8601, everywhere.** Every timestamp the API publishes is a
+string in the **gateway's local** time with the UTC offset attached
+(`2026-08-11T14:52:40.572-05:00`) — no bare epoch floats reach a caller. That
+covers job `created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`,
+session `last_active`, file `mtime`, and the `ts` inside an `ab-notify` report
+payload.
+
+Local rather than UTC because the reader correlating a job against an sbatch log
+holds a local clock; the offset keeps it unambiguous, and "local" means the
+gateway's zone, which for a tunnelled client is not their own.
+
+Cursors are unaffected — `next_after` and `Last-Event-ID` are `seq`-based, and
+job pagination hides `created_at` inside an opaque cursor, so nothing a caller
+reads needed the raw number. **Durations stay numeric:** `elapsed` (seconds
+since the job's first event) with `elapsed_hms` alongside, because position
+within the run is usually the real question.
 
 All event sources share one transactional, per-job monotonic sequence allocator.
 `next_after` and SSE `Last-Event-ID` are safe cursors with no sequence bands.

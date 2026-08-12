@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import json
 import sqlite3
 import threading
@@ -132,6 +134,123 @@ def test_event_page_is_bounded_and_has_cursor(client, auth, gateway):
         headers=auth).json()
     assert [row["seq"] for row in second["events"]] == [3]
     assert second["has_more"] is False
+
+
+def test_page_reports_the_shape_of_the_whole_log(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "shape"}).json()
+    jid = accepted["id"]
+    for index in range(7):
+        gateway.db.append_event(jid, "log", {"index": index})
+    page = client.get(f"/v1/jobs/{jid}/events?limit=2&legacy=false",
+                      headers=auth).json()
+    # Without these a caller cannot tell how far it is from the end, which is
+    # what forced blind forward paging.
+    assert (page["total"], page["first_seq"], page["last_seq"]) == (7, 1, 7)
+
+
+def test_tail_reads_from_the_end_in_chronological_order(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "tail"}).json()
+    jid = accepted["id"]
+    for index in range(9):
+        gateway.db.append_event(jid, "log", {"index": index})
+    page = client.get(f"/v1/jobs/{jid}/events?tail=3&legacy=false",
+                      headers=auth).json()
+    # Selected descending, returned ascending: the response shape must not
+    # depend on which end was read.
+    assert [row["seq"] for row in page["events"]] == [7, 8, 9]
+    assert page["total"] == 9
+
+
+def test_tail_filters_types_inside_the_window(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "tailtype"}).json()
+    jid = accepted["id"]
+    gateway.db.append_event(jid, "result", {"text": "early"})
+    for index in range(6):
+        gateway.db.append_event(jid, "log", {"index": index})
+    page = client.get(f"/v1/jobs/{jid}/events?tail=3&type=result&legacy=false",
+                      headers=auth).json()
+    # Filtering after the limit would return nothing here: the last three
+    # events are all logs.
+    assert [row["type"] for row in page["events"]] == ["result"]
+
+
+def test_tail_and_after_cannot_be_combined(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "conflict"}).json()
+    jid = accepted["id"]
+    response = client.get(f"/v1/jobs/{jid}/events?tail=2&after=1", headers=auth)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_event_timestamps_are_iso_and_carry_elapsed(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "stamps"}).json()
+    jid = accepted["id"]
+    gateway.db.append_event(jid, "log", {"index": 0})
+    gateway.db.append_event(jid, "log", {"index": 1})
+    rows = client.get(f"/v1/jobs/{jid}/events?legacy=false",
+                      headers=auth).json()["events"]
+    first, last = rows[0], rows[-1]
+    # `ts` is published as ISO, not an epoch float -- no bare number reaches a
+    # reader, and the offset keeps local time unambiguous.
+    assert isinstance(first["ts"], str)
+    datetime.fromisoformat(first["ts"])
+    assert ("+" in first["ts"][10:] or "-" in first["ts"][10:])
+    # Durations stay numeric: they are arithmetic, not timestamps.
+    assert first["elapsed"] == 0.0
+    assert first["elapsed_hms"] == "+00:00:00"
+    assert last["elapsed"] >= 0.0
+
+
+def test_every_published_timestamp_is_iso(client, auth, gateway):
+    """No epoch float should reach a caller from any surface."""
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "sweep"}).json()
+    jid = accepted["id"]
+    gateway.db.add_message(jid, {"status": "running", "msg": "hi", "ts": 1786490297.5})
+
+    detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
+    for field in ("created_at", "started_at", "finished_at", "last_event_at"):
+        assert not isinstance(detail.get(field), (int, float)), field
+        if detail.get(field) is not None:
+            datetime.fromisoformat(detail[field])
+
+    summary = client.get("/v1/jobs?limit=1", headers=auth).json()["jobs"][0]
+    assert isinstance(summary["created_at"], str)
+
+    events = client.get(f"/v1/jobs/{jid}/events?legacy=false",
+                        headers=auth).json()["events"]
+    message = [e for e in events if e["type"] == "message"][0]
+    # The report payload is an opaque passthrough, so its own `ts` is the one
+    # place a bare epoch could still surface.
+    assert isinstance(message["data"]["ts"], str)
+    datetime.fromisoformat(message["data"]["ts"])
+
+
+def test_submit_reports_the_session_it_can_already_know(client, auth):
+    pinned = client.post("/v1/jobs", headers=auth,
+                         json={"prompt": "pin", "session": "sess-1",
+                               "fork": False}).json()
+    assert (pinned["session"], pinned["session_state"]) == ("sess-1", "pinned")
+    fresh = client.post("/v1/jobs", headers=auth, json={"prompt": "new"}).json()
+    # A fresh run has no id until its init record; say so rather than omit it.
+    assert (fresh["session"], fresh["session_state"]) == (None, "pending")
+
+
+def test_job_row_exposes_one_canonical_session(client, auth, gateway):
+    accepted = client.post("/v1/jobs", headers=auth,
+                           json={"prompt": "canon", "session": "asked",
+                                 "fork": False}).json()
+    jid = accepted["id"]
+    detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
+    assert detail["session"] == "asked"          # falls back before init
+    gateway.db.finish_job(jid, status="succeeded", forked_session="wrote")
+    detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
+    assert detail["session"] == "wrote"          # the id actually written wins
 
 
 def test_queued_start_and_cancel_compare_and_set_race(tmp_path):

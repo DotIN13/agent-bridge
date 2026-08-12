@@ -24,6 +24,11 @@ TERMINAL = {"succeeded", "failed", "canceled"}
 # Short by design: `ab gateways` probes every configured gateway, so this is
 # the worst case a listing waits on one dead entry, not a request budget.
 PROBE_TIMEOUT = 3.0
+# How long `submit` waits for the session id a fresh job will create. Generous
+# enough to cover an agent's startup and a short queue, short enough that a
+# submit never feels like a wait. Exceeding it is not an error: the job is
+# running and the id can still be read off the row.
+AWAIT_SESSION_TIMEOUT = 30.0
 EVENT_TYPES = {
     "assistant", "thinking", "tool_use", "tool_result", "result", "status",
     "error", "log", "message", "steer",
@@ -99,7 +104,7 @@ def _token_for(gw: dict, required: bool = True) -> str:
     if gw.get("token_file"):
         path = Path(gw["token_file"]).expanduser()
         if path.exists():
-            return path.read_text().strip()
+            return path.read_text(encoding="utf-8").strip()
     if required:
         raise ConfigError("no token (set token, token_env, or token_file)")
     return ""
@@ -116,7 +121,7 @@ def load_gateways(explicit: str | None = None) -> Gateways:
         path = Path(candidate).expanduser()
         if not path.exists():
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if path.suffix == ".toml":
             import tomllib
             cfg = tomllib.loads(text)
@@ -442,10 +447,23 @@ class Client:
     def info(self, refresh: bool = False) -> dict:
         return self._get("/v1/info" + ("?refresh=1" if refresh else ""))
 
-    def sessions(self, cwd: str | None = None, agent: str | None = None) -> dict:
-        query = {key: value for key, value in (("cwd", cwd), ("agent", agent)) if value}
-        return self._get("/v1/sessions" +
-                         (("?" + urllib.parse.urlencode(query)) if query else ""))
+    def session_dirs(self, agent: str | None = None) -> dict:
+        """Directories holding sessions. Complete — never a page."""
+        query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
+        return self._get("/v1/session-dirs" + query)
+
+    def sessions(self, cwd: str | None = None, agent: str | None = None, *,
+                 limit: int = 40, cursor: str | None = None) -> dict:
+        """One page of sessions. `cwd` is an exact directory match.
+
+        Paging is by opaque cursor rather than `after=N`: sessions have no
+        monotonic sequence, and ordering by timestamp alone would skip or
+        repeat rows whenever two share a millisecond.
+        """
+        query = {key: value for key, value in
+                 (("cwd", cwd), ("agent", agent), ("cursor", cursor)) if value}
+        query["limit"] = int(limit)
+        return self._get("/v1/sessions?" + urllib.parse.urlencode(query))
 
     def models(self, agent: str | None = None) -> dict:
         query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
@@ -486,6 +504,51 @@ class Client:
         _raise(code, data)
         return data
 
+    def await_session(self, accepted: dict, timeout: float = AWAIT_SESSION_TIMEOUT,
+                      poll: float = 0.4) -> dict:
+        """Fill in the session id a fresh job will create, then return.
+
+        Waits for the *session*, not for the job: the id lands with the agent's
+        init record a second or two in, long before any work finishes. Composed
+        client-side out of the job row, so no new endpoint is needed.
+
+        Never raises and never hangs. The submission has already succeeded by
+        the time this runs, so every outcome here returns the accepted document
+        with `session_state` set to what was actually learned:
+
+        - ``ready``   the id is known
+        - ``pinned``  the caller named it; nothing to wait for
+        - ``failed``  the job went terminal before producing one
+        - ``pending`` the timeout won; the job may still be queued or running
+        """
+        if accepted.get("session"):
+            return {**accepted, "session_state": "pinned"}
+        job_id = accepted.get("id")
+        if not job_id:
+            return accepted
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            try:
+                job = self.get_job(job_id)
+            except GatewayError:
+                # A transport blip must not turn a successful submit into a
+                # failure; report what we know and let the caller re-read.
+                return {**accepted, "session_state": "pending"}
+            session = job.get("session")
+            if session:
+                return {**accepted, "session": session, "session_state": "ready",
+                        "status": job.get("status", accepted.get("status"))}
+            if job.get("status") in TERMINAL:
+                # Died before its init record -- a bad model id, a missing agent
+                # binary. Stop immediately rather than waiting out the timeout.
+                return {**accepted, "session_state": "failed",
+                        "status": job.get("status"),
+                        "error": job.get("error")}
+            if time.monotonic() >= deadline:
+                return {**accepted, "session_state": "pending",
+                        "status": job.get("status", accepted.get("status"))}
+            time.sleep(poll)
+
     def list_jobs(self, limit: int = 50, cursor: str | None = None) -> dict:
         query = {"limit": int(limit)}
         if cursor:
@@ -495,9 +558,25 @@ class Client:
     def get_job(self, job_id: str) -> dict:
         return self._get(f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}")
 
-    def events(self, job_id: str, after: int = 0, limit: int = 500) -> dict:
-        query = urllib.parse.urlencode({"after": int(after), "limit": int(limit),
-                                        "legacy": "false"})
+    def events(self, job_id: str, after: int = 0, limit: int = 500, *,
+               tail: int | None = None, until: int | None = None,
+               types: Iterable[str] = ()) -> dict:
+        """One page of a job's events.
+
+        `tail` reads from the end instead of `after`'s forward paging, and lets
+        the server do the filtering so `--type` narrows within the window rather
+        than after it. `total`/`first_seq`/`last_seq` describe the whole log, so
+        a caller can place its window without probing for the end.
+        """
+        params: list[tuple[str, str]] = [("legacy", "false")]
+        if tail is not None:
+            params.append(("tail", str(int(tail))))
+        else:
+            params += [("after", str(int(after))), ("limit", str(int(limit)))]
+        if until is not None:
+            params.append(("until", str(int(until))))
+        params += [("type", t) for t in types]
+        query = urllib.parse.urlencode(params)
         data = self._get(
             f"/v1/jobs/{urllib.parse.quote(job_id, safe='')}/events?{query}")
         events = data.get("events", [])
@@ -505,7 +584,10 @@ class Client:
                 "status": data.get("status") or (data.get("job") or {}).get("status"),
                 "next_after": data.get("next_after",
                     events[-1]["seq"] if events else after),
-                "has_more": bool(data.get("has_more"))}
+                "has_more": bool(data.get("has_more")),
+                "total": data.get("total", len(events)),
+                "first_seq": data.get("first_seq"),
+                "last_seq": data.get("last_seq")}
 
     def iter_events(self, job_id: str, after: int = 0, *, types=None,
                     until: int | None = None, read_timeout: float = 30.0,

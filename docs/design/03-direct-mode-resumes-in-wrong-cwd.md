@@ -1,7 +1,11 @@
 # 03 — `direct` mode resumes a pinned session in the caller's cwd
 
+**Status: DONE.** A named session's recorded cwd now always wins. See
+"What shipped" at the bottom; the rest is the record of why.
+
 **Severity:** high (silent wrong-directory execution)
-**Scope:** adapter + one small API question.
+**Scope:** both adapters. The API question below was dissolved rather than
+answered — see the decision note.
 
 ## Problem
 
@@ -81,3 +85,56 @@ quietly; erroring is louder but blocks a resume that would otherwise work.
 - `gateway/db.py` (if the row gains a column)
 - Same question applies to `gateway/adapters/opencode.py` — check whether
   opencode sessions carry a cwd and whether it has the same gap.
+
+---
+
+## Decision: the recorded cwd always wins
+
+The three options above all existed to answer "did the caller pass a cwd, or did
+the server default it?" — a question that needed a new column or a flag to
+survive `resolve_cwd` collapsing `None`.
+
+The chosen rule dissolves it: **an existing session with a recorded cwd always
+runs there**, over both an explicit `cwd` and the configured default. Nothing
+downstream needs to know how `spec.cwd` was arrived at, so no column, no
+`cwd_explicit`, no `400` on a legitimate combination.
+
+The cost is that an explicit `--cwd` alongside `--session` is overridden. That is
+acceptable only because it is **announced**: a `status` event with
+`stage: "cwd"`, naming the directory used and the one replaced. Silently taking a
+different directory than the caller named would be the same class of bug as the
+one being fixed.
+
+## What shipped
+
+- `sessions.find(session_id)` — a targeted by-id lookup, deliberately **not**
+  built on `scan()`. Using the bounded index would mean a session outside the
+  window reads as absent and falls back to the default, reproducing this exact
+  bug for old sessions (and coupling the fix to [04](04-session-index-cwd-is-sort-only.md)).
+- `adapters/base.resume_cwd()` — one resolver both adapters share: validates
+  through `AgentConfig.resolve_cwd` so a recorded cwd can never escape
+  `allowed_dirs`, emits the `stage: "cwd"` status event on substitution, and
+  falls back rather than failing.
+- `claude._cwd_for()` and `opencode._cwd_for()`. opencode had the same gap and
+  needed its own by-id query (`SELECT directory FROM session WHERE id=?`), plus
+  its `--dir` flag and the process cwd kept in agreement.
+
+Three fallbacks, each keeping today's behaviour so the worst case is the bug this
+replaces and never a resume that refuses to run: session not found, session with
+no recorded cwd, recorded cwd outside `allowed_dirs`.
+
+**Verified live.** Session `ef78b696` (home `D:\dotty-projects\molly`) resumed
+with no `--cwd` against a gateway whose `default_cwd` is
+`D:\dotty-projects\agent-bridge`:
+
+```
+before:  /d/dotty-projects/agent-bridge     <- wrong repo, silently
+after:   /d/dotty-projects/molly
+seq 3:   status {"stage":"cwd","cwd_source":"session",
+                 "cwd":"D:\dotty-projects\molly",
+                 "replaced":"D:\dotty-projects\agent-bridge"}
+```
+
+A fresh job with no session still uses the requested cwd and emits no
+substitution event. Fallbacks and the window-independence of `find` are covered
+in `tests/backend/test_resume_cwd.py`.

@@ -23,7 +23,7 @@ INTERRUPT_GRACE_SEC = 15.0     # SIGINT -> SIGTERM
 TERM_GRACE_SEC = 5.0           # SIGTERM -> SIGKILL
 
 from ..config import AgentConfig
-from ..sessions import SessionInfo
+from ..sessions import DirInfo, SessionInfo, SessionPage
 
 
 class Cancellation:
@@ -60,6 +60,50 @@ class Cancellation:
             already = self._event.is_set()
         if already:
             interrupt_group(proc, self._grace)
+
+
+def resume_cwd(cfg: AgentConfig, session_id: str, recorded_cwd: str | None,
+               fallback: str, emit: "EmitFn") -> str:
+    """The directory a resumed session should actually run in.
+
+    A session carries the project it was created in. Resuming it somewhere else
+    hands the agent the whole history of project X while its relative paths,
+    globs and shell commands resolve against something else — and nothing about
+    the run looks wrong, which is what made this expensive to notice.
+
+    So a recorded cwd **wins**, over both an explicit request and the configured
+    default. That makes the old "did the caller pass a cwd or did the server
+    default it" question moot, which is why no extra column is needed to answer
+    it. The substitution is announced on the event stream; taking a different
+    directory than the caller named is exactly the kind of thing that must not
+    happen quietly.
+
+    Falls back rather than failing. Every fallback keeps today's behaviour, so
+    the worst case is the bug this replaces — never a resume that refuses to run.
+    """
+    if not recorded_cwd:
+        emit(Event("log", {
+            "cwd_source": "fallback",
+            "reason": f"session {session_id} records no cwd",
+            "cwd": fallback}))
+        return fallback
+    try:
+        resolved = cfg.resolve_cwd(recorded_cwd)
+    except ValueError as exc:
+        emit(Event("log", {
+            "cwd_source": "fallback",
+            "reason": f"session cwd is not usable here: {exc}",
+            "cwd": fallback}))
+        return fallback
+    if resolved != fallback:
+        emit(Event("status", {
+            "stage": "cwd",
+            "cwd_source": "session",
+            "session": session_id,
+            "cwd": resolved,
+            "replaced": fallback,
+            "note": "running in the session's own directory"}))
+    return resolved
 
 
 class SteerError(RuntimeError):
@@ -326,7 +370,13 @@ class AgentAdapter(Protocol):
         """Machine-readable operations supported by this configured adapter."""
         ...
 
-    def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
+    def list_dirs(self) -> "list[DirInfo]":
+        """Every directory holding sessions. Complete: never truncated."""
+        ...
+
+    def list_sessions(self, cwd: str | None = None, limit: int = 40,
+                      cursor: str | None = None) -> "SessionPage":
+        """One page of sessions; `cwd` is an exact directory match."""
         ...
 
     def run(self, spec: JobSpec, emit: EmitFn) -> RunResult:

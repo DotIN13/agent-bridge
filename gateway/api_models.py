@@ -6,9 +6,54 @@ all HTTP responses pass through these models or the normalisers below.
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from datetime import datetime
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, BeforeValidator, ConfigDict, Field,
+                      computed_field, model_validator)
+
+
+# Every event type the gateway can emit. Lives here rather than in the client
+# because this module is the contract; `abclient.EVENT_TYPES` mirrors it.
+EVENT_TYPES: frozenset[str] = frozenset({
+    "status", "assistant", "thinking", "tool_use", "tool_result",
+    "steer", "result", "error", "log", "message",
+})
+
+
+def iso_local(epoch: float | None) -> str | None:
+    """Epoch seconds -> ISO 8601 in this host's local time, offset attached.
+
+    Local rather than UTC because the reader correlating a job against an
+    sbatch log or a terminal scrollback is holding a local clock. The offset is
+    always present, so the value stays unambiguous even though "local" here
+    means the *gateway's* zone, which for a tunnelled client is not their own.
+
+    Every timestamp the API hands out goes through this. Epoch floats are not
+    published alongside: cursors are `seq`-based (`next_after`,
+    `Last-Event-ID`), and job pagination hides `created_at` inside an opaque
+    cursor, so nothing a caller reads needs the raw number. Durations stay
+    numeric -- see `EventRecord.elapsed`.
+    """
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="milliseconds")
+
+
+def _as_iso(value):
+    """Accept an epoch float from storage, publish ISO.
+
+    Applied with `mode="before"` so the models keep taking the raw database
+    dicts unchanged; already-formatted strings and None pass through, which
+    makes the conversion idempotent.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return iso_local(float(value))
+    return value
+
+
+# Reusable for any published timestamp field.
+IsoTimestamp = Annotated[str | None, BeforeValidator(_as_iso)]
 
 
 class StrictModel(BaseModel):
@@ -111,10 +156,24 @@ class JobSummary(BaseModel):
     fork: bool = True
     include_thinking: bool = False
     cost_usd: float | None = None
-    created_at: float
-    started_at: float | None = None
-    finished_at: float | None = None
-    last_event_at: float | None = None
+    created_at: IsoTimestamp = None
+    started_at: IsoTimestamp = None
+    finished_at: IsoTimestamp = None
+    last_event_at: IsoTimestamp = None
+
+    @computed_field
+    @property
+    def session(self) -> str | None:
+        """The session to pass back as `session` on the next job.
+
+        There are three session columns and nothing previously said which one
+        a caller should reuse, so this is the single documented answer. Under
+        `direct` dispatch `forked_session` is correct in every case: a fresh run
+        reports the id it created, a fork reports the new branch, and an
+        in-place resume reports the target it appended to. The other two are
+        fallbacks for a row that has not reached its init record yet.
+        """
+        return self.forked_session or self.chosen_session or self.requested_session
 
 
 class JobDetail(JobSummary):
@@ -135,6 +194,13 @@ class JobAccepted(BaseModel):
     include_thinking: bool
     files: list[str] = Field(default_factory=list)
     replayed: bool = False
+    # The session to reuse, when it is already knowable. A pinned target is
+    # echoed straight back so the caller needs no round trip for the whole
+    # follow-up and steer path; a fresh or forked run has no id yet -- it first
+    # appears in the agent's init record -- so `pending` says to read it off the
+    # job row rather than leaving the caller to wonder.
+    session: str | None = None
+    session_state: Literal["pinned", "pending"] = "pending"
 
 
 class JobsPage(BaseModel):
@@ -145,10 +211,23 @@ class JobsPage(BaseModel):
 
 class EventRecord(BaseModel):
     seq: int
-    ts: float
+    ts: IsoTimestamp = None
     type: str
     data: dict[str, Any]
     job_id: str | None = None
+    # Seconds since this job's first event. Set by the events route, which is
+    # the only place that knows the run's start; "where in the run did this
+    # happen" is the question a reader actually has, and deriving it otherwise
+    # means fetching event #1 first.
+    elapsed: float | None = None
+
+    @computed_field
+    @property
+    def elapsed_hms(self) -> str | None:
+        if self.elapsed is None:
+            return None
+        total = int(self.elapsed)
+        return f"+{total // 3600:02d}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
 class EventsPage(BaseModel):
@@ -157,6 +236,11 @@ class EventsPage(BaseModel):
     terminal: bool
     next_after: int
     has_more: bool
+    # The shape of the whole log, so a caller can place its window without
+    # probing forward for the end.
+    total: int = 0
+    first_seq: int | None = None
+    last_seq: int | None = None
     # Kept during the client transition; new clients use the top-level fields.
     job: JobDetail | None = None
 
@@ -204,8 +288,27 @@ class ModelsResponse(BaseModel):
     default: str | None = None
 
 
+class SessionDir(BaseModel):
+    """A directory that holds sessions, with just enough to act on it."""
+    cwd: str
+    sessions: int
+    last_active: IsoTimestamp = None
+    latest_session_id: str | None = None
+    latest_title: str | None = None
+
+
+class SessionDirsResponse(BaseModel):
+    """Complete by construction: bounded by how many projects exist, not by a
+    window, so nothing can silently drop out the way sessions once did."""
+    dirs: list[SessionDir]
+    total: int
+
+
 class SessionsResponse(BaseModel):
     sessions: list[dict[str, Any]]
+    total: int = 0
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class UploadResponse(BaseModel):
@@ -218,7 +321,7 @@ class FileRow(BaseModel):
     path: str
     is_dir: bool
     size: int
-    mtime: float
+    mtime: IsoTimestamp = None
 
 
 class FilesPage(BaseModel):

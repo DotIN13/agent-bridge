@@ -1,271 +1,260 @@
 ---
 name: agent-bridge-client
-description: Drive a remote coding agent through an agent-bridge gateway using the `ab` CLI — submit prompts, stream or wait for jobs, steer live work, and transfer artifacts safely.
+description: Drive a remote coding agent through an agent-bridge gateway using the `ab` CLI — submit prompts, stream or wait for jobs, steer live work, resume sessions, and transfer artifacts safely.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
 # agent-bridge (`ab` CLI)
 
-Use this skill for remote GPUs, schedulers, long jobs, or delegated work on
-another host. The local session plans and verifies; the remote agent inventories,
-executes, and reports evidence.
+For remote GPUs, schedulers, long jobs, or delegated work on another host. You
+plan and verify; the remote agent inventories, executes, and reports evidence.
 
-## Finding `ab`
-
-Resolve the command once, at the start of the session, and reuse it. Do not
-assume it is installed.
-
-1. **On `PATH`** — the normal case once the package is installed:
-   ```bash
-   ab --version
-   ```
-2. **A repo checkout** — search the workspaces you can see before asking. The
-   entry point is `client/ab.py`:
-   ```bash
-   ls ~/agent-bridge/client/ab.py ./client/ab.py ../agent-bridge/client/ab.py 2>/dev/null
-   # or, if those miss:
-   find ~ /workspace /srv -maxdepth 4 -path '*/client/ab.py' 2>/dev/null | head
-   ```
-   Then invoke it as `python3 <repo>/client/ab.py` — no install needed, stdlib
-   only.
-3. **Ask.** If neither turns it up, ask the user where the checkout is (or
-   whether to `pip install -e` it) rather than guessing a path or giving up.
-
-Set `AB` once and reuse it, so the rest of the session reads the same whichever
-form you found:
+## Resolve `ab` once
 
 ```bash
-AB="ab"                                    # or: AB="python3 /path/to/client/ab.py"
-$AB health
+ab --version                                   # 1. on PATH
+ls ~/agent-bridge/client/ab.py ./client/ab.py  # 2. a checkout -> python3 <repo>/client/ab.py
+find ~ /workspace /srv -maxdepth 4 -path '*/client/ab.py' 2>/dev/null | head
 ```
 
-Examples below write plain `ab` for brevity; substitute whichever form resolved.
+Ask the user where the checkout is if both miss. Set `AB` once and reuse it;
+examples below write plain `ab`.
 
 ## Reachability
 
-```bash
-$AB gateways        # every configured gateway: token, reachability, version
-$AB gateways --no-probe   # local config only; contacts nothing
-$AB health          # one gateway; exit code carries the answer
-```
+| Command | Tells you |
+|---|---|
+| `ab gateways` | every gateway: token presence **and** live reachability |
+| `ab gateways --no-probe` | config only, contacts nothing — proves nothing works |
+| `ab health` | one gateway; **exit 1 when unreachable**, so scripts branch on it |
 
-`ab gateways` probes each gateway concurrently and reports two independent
-facts per row — whether a **token** loaded, and whether it is actually **up**:
-
-```
- * alpha   http://127.0.0.1:8799   token     up 0.3.0 (47 ms)
-   beta    http://127.0.0.1:8801   token     HTTP_ERROR — HTTP 404 from /health; is this an agent-bridge?
-   gamma   http://127.0.0.1:8802   no token  REFUSED — nothing is listening; SSH forward or gateway is down
-```
-
-It **always exits 0** — a down gateway is data, not a command failure. To
-branch in a script, use `ab health` (exit 1 when unreachable) or read
-`state`/`reachable` from `ab gateways --output json`.
-
-**`--no-probe` reports configuration only and cannot tell you anything is
-working.** It is for the "is my config even loading" question, and it is the
-one command that works with no network.
-
-Reachability failures name their own cause, and the two need opposite fixes:
+`gateways` always exits 0 — a down gateway is data. Failures name their cause:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| connection **refused** (`WinError 10061`, `ECONNREFUSED`) | no local listener — the SSH forward is down | reopen the tunnel |
-| connection **reset** / dropped mid-response | forward is up, nothing serving at the far end | restart the gateway on its host |
+| `REFUSED` (`WinError 10061`) | no local listener; SSH forward down | reopen the tunnel |
+| `RESET` | forward up, gateway not serving | restart the gateway on its host |
+| `HTTP_ERROR` | something else is on that port | check what the forward points at |
 
-Open the tunnel with keepalives, because an idle forward drops silently:
-
-```bash
-ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -L <port>:localhost:<port> <host>
-```
-
-`autossh -M 0` with the same flags reconnects on its own. If the gateway can
-move between hosts, confirm which one is serving before repointing the forward —
-`ab info` prints the host.
-
-Client config discovery is `--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
-`~/.config/agent-bridge/gateways.json`, then `./gateways.json`.
+Open tunnels with keepalives — idle forwards drop silently:
+`ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -L <port>:localhost:<port> <host>`
 
 ## Windows: `MSYS_NO_PATHCONV=1` on every Git Bash call
 
-Every path `ab` takes is a **remote POSIX path**, and Git Bash rewrites
-POSIX-looking arguments into Windows paths before the program sees them:
+Every path `ab` takes is a **remote POSIX path**; Git Bash rewrites them first:
 
 ```
-you type:   --cwd /project/data/x
-ab sees:    'C:/Program Files/Git/project/data/x'
+you type:  --cwd /project/data/x     ab sees:  'C:/Program Files/Git/project/data/x'
 ```
 
-This hits `--cwd`, `--file`, `--dir`, `--to`, and every other path argument.
-Usually it surfaces as a `400` — but a rewritten path **can also resolve
-somewhere real and wrong**, which is the case that costs you an afternoon.
+Hits `--cwd --file --dir --to`. Usually a 400 — but a rewritten path **can
+resolve somewhere real and wrong**.
 
-```bash
-MSYS_NO_PATHCONV=1 $AB submit -F task.md --cwd /project/data/x
-```
+- `MSYS2_ARG_CONV_EXCL='*'` does **not** work (MSYS2-proper; Git for Windows
+  ignores it silently).
+- Shell state does not persist between calls — set it inline every time.
+- PowerShell needs no prefix.
 
-Two things that trip people up:
-
-- **`MSYS2_ARG_CONV_EXCL='*'` does not work here.** It is MSYS2-proper; Git for
-  Windows ignores it silently and rewrites the paths anyway. Verified against a
-  live gateway.
-- **Shell state does not persist between tool calls**, so set it inline on every
-  invocation rather than exporting it once.
-
-**PowerShell needs no prefix** — it does no path rewriting, and is the simpler
-fallback if the escaping gets tiresome.
-
-## Agent-safe command surface
+## Commands
 
 | Command | Use |
 |---|---|
-| `gateways` | every gateway: token presence **and** live reachability |
-| `health` | one gateway's liveness/version; exit code carries it |
-| `agents` | backends, models, capability flags |
-| `capabilities` | structured client/server contract |
-| `info` | host, GPU, scheduler, allocation info |
-| `sessions` | resumable context |
-| `jobs` | paged recent summaries |
-| `submit -F FILE` | submit and return immediately |
-| `run -F FILE` | submit and wait |
-| `job REF` | full detail/result |
-| `wait REF` | wait for an existing job |
-| `events REF -f` | resumable SSE follow |
-| `steer REF -F FILE` | redirect a running turn |
+| `health` · `agents` · `capabilities` · `info` · `models` | discovery |
+| `sessions` | directories with sessions; `--cwd DIR` for the sessions in one |
+| `jobs [--limit N] [--cursor C]` | paged summaries |
+| `submit -F FILE` | submit; waits for the session id |
+| `run -F FILE` | submit and wait for the result |
+| `job REF` · `wait REF` | detail/result · wait on an existing job |
+| `events REF` | last 50 events; `-f` to follow |
+| `steer REF -F FILE` | redirect a **running** turn |
 | `cancel REF` | interrupt queued/running work |
-| `upload`, `download`, `ls` | safe files |
+| `upload` · `download` · `ls` | files |
 
-`REF` is a full UUID, title, or unique id prefix. Record full UUIDs because a
-prefix can later become ambiguous.
+`REF` = full UUID, title, or unique id prefix. **Record full UUIDs** — a prefix
+can later become ambiguous.
 
-**Always write prompts to a file and pass `-F/--prompt-file`.** This avoids shell
-quoting and command-length bugs. `--prompt-stdin` is the explicit stdin form.
+**Always pass prompts with `-F/--prompt-file`.** Avoids shell quoting and
+length bugs. `--prompt-stdin` is the explicit stdin form.
 
-## Output protocol
+Check `ab agents --output json` before relying on a feature — capabilities are
+per-adapter (`claude` steers, `opencode` does not).
 
-Use `--output json` for one complete machine document (`--json` is an alias).
-Use `--output jsonl` for `run`, `wait`, and `events --follow`: every line is one
-parseable record with `kind` `event`, `terminal`, `timeout`, or `complete`.
-Human output is the default; only human display text is elided, and `--full`
-disables that.
+## Output and exits
 
-Global flags work before or after the command:
+| Flag | Meaning |
+|---|---|
+| `--output human` | default; only this elides, `--full` disables |
+| `--output json` | one complete faithful document (`--json` is an alias) |
+| `--output jsonl` | one typed record per line: `event`, `terminal`, `timeout`, `complete` |
 
-```bash
-ab --gateway gw --output json jobs
-ab jobs --gateway gw --output json
-```
+Globals work before or after the subcommand. **Parse `--output json`; never grep
+the human view** — it elides, so a later match silently fails.
 
-Exit codes:
-
-| Code | Meaning |
+| Exit | Meaning |
 |---:|---|
-| 0 | successful command/query |
-| 1 | local config, transport, protocol, or file failure |
+| 0 | success |
+| 1 | local config / transport / protocol / file failure |
 | 2 | invalid invocation |
-| 3 | waited remote job failed/canceled |
-| 4 | wait timeout; remote job may continue |
+| 3 | the waited-on job failed or was canceled |
+| 4 | wait timed out — **the job is still running** |
 
-Timeout never cancels unless `--cancel-on-timeout` is explicit. Snapshot
-inspection of a failed `job`/`events` still succeeds unless
-`--fail-on-job-failure` is requested.
+Timeout never cancels unless `--cancel-on-timeout`. Inspecting a failed job
+still exits 0 unless `--fail-on-job-failure`.
 
-## Continue existing work first
+## Finding what to continue
 
-Before submitting, inspect `ab jobs --output json` and
-`ab sessions --output json`, then choose the first match:
-
-1. **Running job:** `ab steer <ref> -F nudge.md`.
-2. **Idle session must see follow-up:**
-   `ab submit -F followup.md --session <uuid> --no-fork`.
-3. **Need history but work branches:**
-   `ab submit -F task.md --session <uuid>`.
-4. **Genuinely new subject:** omit `--session`.
-
-`--no-fork` requires an idle session. The gateway refuses a live writer with a
-`session_busy` error naming the holding job and steer reference. Do not work
-around it.
-
-Steer is accepted into the live input channel and observed by the model at its
-next tool boundary. A `202` is not a strict exactly-once model-action promise;
-watch the `steer` event to see where it landed.
-
-Use `ab agents --output json` to verify per-adapter capabilities before relying
-on sessions, steering, thinking, or attachments. Select backend and model per
-job with `--agent` and `--model`.
-
-## Reliable long jobs
-
-Prefer submit + follow/wait over a single blocking harness call:
+`ab sessions` answers two questions, and which one depends on `--cwd`:
 
 ```bash
-ab submit -F task.md --title nightly --idempotency-key nightly-v1 --output json
-ab events nightly --follow --type assistant --output jsonl > nightly.events.jsonl
+ab sessions                       # which directories have work, and how much
+ab sessions --cwd /project/x      # the sessions in exactly that directory
+ab sessions --cwd /project/x --limit 100 --cursor <next_cursor>
+```
+
+The first is the one to run when you don't yet know which project to ask about.
+It is **complete** — every directory, never a page — so "not listed" means
+"none", not "crowded out".
+
+The second is an **exact** directory match, not a prefix: `/project/x` and
+`/project/x/sub` are separate indexes, so `total` means what it says. Paths
+normalise, so `D:\x`, `D:/x` and `d:\X` all match. Page with `--limit` and
+`--cursor` (not `--after`; sessions have no sequence to count).
+
+Both views list a session only if **a human spoke or the agent acted**, and
+counts match listings. Subagent transcripts and slash-command residue (`/login`,
+`/resume`) carry a real id and look resumable while holding nothing, so they are
+not offered. A `--session <id>` you name explicitly is still honoured; only the
+recommendations are filtered.
+
+## Continue existing work — first match wins
+
+Check `ab jobs` then `ab sessions` before submitting.
+
+| # | Situation | Command |
+|---|---|---|
+| 1 | a job is **running** on this work | `ab steer <ref> -F note.md` |
+| 2 | session is **idle** and must see the message | `ab submit -F f.md --session <id> --no-fork` |
+| 3 | want its history, work **branches** | `ab submit -F f.md --session <id>` |
+| 4 | genuinely new subject | `ab submit -F f.md` |
+
+Rung 4 last — not because it is cheaper. Context an agent already built (the
+repo it read, the quirk it learned) outvalues the tokens a clean start saves.
+
+**Steer is the only thing that reaches a live turn.** The agent takes it at its
+next tool boundary, so `202` means accepted, not acted on — watch for the `steer`
+event. A turn mid-generation with no tool calls sees it only when that finishes.
+
+**`--no-fork` needs an IDLE target.** Against a mid-turn session it starts a
+*second* agent on a stale transcript; both write, the transcript forks, and the
+later flush wins — the other branch is silently lost. The gateway refuses with
+`409 session_busy` naming `held_by` and `steer_ref`. **Follow the pointer.**
+
+**A named session runs in its own directory.** Resuming or forking carries that
+session's history, so the gateway runs it in the project it was created in —
+overriding `--cwd` and the configured default, and saying so with a `status`
+event (`stage: "cwd"`, naming the directory used and the one replaced). To work
+in a *different* tree, start a fresh job rather than pinning a session.
+
+**Getting the session to reuse:** `submit` waits for it and prints it
+(`session: <id> (ready)`); `--no-wait` skips the wait. On any job row, `session`
+is the single canonical field to pass back to `--session` — prefer it over
+`forked_session`/`chosen_session`/`requested_session`.
+
+## Briefing the worker: separate what you know from what you assume
+
+You cannot see the remote filesystem, installed versions, cluster state, or
+prior runs. The worker cannot see this conversation, the user's goal, or what you
+already ruled out. Neither side can see its own blind spot, so say yours out
+loud. A brief has four parts:
+
+| Part | Content |
+|---|---|
+| **Known** | the goal, the constraints, what has been tried and ruled out, why this approach |
+| **Assumed** | paths, module names, versions, data shapes you believe exist but have *not* verified — labelled as assumptions |
+| **Unknown** | what you want discovered and reported back |
+| **Deliverable** | what the answer must contain to be usable without a follow-up |
+
+**The Assumed section is the one that earns its keep.** An assumption written as
+a fact ("edit `src/train.py`") makes the worker comply with something broken or
+silently substitute. Written as an assumption ("I believe the entry point is
+`src/train.py` — confirm, and say what you found if not") it makes the worker
+verify and report. Every path, version, and dataset name you did not personally
+read belongs here.
+
+```markdown
+## Known
+Goal: cut eval wall-clock. Batching is already ruled out — it changed the metric.
+## Assumed (verify these)
+- entry point `src/eval.py`; a `--workers` flag exists
+- torch 2.x with CUDA already in the shared env
+## Unknown — report back
+Actual GPU model on the partition, and whether the env's torch sees it.
+## Deliverable
+The command you ran, the before/after timing, and the versions in play.
+```
+
+Also state what you **cannot fetch**: anything outside the gateway's
+`allowed_dirs` is unreachable to you, so ask for extracts inline rather than
+file paths you cannot open.
+
+## Reading a job
+
+**`ab job REF` first.** The result is stored and printed whole — usually all you
+need.
+
+**Then events, which now read from the end.** `ab events REF` returns the last
+50; `total`/`first_seq`/`last_seq` show the shape so you never page blind.
+
+```bash
+ab events REF                        # last 50
+ab events REF --tail 200             # more history
+ab events REF --tail 20 --type result --type error   # narrow inside the window
+ab events REF --after 0              # top-down (the old default)
+ab events REF -f                     # follow; primes with a short tail
+```
+
+- `--tail` and `--after` conflict (exit 2) — pick an end.
+- `--type` filters **inside** `--tail`, so `--type result --tail 5` works.
+- `--output json` is faithful/unelided: narrow with `--type` before widening
+  `--tail`, or a long job's tool results will flood you.
+
+**Every timestamp is ISO 8601** with the gateway's UTC offset attached — job
+`created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`, session
+`last_active`, file `mtime`. No epoch floats to decode. Durations stay numeric:
+`elapsed`/`elapsed_hms` on each event give position in the run, usually the
+actual question.
+
+**Transcripts are the last resort** — every tool call *and result*, megabytes.
+Filter on the remote host, download the extract:
+
+- **Claude Code**: one file per session, via `ab ls`/`ab download` —
+  `<home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl`. Growing = working.
+- **opencode**: one SQLite db, no per-session files, so `download` cannot help.
+  On the host: `opencode export <sessionID>`; the id is the job's `session`.
+
+## Long and batch jobs
+
+Prefer submit + follow/wait over one blocking call:
+
+```bash
+ab submit -F task.md --title nightly --idempotency-key nightly-v1
+ab events nightly -f --type assistant --output jsonl > nightly.jsonl
 ab wait nightly --timeout 1800 --output json
-ab job nightly --output json
 ```
 
-Reuse one `--idempotency-key` only for retries of the same semantic submission.
-The gateway returns the original job; a changed request under the same key is a
-conflict.
+Reuse an `--idempotency-key` only for retries of the *same* submission; changed
+content under one key is a conflict.
 
-Follow uses SSE with event cursor replay and honors `--after`, `--until`, and
-repeatable `--type`. The final job result from `ab job` is complete and should
-normally be read before the larger event log.
+**A coding-agent turn cannot wait hours for scheduler work.** Tell the remote
+agent to submit and return the identifiers, and make the batch script report
+itself with `ab-notify` (see the worker skill).
 
-Thinking is not persisted unless `--include-thinking` was supplied at submit.
-Enable it only when reasoning is genuinely required.
+**Batch `message` events are post-terminal annotations.** The job row can read
+`succeeded` — and a follow can close — hours before the `finished` report
+arrives. Retrieve later reports with a fresh `ab events REF --after <cursor>`.
+One open stream does not wait out external compute.
 
-## Batch work and `ab-notify`
-
-A coding-agent turn cannot wait hours for scheduler work. Tell the remote agent
-to submit and return the scheduler/job identifiers. Make the batch script report
-itself:
-
-```bash
-#SBATCH --export=ALL,AB_JOB_ID=<ab-job-uuid>,AB_DATA_DIR=<gateway-data-dir>
-ab-notify --status running  --msg "server up" --report-id run-start
-ab-notify --status finished --report "$RUNS/RESULTS.md" --report-id run-finished
-ab-notify --status failed   --msg-file "$RUNS/error.log" --report-id run-failed
-```
-
-`ab-notify` tries HTTP, shared JSONL, then local temporary JSONL. URL discovery:
-`--url`, `$AB_URL`, `gateway-endpoint.json`; token discovery: `--token`,
-`$AB_TOKEN`, `<data_dir>/.token`. Do not expose the token in scheduler submit
-arguments.
-
-Batch `message` events are **annotations**, not a second job status. The coding
-agent may already be `succeeded`, and its SSE follow closes at that terminal
-state. Later reports are retrieved with a new event query/follow from the last
-cursor. One open stream does not wait forever for external compute.
-
-`report_id` deduplicates retries. A local-only fallback exits zero because the
-message is durably written, but it is not ingestible until that file is moved to
-the shared messages directory; read stderr.
-
-### Prompt shape for scheduler work, learned the hard way
-
-Put these in the brief. Each one corresponds to a way this has actually failed:
-
-- **Lead with the action, not the prohibition.** Opening with "do NOT wait for
-  the job" primes the agent to relay status instead of working. Say "submit it
-  and report the job id" first.
-- **Say explicitly that there is no background job to report on** — otherwise a
-  turn ends on a promise to check back, which the gateway records as success.
-- **Require interleaved evidence**: print each result as it is known, not in a
-  closing summary that may never be reached.
-- **Give permission to ship incomplete** — a submitted job with known gaps beats
-  a perfect plan that never ran.
-- **`mkdir -p` the scheduler's output directory from the submitting shell,
-  before submitting.** Slurm opens `--output` *before* the script runs, so an
-  in-script `mkdir` is too late: the job dies in about a second with no logs at
-  all, which reads exactly like "never queued".
-- **Heartbeat as the script's first action**, so an empty output directory means
-  *died* rather than *queued*.
-
-### Three states, not two
-
-When inferring a job's state from the filesystem, keep these distinct:
+**Three states, not two**, when inferring from the filesystem:
 
 | Observation | Means |
 |---|---|
@@ -273,72 +262,29 @@ When inferring a job's state from the filesystem, keep these distinct:
 | reached it, nothing there | not submitted, or died before writing |
 | files present | running |
 
-Collapsing the first into the second is how a live job gets reported as dead.
-Prefer `ab events` over mtime inference wherever `ab-notify` is wired up.
-
-## Recovering output when the job row can't help
-
-If the row is stale or the run wrote no artifact, the session transcript is the
-fallback — and its shape depends on the backend:
-
-- **Claude Code** keeps one file per session, reachable with `ab ls` /
-  `ab download`:
-  ```
-  <remote home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl
-  ```
-  A growing file means the agent is still working. Downloading it recovers the
-  text even when the job row says nothing useful.
-- **opencode** keeps sessions in one SQLite database
-  (`<remote home>/.local/share/opencode/opencode.db`) with no per-session files,
-  so `ab download` cannot help. Read it on the gateway host with
-  `opencode export <sessionID>` or `opencode session list`; the id to export is
-  the job's `forked_session`.
-
-This is the most expensive read available — a transcript is every tool call and
-every tool result. Filter on the remote host and download the extract, not the
-whole file.
-
-## Safe files
-
-Uploads accept readable regular non-symlink files. Preserve a chosen remote name:
+## Files
 
 ```bash
 ab submit -F task.md --upload-as inputs/data.csv=./data.csv
-ab upload --as inputs/config.json=./config.json
-```
-
-Duplicate remote names fail. Directory upload does not follow symlinks.
-
-Downloads preserve relative paths under `--to`, reject traversal/symlink roots,
-collisions, and existing targets, and use atomic temporary files:
-
-```bash
 ab download --dir /project/x/out --glob '*.csv' --recursive --to ./out
 ```
 
-Use `--overwrite` explicitly. `--flatten` requests the legacy basename layout,
-but collisions remain errors.
-
-Anything outside gateway `allowed_dirs`/file storage is inaccessible. For large
-data, use `rsync` into an allowed directory and attach the remote path.
+Uploads take readable regular non-symlink files; duplicate remote names fail.
+Downloads preserve relative paths, reject traversal/symlink roots/collisions,
+and need explicit `--overwrite`. Anything outside `allowed_dirs` is unreachable —
+for bulk data, `rsync` into an allowed dir and attach the remote path.
 
 ## Verification discipline
 
-- Do not relay the remote agent's conclusion without checking its evidence.
-- A terminal gateway job means the coding-agent turn ended; it may only have
-  submitted external work.
-- Prefer structured `job`, `events`, and downloaded artifacts to filesystem
-  mtime inference.
-- Distinguish tunnel failure from gateway failure; `gateways --no-probe`
-  succeeding proves neither.
-- Cancellation interrupts first so the transcript can flush; escalation is a
-  fallback.
-- A gateway restart explicitly fails formerly running rows and requeues queued
-  rows, rather than leaving them silently stale.
+- Check the remote agent's evidence; do not relay its conclusion.
+- A terminal job means the **turn** ended — it may only have submitted work.
+- A stale `running` row is not proof of life. `ab steer` it: the write fails
+  against a dead agent, so that 409 is the most direct liveness probe.
+- A gateway restart explicitly fails formerly-running rows (`gateway_restarted`)
+  and requeues queued ones, rather than leaving them stale.
+- `cancel` interrupts first so the transcript flushes; escalation is a fallback.
 
-## Repository references
+## Repo
 
-- `API.md` — typed HTTP contract
-- `client/README.md` — CLI reference
-- `config.example.toml` — gateway settings
-- `skills/agent-bridge-worker/` — remote worker conventions
+`API.md` (HTTP contract) · `client/README.md` (CLI) · `config.example.toml`
+(gateway settings) · `docs/todo/` (known gaps, in-flight design).

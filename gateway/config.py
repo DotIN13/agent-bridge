@@ -270,7 +270,7 @@ def _prepare_store(d: Path) -> str:
 def _ensure_token(data_dir: Path) -> str:
     token_file = data_dir / ".token"
     if token_file.exists():
-        return token_file.read_text().strip()
+        return token_file.read_text(encoding="utf-8").strip()
     token = secrets.token_urlsafe(32)
     token_file.write_text(token + "\n")
     token_file.chmod(0o600)
