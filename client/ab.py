@@ -160,7 +160,7 @@ def _submission(args) -> dict:
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=uploads, title=args.title,
                 fork=args.fork, include_thinking=args.include_thinking,
-                expect_report=getattr(args, "expect_report", False),
+                expect_report=getattr(args, "expect_report", True),
                 idempotency_key=args.idempotency_key)
 
 
@@ -671,9 +671,10 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--permission-mode", dest="permission_mode")
         sp.add_argument("--include-thinking", action="store_true",
                         help="retain reasoning events")
-        sp.add_argument("--expect-report", action="store_true",
-                        help="the turn hands work to a scheduler; the job stays "
-                             "open until ab-notify reports finished/failed")
+        sp.add_argument("--no-expect-report", dest="expect_report",
+                        action="store_false", default=True,
+                        help="finish the job when the turn ends, instead of "
+                             "waiting for an ab-notify finished/failed report")
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="attach a local regular file (repeatable)")
         sp.add_argument("--upload-as", action="append", default=[],

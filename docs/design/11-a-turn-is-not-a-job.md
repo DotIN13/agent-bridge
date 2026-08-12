@@ -18,9 +18,10 @@ never the thing the caller wanted to wait for.
 
 ## What shipped
 
-`POST /v1/jobs` takes `expect_report: true` (`ab submit --expect-report`). Such a
-job parks in **`awaiting_report`** when its turn succeeds instead of going
-terminal, and only `ab-notify --status finished|failed` closes it.
+`POST /v1/jobs` takes `expect_report`, **defaulting to true**. Every job parks in
+**`awaiting_report`** when its turn succeeds instead of going terminal, and only
+`ab-notify --status finished|failed` closes it. `--no-expect-report` opts out for
+a turn that is the whole of the job.
 
 | | |
 |---|---|
@@ -34,11 +35,23 @@ point: the fix belongs in what the status *means*, not in a second verb.
 
 ## The decisions inside it
 
-**Opt-in, not inferred.** The gateway could guess from a `running` report
-arriving before turn end. It does not: a job that hangs forever because the
-gateway inferred something is far worse than one that finishes early, and 07 was
-right that the two status machines must not merge *silently*. `--expect-report`
-is the caller saying so.
+**Declared, not inferred.** The gateway could guess from a `running` report
+arriving before turn end. It does not: a job that hangs because the gateway
+inferred something is worse than one that is explicit either way. The flag is
+the caller saying which kind of job this is.
+
+**Default on, decided after the opt-in version shipped.** The first cut defaulted
+off, on the reasoning that a surprising hang is worse than a premature success.
+That has it backwards for this system. Defaulting off means the failure mode is
+*silent and permanent* — a batch job reads `succeeded` and nobody ever finds out
+it did not run. Defaulting on means the failure mode is *loud and bounded*: a
+worker that forgets to report produces a job stuck at `awaiting_report` until the
+deadline, which is visible in `ab jobs` and fails with a named reason.
+
+The cost is real and worth stating plainly: **any** agent that does not call
+`ab-notify` now turns a success into a delayed failure. That includes an agent
+without the worker skill loaded. The enforcement lives in the worker skill, which
+now says to finish every job with a report, not just batch ones.
 
 **A new status, not `running`.** The obvious cheap move is to leave the row
 `running`, and it is wrong. Three separate things read `running` as "an agent is
@@ -91,7 +104,7 @@ resolved.
 Against a real gateway on an isolated port, not just in unit tests:
 
 ```
-submit --expect-report   -> status awaiting_report, finished_at null,
+submit (default)         -> status awaiting_report, finished_at null,
                             the turn's own result preserved
 ab wait (3s)             -> exit 4, still running
 gateway restarted        -> still parked, not failed as stale

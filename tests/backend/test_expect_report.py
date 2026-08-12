@@ -8,10 +8,17 @@ started actually ran. `expect_report` parks the row in `awaiting_report` until
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+import sys
+
+from gateway.api_models import JobCreate
 from gateway.db import AWAITING_REPORT, TERMINAL, Database
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "client"))
+from abclient import _job_payload  # noqa: E402
 
 
 def _job(db, *, expect_report=False):
@@ -27,14 +34,37 @@ def _succeed(db, job, **kw):
         [("status", {"stage": "done", "status": "succeeded"})], **kw)
 
 
-def test_a_plain_job_still_finishes_with_its_turn(tmp_path):
+def test_a_job_that_opted_out_finishes_with_its_turn(tmp_path):
     db = Database(str(tmp_path / "j.db"))
-    job = _job(db)
+    job = _job(db)                                 # db layer defaults off
     _succeed(db, job)
     row = db.get_job(job)
     assert row["status"] == "succeeded"
     assert row["finished_at"] is not None
     db.close()
+
+
+def test_the_api_expects_a_report_by_default():
+    """Waiting is the default, so forgetting to ask for it cannot lose the work.
+
+    The whole suite stayed green when this default flipped, because nothing
+    asserted what an API-submitted job does at the end of its turn. These two
+    pin the contract in both directions.
+    """
+    assert JobCreate(prompt="x").expect_report is True
+    assert JobCreate(prompt="x", expect_report=False).expect_report is False
+
+
+def test_the_cli_sends_the_opt_out_explicitly():
+    """The server default is on, so `--no-expect-report` has to be transmitted.
+
+    Omitting a false value would silently mean "wait" -- the opposite of what
+    the caller asked for.
+    """
+    assert "expect_report" not in _job_payload(
+        "p", None, None, None, None, None, None)
+    assert _job_payload("p", None, None, None, None, None, None,
+                        expect_report=False)["expect_report"] is False
 
 
 def test_expect_report_parks_instead_of_finishing(tmp_path):

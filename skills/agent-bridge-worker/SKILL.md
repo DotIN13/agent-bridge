@@ -79,13 +79,21 @@ outside the gateway's `allowed_dirs`, or too large to be worth downloading.
 signal is output-file mtimes, which cannot distinguish *queued* from *died before
 writing* from *filesystem unreachable*.
 
-**If the job was submitted with `expect_report`, the job does not end when your
-turn does.** Its row parks in `awaiting_report` and the caller's `ab wait` is
+**Your turn ending does not end the job — you have to say so.** By default a job
+parks in `awaiting_report` when your turn finishes, and the caller's `ab wait` is
 blocked on it. Only `ab-notify --status finished` or `--status failed` closes it;
-progress reports (`running`, `queued`) deliberately do not. Send nothing and the
-job sits until its deadline expires and is then failed with `report_timeout` —
-the caller learns nothing except that you went quiet. Arrange the finish report
-before you end your turn, including on the failure paths (`trap`, `set -e`).
+progress reports (`running`, `queued`) deliberately do not.
+
+**This applies to every job, not just batch ones.** Answer a question and stop,
+and the job stays open until its deadline expires and is failed with
+`report_timeout` — the caller learns nothing except that you went quiet. So:
+
+- **Finish every job with `ab-notify --status finished`**, or `failed` with the
+  reason, as the last thing you do.
+- If the work outlives your turn, the *script* owns that call — arrange it on
+  every exit path, including the failure ones (`trap`, `set -e`).
+- Report `failed` when the work failed. A `finished` report on broken work is
+  worse than silence, because it closes the job as a success.
 
 ```bash
 #SBATCH --export=ALL,AB_JOB_ID=<ab job uuid>,AB_DATA_DIR=<gateway data dir>

@@ -128,10 +128,11 @@ share a millisecond.
 
 ### Job status and `expect_report`
 
-`POST /v1/jobs` accepts `expect_report: true` for a turn that hands work to a
-scheduler. Such a job does **not** go terminal when its turn succeeds: it enters
-`awaiting_report`, a non-terminal status, and only an `ab-notify --status
-finished|failed` closes it (`finished` → `succeeded`, `failed` → `failed`).
+`POST /v1/jobs` takes `expect_report`, and it **defaults to true**. A job does
+**not** go terminal when its turn succeeds: it enters `awaiting_report`, a
+non-terminal status, and only an `ab-notify --status finished|failed` closes it
+(`finished` → `succeeded`, `failed` → `failed`). Send `expect_report: false`
+(`ab submit --no-expect-report`) for a turn that is the whole of the job.
 Progress reports leave it parked, and a report cannot move a job that was already
 terminal.
 
