@@ -267,19 +267,52 @@ def cmd_models(args):
 
 
 def cmd_sessions(args):
-    data = _client(args).sessions(cwd=args.cwd, agent=args.agent)
+    """Two views, because there are two questions.
+
+    Without `--cwd`: which directories have work you could continue — the view
+    you need before you know which project to ask about, and one the old flat
+    list could not give at all. With `--cwd`: the sessions in exactly that
+    directory, paged.
+    """
+    client = _client(args)
+    if not args.cwd:
+        data = client.session_dirs(agent=args.agent)
+
+        def human(value):
+            rows = value.get("dirs", [])
+            if not rows:
+                print("no directories with sessions on this gateway")
+                return
+            print(f"{'DIRECTORY':<44} {'SESSIONS':>8}  {'LAST ACTIVE':<26} LATEST")
+            for row in rows:
+                latest = _line(row.get("latest_title") or "")
+                if not args.full:
+                    latest = _clip(latest, 40)
+                print(f"{row['cwd']:<44} {row['sessions']:>8}  "
+                      f"{(row.get('last_active') or '-'):<26} {latest}")
+            print(f"{value.get('total', len(rows))} directories · "
+                  f"`ab sessions --cwd <dir>` for the sessions in one")
+        _emit(args, data, human)
+        return
+
+    data = client.sessions(cwd=args.cwd, agent=args.agent,
+                           limit=args.limit, cursor=args.cursor)
 
     def human(value):
         rows = value.get("sessions", [])
         if not rows:
-            print("no sessions on this gateway for that filter")
+            print(f"no sessions recorded for {args.cwd}")
             return
-        print(f"{'SESSION':<36} {'CWD':<40} TITLE")
+        print(f"{'SESSION':<36} {'LAST ACTIVE':<26} TITLE")
         for session in rows:
             title = _line(session.get("title", ""))
             if not args.full:
-                title = _clip(title, 60)
-            print(f"{session['session_id']:<36} {session.get('cwd',''):<40} {title}")
+                title = _clip(title, 50)
+            print(f"{session['session_id']:<36} "
+                  f"{(session.get('last_active') or '-'):<26} {title}")
+        print(f"{len(rows)} of {value.get('total', len(rows))}")
+        if value.get("next_cursor"):
+            print(f"next_cursor: {value['next_cursor']}")
     _emit(args, data, human)
 
 
@@ -668,9 +701,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = command("models", "list model ids advertised by an agent")
     sp.add_argument("--agent")
     sp.set_defaults(func=cmd_models)
-    sp = command("sessions", "list resumable sessions")
-    sp.add_argument("--cwd", help="prefer sessions for this directory")
+    sp = command("sessions",
+                 "directories with sessions, or the sessions in one (--cwd)")
+    sp.add_argument("--cwd", help="exact directory; lists that directory's "
+                                  "sessions instead of the directory summary")
     sp.add_argument("--agent", help="scope to one backend")
+    sp.add_argument("--limit", type=_positive_int, default=40,
+                    help="page size for --cwd (default 40)")
+    sp.add_argument("--cursor", help="opaque next_cursor from a prior page")
     sp.set_defaults(func=cmd_sessions)
 
     sp = command("run", "submit a prompt and wait for completion")

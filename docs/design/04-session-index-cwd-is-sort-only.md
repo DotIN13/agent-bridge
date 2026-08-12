@@ -82,3 +82,73 @@ before every submit, which is what the skill instructs.
 - `gateway/server.py:164-170` (if a new query parameter appears)
 - `gateway/adapters/claude.py:145-162`
 - `client/ab.py:192-209`, `API.md` (§`GET /v1/sessions`)
+
+---
+
+## Decision: two views instead of one better-ordered list
+
+Reordering the existing operation was the wrong shape. A single flat list was
+answering two different questions at once — *"where is there work?"* (you do not
+know the directory yet) and *"what is in this project?"* (you do) — and a
+globally-windowed sample answers neither, without admitting it.
+
+Split, and each level becomes complete:
+
+- **`GET /v1/session-dirs`** — every directory with sessions. Bounded by how
+  many projects exist, not by a window, so nothing can drop out of it.
+- **`GET /v1/sessions?cwd=&limit=&cursor=`** — sessions in exactly one
+  directory, paged, with a real `total`.
+
+The window is not fixed; it stops existing.
+
+`cwd` is an **exact** match, not a prefix (decided: no recursion), so a count
+means what it says and a sub-project keeps its own index. Paging is by opaque
+cursor rather than `after=N`, because sessions have no monotonic sequence and
+ordering on a timestamp alone would skip or repeat rows on a tie.
+
+## opencode was worse, and was already broken
+
+The original write-up measured only the Claude backend. opencode has the same
+two defects over **1,522 sessions in 39 directories** against the same 120-row
+window, and one directory holds 867 of them. Measured against the real store
+before the fix:
+
+```
+  D:/dotty-projects/zimo           on disk 33 | returned 0
+  D:/dotty-projects/molly-sachs    on disk 88 | returned 0
+  D:/dotty-projects/agent-bridge   on disk  4 | returned 4
+```
+
+121 resumable sessions were invisible — permanently, not "once the store grows".
+Only the recently-active directory showed up at all. So this was not a latent
+risk on that backend; it was silently defeating the resume-first policy on every
+call.
+
+## What shipped
+
+Both backends, same two-phase shape — resolve the matching directories, then
+take the newest N within them — differing only in how directories are found:
+
+| | Claude Code | opencode |
+|---|---|---|
+| find directories | folder names (17), cwd read once per folder and cached | `SELECT DISTINCT directory` (39) |
+| newest N in them | glob + sort + parse survivors | one `WHERE directory IN (…)` query |
+
+Deliberately **not** un-slugifying folder names to get a cwd, though the mapping
+is derivable (`D:\dotty-projects\molly` ⇔ `D--dotty-projects-molly`, every
+non-alphanumeric character becoming one `-`). It is undocumented and lossy, and
+a wrong rule produces *false negatives* — the same silent loss being fixed.
+Reading the recorded `cwd` once per folder cannot.
+
+Paths are compared normalised: Claude records `D:\x`, opencode records `D:/x`,
+and Windows differs in case too.
+
+**05 is partly closed as a side effect.** Unresumable `.orphaned-*` stems are
+filtered before both the listings and the per-directory counts — advertising a
+count that included ids nothing can resume would have been a new lie. The
+zero-message half of 05 matters much less now: pagination removed the scarce
+40-row window those stubs were competing for.
+
+**Verified.** `zimo` 0 → 33, `molly-sachs` 0 → 88, and cursor walks are complete
+and duplicate-free on both backends (88 sessions in 9 pages, 25 in 4). Covered
+in `tests/backend/test_session_index.py`.

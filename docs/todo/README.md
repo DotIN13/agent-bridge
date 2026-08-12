@@ -10,22 +10,17 @@ records refer to them.
 
 | # | Item | Severity | Blocked on |
 |---|---|---|---|
-| [04](04-session-index-cwd-is-sort-only.md) | `cwd` only sorts the session index; the parse window truncates before it | medium | nothing |
 | [05](05-session-index-hygiene.md) | Index advertises non-resumable ids and empty stub sessions | low | nothing |
 | [09](09-steer-vs-resume-is-a-race.md) | Steer-vs-resume is a race the caller has to arbitrate | medium | a design decision |
 
 ## Suggested order
 
-**04 first, and sooner than its severity suggests.** It is latent only because the
-store is still under the window. Measured 2026-08-11: **110 transcripts against a
-120-file pre-parse window.** Past that, sessions under the requested `cwd` start
-disappearing from the index, which quietly defeats the resume-first policy both
-skills push hardest — and the failure looks like "no relevant session exists".
-
 **09 when the shape of the CLI is being revisited anyway.** It is friction and a
 lost race, not corruption; the guards added in
-[design/02](../design/02-mid-turn-steering-or-liveness-gate.md) keep it safe.
+[design/02](../design/02-mid-turn-steering-or-liveness-gate.md) keep it safe, and
+"do nothing, document the pairing" is a defensible end state.
 
-**05 last.** Real but currently latent — the orphaned transcripts on disk have
-aged out of the window, so exposure today is 0 unusable ids and 3 empty rows.
-It returns whenever a recent transcript gets orphaned.
+**05 is mostly closed already.** Unresumable `.orphaned-*` ids are filtered out
+by [design/04](../design/04-session-index-cwd-is-sort-only.md), and pagination
+removed the scarce 40-row window that made empty stub sessions harmful. What
+remains is cosmetic: stubs still appear as rows with no messages.

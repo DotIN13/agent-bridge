@@ -13,6 +13,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [01](01-correct-mid-turn-steering-claims.md) | `fork=false` does not queue into a live turn — the docs said it did | with 02 |
 | [02](02-mid-turn-steering-or-liveness-gate.md) | Mid-turn steering over streaming stdin, plus a liveness gate on in-place resume | with 01 |
 | [03](03-direct-mode-resumes-in-wrong-cwd.md) | A named session's recorded cwd always wins, and the substitution is announced | after 0.3.0 |
+| [04](04-session-index-cwd-is-sort-only.md) | Session index split into directories + paged sessions; neither can lose a row | after 0.3.0 |
 | [06](06-agent-first-cli-api.md) | Making the CLI contract agent-first: output protocol, exit codes, safe transfers | 0.3.0 |
 | [07](07-backend-api-contract.md) | Typed HTTP contract, monotonic events, idempotency, restart recovery | 0.3.0 |
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |

@@ -1,7 +1,7 @@
 # 05 — Index advertises non-resumable ids and empty stub sessions
 
 **Severity:** low (noise and one unusable id, no data loss)
-**Scope:** `gateway/sessions.py`. Pairs naturally with [04](04-session-index-cwd-is-sort-only.md).
+**Scope:** `gateway/sessions.py`. Pairs naturally with [04](../design/04-session-index-cwd-is-sort-only.md).
 
 ## Problem
 

@@ -23,7 +23,7 @@ INTERRUPT_GRACE_SEC = 15.0     # SIGINT -> SIGTERM
 TERM_GRACE_SEC = 5.0           # SIGTERM -> SIGKILL
 
 from ..config import AgentConfig
-from ..sessions import SessionInfo
+from ..sessions import DirInfo, SessionInfo, SessionPage
 
 
 class Cancellation:
@@ -370,7 +370,13 @@ class AgentAdapter(Protocol):
         """Machine-readable operations supported by this configured adapter."""
         ...
 
-    def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
+    def list_dirs(self) -> "list[DirInfo]":
+        """Every directory holding sessions. Complete: never truncated."""
+        ...
+
+    def list_sessions(self, cwd: str | None = None, limit: int = 40,
+                      cursor: str | None = None) -> "SessionPage":
+        """One page of sessions; `cwd` is an exact directory match."""
         ...
 
     def run(self, spec: JobSpec, emit: EmitFn) -> RunResult:

@@ -60,7 +60,7 @@ resolve somewhere real and wrong**.
 | Command | Use |
 |---|---|
 | `health` · `agents` · `capabilities` · `info` · `models` | discovery |
-| `sessions` | resumable context |
+| `sessions` | directories with sessions; `--cwd DIR` for the sessions in one |
 | `jobs [--limit N] [--cursor C]` | paged summaries |
 | `submit -F FILE` | submit; waits for the session id |
 | `run -F FILE` | submit and wait for the result |
@@ -100,6 +100,25 @@ the human view** — it elides, so a later match silently fails.
 
 Timeout never cancels unless `--cancel-on-timeout`. Inspecting a failed job
 still exits 0 unless `--fail-on-job-failure`.
+
+## Finding what to continue
+
+`ab sessions` answers two questions, and which one depends on `--cwd`:
+
+```bash
+ab sessions                       # which directories have work, and how much
+ab sessions --cwd /project/x      # the sessions in exactly that directory
+ab sessions --cwd /project/x --limit 100 --cursor <next_cursor>
+```
+
+The first is the one to run when you don't yet know which project to ask about.
+It is **complete** — every directory, never a page — so "not listed" means
+"none", not "crowded out".
+
+The second is an **exact** directory match, not a prefix: `/project/x` and
+`/project/x/sub` are separate indexes, so `total` means what it says. Paths
+normalise, so `D:\x`, `D:/x` and `d:\X` all match. Page with `--limit` and
+`--cursor` (not `--after`; sessions have no sequence to count).
 
 ## Continue existing work — first match wins
 

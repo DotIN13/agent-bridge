@@ -447,10 +447,23 @@ class Client:
     def info(self, refresh: bool = False) -> dict:
         return self._get("/v1/info" + ("?refresh=1" if refresh else ""))
 
-    def sessions(self, cwd: str | None = None, agent: str | None = None) -> dict:
-        query = {key: value for key, value in (("cwd", cwd), ("agent", agent)) if value}
-        return self._get("/v1/sessions" +
-                         (("?" + urllib.parse.urlencode(query)) if query else ""))
+    def session_dirs(self, agent: str | None = None) -> dict:
+        """Directories holding sessions. Complete — never a page."""
+        query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
+        return self._get("/v1/session-dirs" + query)
+
+    def sessions(self, cwd: str | None = None, agent: str | None = None, *,
+                 limit: int = 40, cursor: str | None = None) -> dict:
+        """One page of sessions. `cwd` is an exact directory match.
+
+        Paging is by opaque cursor rather than `after=N`: sessions have no
+        monotonic sequence, and ordering by timestamp alone would skip or
+        repeat rows whenever two share a millisecond.
+        """
+        query = {key: value for key, value in
+                 (("cwd", cwd), ("agent", agent), ("cursor", cursor)) if value}
+        query["limit"] = int(limit)
+        return self._get("/v1/sessions?" + urllib.parse.urlencode(query))
 
     def models(self, agent: str | None = None) -> dict:
         query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""

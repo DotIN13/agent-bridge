@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import AgentConfig
-from ..sessions import SessionInfo, find as find_session, scan
+from ..sessions import (DirInfo, SessionInfo, SessionPage,
+                        find as find_session, list_dirs, scan)
 from .base import (Event, JobSpec, RunResult, Steering, interrupt_group,
                    resume_cwd)
 
@@ -156,11 +157,19 @@ class ClaudeAdapter:
         }
 
     # -- sessions ---------------------------------------------------------
-    def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
-        return scan(limit=self.cfg.max_sessions_in_index, cwd_filter=cwd_filter)
+    def list_dirs(self) -> list[DirInfo]:
+        return list_dirs()
+
+    def list_sessions(self, cwd: str | None = None, limit: int = 40,
+                      cursor: str | None = None) -> SessionPage:
+        return scan(limit=limit, cwd=cwd, cursor=cursor)
 
     def _index_json(self, cwd_filter: str | None) -> str:
-        infos = self.list_sessions(cwd_filter)
+        # The dispatcher modes want a menu to choose from, including sessions
+        # outside the job's cwd, so they deliberately do not filter. `cwd` is an
+        # exact filter now and would hide exactly the cross-project options
+        # these prompts tell the model it may pick.
+        infos = self.list_sessions(None, limit=self.cfg.max_sessions_in_index).sessions
         compact = [
             {
                 "session_id": s.session_id,

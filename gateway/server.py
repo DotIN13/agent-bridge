@@ -29,7 +29,8 @@ from .api_models import (
     ERROR_RESPONSES, EVENT_TYPES, AgentDescription, AgentsResponse,
     CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
     JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
-    SessionsResponse, SteerRequest, SteerResponse, UploadResponse,
+    SessionDirsResponse, SessionsResponse, SteerRequest, SteerResponse,
+    UploadResponse,
 )
 from .bus import Bus
 from .cluster import ClusterInfo
@@ -279,14 +280,42 @@ def create_app(gw: Gateway) -> FastAPI:
             gw.cluster.refresh_async()
         return gw.cluster.get()
 
-    @app.get("/v1/sessions", dependencies=[auth],
-             response_model=SessionsResponse, responses=ERROR_RESPONSES)
-    async def sessions(cwd: str | None = None, agent: str | None = None):
+    @app.get("/v1/session-dirs", dependencies=[auth],
+             response_model=SessionDirsResponse, responses=ERROR_RESPONSES)
+    async def session_dirs(agent: str | None = None):
+        """Directories that hold sessions — the "where is there work" view.
+
+        Returned whole. Its size is bounded by how many projects exist rather
+        than by a page window, so unlike the old flat session list it cannot
+        quietly omit a project just because another one has been busy.
+        """
         agent_cfg = cfg.agents.get(agent or cfg.default_agent)
         if not agent_cfg:
             raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
-        infos = await run_in_threadpool(build_adapter(agent_cfg).list_sessions, cwd)
-        return {"sessions": [session.to_public() for session in infos]}
+        dirs = await run_in_threadpool(build_adapter(agent_cfg).list_dirs)
+        return {"dirs": [d.to_public() for d in dirs], "total": len(dirs)}
+
+    @app.get("/v1/sessions", dependencies=[auth],
+             response_model=SessionsResponse, responses=ERROR_RESPONSES)
+    async def sessions(cwd: str | None = None, agent: str | None = None,
+                       limit: int = Query(40, ge=1, le=200),
+                       cursor: str | None = None):
+        """Sessions, newest first. `cwd` is an **exact** directory match.
+
+        Paged rather than truncated: `total` is the real size of the selection,
+        so a short page is visibly a page and never a silent sample.
+        """
+        agent_cfg = cfg.agents.get(agent or cfg.default_agent)
+        if not agent_cfg:
+            raise ApiError(400, "unknown_agent", f"unknown agent '{agent}'")
+        try:
+            page = await run_in_threadpool(
+                build_adapter(agent_cfg).list_sessions, cwd, limit, cursor)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_request", str(exc)) from exc
+        return {"sessions": [s.to_public() for s in page.sessions],
+                "total": page.total, "next_cursor": page.next_cursor,
+                "has_more": page.next_cursor is not None}
 
     @app.post(
         "/v1/jobs", dependencies=[auth], response_model=JobAccepted,

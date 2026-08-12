@@ -37,7 +37,8 @@ validation. Unknown job-submission fields are rejected rather than ignored.
 | GET | `/v1/agents` | agents, models, defaults, capabilities, server features |
 | GET | `/v1/models?agent=` | retained model-catalog projection |
 | GET | `/v1/info?refresh=1` | cached cluster capabilities; optional background refresh |
-| GET | `/v1/sessions?cwd=&agent=` | resumable session index |
+| GET | `/v1/session-dirs?agent=` | directories holding sessions; complete, unpaged |
+| GET | `/v1/sessions?cwd=&agent=&limit=&cursor=` | sessions in one directory (exact match), paged |
 | POST | `/v1/jobs` | validate, persist, and enqueue a job |
 | GET | `/v1/jobs?limit=&cursor=` | paged job summaries |
 | GET | `/v1/jobs/{ref}` | full public job detail |
@@ -91,11 +92,47 @@ Capabilities are adapter/mode-specific. Consult them before steering or
 resuming. `/v1/models` remains for compatibility; configured model ids are
 advertised strings and are passed to the backend verbatim.
 
-### `GET /v1/sessions?cwd=<dir>&agent=<name>`
+### `GET /v1/session-dirs?agent=<name>`
 
-Returns `{"sessions":[...]}`. `agent` defaults to the gateway default. `cwd`
-prioritizes matching sessions; it is not authorization. Job cwd and file paths
-are still constrained by configured allowed directories.
+Directories that hold sessions — the "where is there work to continue" view,
+needed before you know which project to ask about.
+
+```json
+{ "dirs": [
+    {"cwd": "/project/x", "sessions": 88,
+     "last_active": "2026-08-11T18:22:04.113-05:00",
+     "latest_session_id": "3cf736d5-…", "latest_title": "fix the parser"}
+  ], "total": 12 }
+```
+
+**Returned whole, never paged.** Its size is bounded by how many projects exist
+(tens), not by a window, so a project cannot silently drop out of it.
+
+### `GET /v1/sessions?cwd=<dir>&agent=<name>&limit=&cursor=`
+
+Sessions, newest first. Returns
+`{"sessions":[...], "total", "next_cursor", "has_more"}`.
+
+**`cwd` is an exact directory match, not a prefix.** A project and a
+sub-project keep separate indexes, so a count means what it says. Paths are
+compared normalised, so `D:\x`, `D:/x` and `d:\X` are the same directory — the
+two backends genuinely spell them differently.
+
+Omit `cwd` for every session, still paged. `total` is the real size of the
+selection either way, so a short page is visibly a page rather than a silent
+sample.
+
+**Paging is by opaque `cursor`, not `after=N`.** Sessions have no monotonic
+sequence; ordering on a timestamp alone would skip or repeat rows whenever two
+share a millisecond.
+
+> Superseded shape: this route used to return a bare `{"sessions":[...]}` in
+> which `cwd` only *sorted*, after the newest `limit * 3` sessions had already
+> been selected across all directories. On a real store that hid entire
+> projects — two holding 33 and 88 sessions returned nothing at all.
+
+Neither route is authorization: job cwd and file paths remain constrained by the
+configured allowed directories.
 
 ## Jobs
 

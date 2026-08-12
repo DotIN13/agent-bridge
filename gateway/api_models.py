@@ -288,8 +288,27 @@ class ModelsResponse(BaseModel):
     default: str | None = None
 
 
+class SessionDir(BaseModel):
+    """A directory that holds sessions, with just enough to act on it."""
+    cwd: str
+    sessions: int
+    last_active: IsoTimestamp = None
+    latest_session_id: str | None = None
+    latest_title: str | None = None
+
+
+class SessionDirsResponse(BaseModel):
+    """Complete by construction: bounded by how many projects exist, not by a
+    window, so nothing can silently drop out the way sessions once did."""
+    dirs: list[SessionDir]
+    total: int
+
+
 class SessionsResponse(BaseModel):
     sessions: list[dict[str, Any]]
+    total: int = 0
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class UploadResponse(BaseModel):

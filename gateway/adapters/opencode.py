@@ -25,7 +25,8 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import AgentConfig
-from ..sessions import SessionInfo
+from ..sessions import (DirInfo, SessionInfo, SessionPage, _cursor_decode,
+                        _cursor_encode, _norm)
 from .base import Event, JobSpec, RunResult, interrupt_group, resume_cwd
 
 _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
@@ -63,46 +64,106 @@ class OpenCodeAdapter:
                 return win_db
         return db
 
-    def list_sessions(self, cwd_filter: str | None = None) -> list[SessionInfo]:
+    def _connect(self):
         db = self._db_path()
         if not db.is_file():
-            return []
-        limit = self.cfg.max_sessions_in_index
+            return None
         try:
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         except sqlite3.Error:
+            return None
+        con.row_factory = sqlite3.Row
+        return con
+
+    def list_dirs(self) -> list[DirInfo]:
+        """Every directory with sessions, complete and unpaged.
+
+        `directory` is a column here, so the grouping the Claude backend has to
+        infer from folders is just a GROUP BY. One scan with window functions
+        gets the count and the newest session per directory together.
+        """
+        con = self._connect()
+        if con is None:
             return []
         try:
-            con.row_factory = sqlite3.Row
             rows = con.execute(
-                "SELECT id, directory, title, time_updated FROM session "
-                "WHERE time_archived IS NULL "
-                "ORDER BY time_updated DESC LIMIT ?",
-                (limit * 3,)).fetchall()
+                "SELECT directory, id, title, time_updated, n FROM ("
+                "  SELECT directory, id, title, time_updated,"
+                "         COUNT(*) OVER (PARTITION BY directory) AS n,"
+                "         ROW_NUMBER() OVER (PARTITION BY directory"
+                "             ORDER BY time_updated DESC) AS rn"
+                "  FROM session WHERE time_archived IS NULL AND directory IS NOT NULL"
+                ") WHERE rn = 1").fetchall()
+        except sqlite3.Error:
+            return []
+        finally:
+            con.close()
+        out = [DirInfo(cwd=r["directory"], sessions=int(r["n"]),
+                       last_active=(r["time_updated"] or 0) / 1000.0,
+                       latest_session_id=r["id"],
+                       latest_title=r["title"] or None)
+               for r in rows]
+        out.sort(key=lambda d: -d.last_active)
+        return out
+
+    def list_sessions(self, cwd: str | None = None, limit: int = 40,
+                      cursor: str | None = None) -> SessionPage:
+        """One page of sessions, newest first, optionally for one directory.
+
+        Previously this read the newest `limit * 3` sessions across *every*
+        directory and only then ranked by cwd, so a quiet project was invisible
+        whenever a busy one filled the window -- measured on a real store, two
+        directories holding 33 and 88 sessions returned zero rows each.
+        Filtering in SQL puts the limit after the filter, where it belongs.
+        """
+        con = self._connect()
+        if con is None:
+            return SessionPage([], 0, None)
+        try:
+            where = "time_archived IS NULL"
+            params: list = []
+            if cwd:
+                # Exact match, resolved in Python: the two backends spell paths
+                # differently and SQL cannot normalise separators or case.
+                target = _norm(cwd)
+                dirs = [r[0] for r in con.execute(
+                    "SELECT DISTINCT directory FROM session "
+                    "WHERE directory IS NOT NULL").fetchall()
+                    if r[0] and _norm(r[0]) == target]
+                if not dirs:
+                    return SessionPage([], 0, None)
+                where += f" AND directory IN ({','.join('?' * len(dirs))})"
+                params.extend(dirs)
+            total = con.execute(
+                f"SELECT COUNT(*) FROM session WHERE {where}", params).fetchone()[0]
+            page_where, page_params = where, list(params)
+            if cursor:
+                after_ts, after_id = _cursor_decode(cursor)
+                page_where += " AND (time_updated < ? OR (time_updated = ? AND id > ?))"
+                page_params += [int(after_ts * 1000), int(after_ts * 1000), after_id]
+            rows = con.execute(
+                f"SELECT id, directory, title, time_updated FROM session "
+                f"WHERE {page_where} ORDER BY time_updated DESC, id LIMIT ?",
+                page_params + [limit + 1]).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
             infos: list[SessionInfo] = []
             for r in rows:
                 title, summary, nmsg = _session_details(con, r["id"])
-                cwd = r["directory"] or ""
+                directory = r["directory"] or ""
                 infos.append(SessionInfo(
-                    session_id=r["id"],
-                    cwd=cwd,
-                    project=Path(cwd).name if cwd else "",
+                    session_id=r["id"], cwd=directory,
+                    project=Path(directory).name if directory else "",
                     title=title or r["title"] or "(no title)",
-                    summary=summary,
-                    git_branch="",
+                    summary=summary, git_branch="",
                     last_active=(r["time_updated"] or 0) / 1000.0,
-                    messages=nmsg,
-                    path="",
-                ))
+                    messages=nmsg, path=""))
         finally:
             con.close()
-
-        if cwd_filter:
-            cf = str(Path(cwd_filter).expanduser().resolve())
-            infos.sort(key=lambda s: (not _under(s.cwd, cf), -s.last_active))
-        else:
-            infos.sort(key=lambda s: -s.last_active)
-        return infos[:limit]
+        nxt = None
+        if has_more and infos:
+            nxt = _cursor_encode(infos[-1].last_active, infos[-1].session_id)
+        return SessionPage(infos, int(total), nxt)
 
     # -- run --------------------------------------------------------------
     def run(self, spec: JobSpec, emit: Callable[[Event], None]) -> RunResult:

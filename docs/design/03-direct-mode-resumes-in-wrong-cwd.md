@@ -73,7 +73,7 @@ session's context, apply it to a sibling repo). Leaning toward storing the raw
 value.
 
 Fallbacks to define: session not in the index (it may have aged out — see
-[04](../todo/04-session-index-cwd-is-sort-only.md)), or its recorded cwd resolves
+[04](04-session-index-cwd-is-sort-only.md)), or its recorded cwd resolves
 outside `allowed_dirs`. Falling back to `default_cwd` reproduces today's bug
 quietly; erroring is louder but blocks a resume that would otherwise work.
 
@@ -110,7 +110,7 @@ one being fixed.
 - `sessions.find(session_id)` — a targeted by-id lookup, deliberately **not**
   built on `scan()`. Using the bounded index would mean a session outside the
   window reads as absent and falls back to the default, reproducing this exact
-  bug for old sessions (and coupling the fix to [04](../todo/04-session-index-cwd-is-sort-only.md)).
+  bug for old sessions (and coupling the fix to [04](04-session-index-cwd-is-sort-only.md)).
 - `adapters/base.resume_cwd()` — one resolver both adapters share: validates
   through `AgentConfig.resolve_cwd` so a recorded cwd can never escape
   `allowed_dirs`, emits the `stage: "cwd"` status event on substitution, and
