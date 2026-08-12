@@ -10,12 +10,21 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 
 **Flags and subcommands are in `ab help` and `ab <cmd> --help`.** This file is only what the CLI cannot tell you.
 
+## Workflow
+
+1. **`ab gateways`** — which are configured and which are actually reachable. Never assume; a down gateway is data, not an error.
+2. **`ab health`** — the one you are about to use. Exits 1 when unreachable, so branch on it before doing anything else.
+3. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
+4. **`ab sessions`** — which directories have work at all.
+5. **`ab sessions --cwd <dir>`** — the sessions in that project. Pick one to continue; a new session is a new subject.
+6. **`ab submit -F brief.md [--session <id>]`** — the brief **must** tell the worker to `ab-notify` its status at milestones and on finish. The job does not close without that report, so a brief that omits it is a job that hangs.
+7. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it: use `--for turn` to collect what the agent said now, and come back for the report later.
+
 ## Starting a job
 
 - Find `ab` on PATH; else a checkout (`python3 <repo>/client/ab.py`); else ask the user for the path. Set `AB` once and reuse it.
-- **Always `ab gateways`, then `ab health`, before any work.** `gateways` always exits 0 — a down gateway is data; `health` exits 1 when unreachable, so scripts branch on it. A config listing proves nothing: `--no-probe` contacts nothing.
-- **Always `ab jobs`, then `ab sessions`, then `ab sessions --cwd <dir>` before submitting anything.** The first shows directories that have work; the second the sessions inside one.
-- Always reuse existing sessions for the same project, and submit to the same session for the same subject. A new session is a new subject, not a new turn.
+- `gateways` always exits 0 — a down gateway is data, not a failure. `health` exits 1 when unreachable, so scripts branch on that one. A config listing proves nothing: `--no-probe` contacts nothing.
+- Reuse existing sessions for the same project, and submit to the same session for the same subject. A new session is a new subject, not a new turn.
 
 | | Situation | Do |
 |---|---|---|

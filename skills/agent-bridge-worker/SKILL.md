@@ -12,6 +12,19 @@ brief you are executing. `ab job <id>` shows which backend and model you are.
 **Flags are in `ab help` and `ab-notify --help`.** This file is the judgement
 that is not in either.
 
+## Workflow
+
+1. **Inventory, then do the work.** You can see this machine; the caller cannot.
+2. **If it hands off to a scheduler or a long background run**, submit it and
+   monitor with bounded probes or a background wait — never a blocking sleep,
+   which just hits the tool timeout.
+3. **`ab-notify --status running` at real milestones**, so a long run does not
+   look hung. Every call carries a `--report-id`.
+4. **`ab-notify --status finished` — or `failed` — is mandatory.** It is what
+   closes the job. Send it from this turn if the work finished here; from inside
+   the batch script if the work outlives your turn. No report, no finish: the
+   job sits until its deadline and is failed as `report_timeout`.
+
 ## Your remit
 
 The caller plans and reviews. You investigate and execute.
