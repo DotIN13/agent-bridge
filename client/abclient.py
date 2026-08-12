@@ -104,7 +104,7 @@ def _token_for(gw: dict, required: bool = True) -> str:
     if gw.get("token_file"):
         path = Path(gw["token_file"]).expanduser()
         if path.exists():
-            return path.read_text().strip()
+            return path.read_text(encoding="utf-8").strip()
     if required:
         raise ConfigError("no token (set token, token_env, or token_file)")
     return ""
@@ -121,7 +121,7 @@ def load_gateways(explicit: str | None = None) -> Gateways:
         path = Path(candidate).expanduser()
         if not path.exists():
             continue
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if path.suffix == ".toml":
             import tomllib
             cfg = tomllib.loads(text)

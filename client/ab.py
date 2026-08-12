@@ -482,9 +482,9 @@ def cmd_events(args):
         # rather than the first page; `--after 0` restores top-down reading, and
         # `total` in the output makes the truncation visible rather than silent.
         tail = args.tail
-        if tail is None and not args.after:
+        if tail is None and args.after is None:
             tail = DEFAULT_TAIL
-        data = client.events(args.id, args.after, limit=args.limit, tail=tail,
+        data = client.events(args.id, args.after or 0, limit=args.limit, tail=tail,
                              until=args.until, types=args.type or ())
         _emit(args, data, lambda value: [
             print(f"{event['seq']:4} {_ts(event.get('ts'))} {event['type']}: "
@@ -502,7 +502,7 @@ def cmd_events(args):
     # been running for an hour costs a few lines rather than its whole log.
     # `--after 0` asks for the full replay explicitly; `--tail N` sizes it.
     start = args.after
-    if not start:
+    if start is None:
         prime = args.tail if args.tail is not None else FOLLOW_PRIME_TAIL
         recent = client.events(args.id, tail=prime, until=args.until,
                                types=args.type or ())
@@ -758,7 +758,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=_positive_int, metavar="N",
                     help=f"read the last N events (default {DEFAULT_TAIL} when "
                          f"no --after is given); cannot be combined with --after")
-    sp.add_argument("--after", type=int, default=0,
+    # Defaults to None, not 0: `--after 0` is the documented way to ask for a
+    # top-down read, so "absent" and "explicitly zero" have to stay distinct.
+    sp.add_argument("--after", type=int, default=None,
                     help="only seq > N; reads forward from the top")
     sp.add_argument("--until", type=int, help="stop at seq N")
     sp.add_argument("--type", action="append", choices=sorted(EVENT_TYPES),
@@ -804,9 +806,10 @@ def _validate(args) -> None:
     _mode(args)  # validates aliases/conflicts
     if hasattr(args, "fork") and not args.fork and not args.session:
         _err("--no-fork requires --session", EXIT_INVOCATION)
-    if getattr(args, "after", 0) < 0:
+    if (getattr(args, "after", None) or 0) < 0:
         _err("--after must be non-negative", EXIT_INVOCATION)
-    if getattr(args, "tail", None) is not None and getattr(args, "after", 0):
+    if (getattr(args, "tail", None) is not None
+            and getattr(args, "after", None) is not None):
         # Anchoring from both ends at once has no single sensible reading. The
         # server rejects this too; catching it locally keeps it an invocation
         # error (exit 2) rather than a transport one (exit 1).
@@ -815,7 +818,8 @@ def _validate(args) -> None:
     if getattr(args, "until", None) is not None:
         # --until pairs with --tail as a bounded window from the right, so only
         # compare against --after when that is the anchor in use.
-        floor = 0 if getattr(args, "tail", None) is not None else getattr(args, "after", 0)
+        floor = (0 if getattr(args, "tail", None) is not None
+                 else (getattr(args, "after", None) or 0))
         if args.until < 0 or args.until < floor:
             _err("--until must be non-negative and >= --after", EXIT_INVOCATION)
     if getattr(args, "prompt_file", None) and getattr(args, "prompt", None):

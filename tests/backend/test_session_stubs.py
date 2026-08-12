@@ -237,6 +237,28 @@ def test_dirs_title_is_the_first_human_prompt_not_a_command_wrapper(store):
     assert sessions.list_dirs()[0].latest_title == "fix the parser"
 
 
+def test_non_ascii_titles_survive_the_index(store):
+    """Transcripts are UTF-8; the reader must say so.
+
+    `open(path, "r")` uses the locale encoding, which on Windows is cp1252, so
+    every CJK title came back double-encoded -- the gateway served `c3a4 c2bd
+    c2a0` where the transcript held `e4 bd a0` (你). Every reader here now names
+    the encoding explicitly.
+    """
+    d = store / "D--proj"
+    d.mkdir()
+    path = d / "aaaaaaaa-0000-0000-0000-000000000000.jsonl"
+    path.write_text(
+        json.dumps({"type": "user", "cwd": r"D:\proj",
+                    "message": {"role": "user", "content": "你先了解一下 café 🎉"}},
+                   ensure_ascii=False) + "\n",
+        encoding="utf-8")
+    os.utime(path, (1_000, 1_000))
+
+    assert sessions.scan(cwd=r"D:\proj").sessions[0].title == "你先了解一下 café 🎉"
+    assert sessions.list_dirs()[0].latest_title == "你先了解一下 café 🎉"
+
+
 # -- opencode ------------------------------------------------------------
 
 

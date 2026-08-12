@@ -198,6 +198,16 @@ model wants almost every time it looks at a finished or wedged job.
 > makes the truncation visible rather than silent. It should be called out in
 > the changelog and in both skills, not slipped in.
 
+> **Correction, found in live testing after 10 shipped.** That escape hatch was
+> inert for its first five commits. `--after` was declared `default=0`, so
+> "absent" and "explicitly zero" were the same value: `--after 0` returned a
+> tail like any other read, `--after 0 --follow` primed instead of replaying,
+> and `--tail N --after 0` passed validation that `--tail N --after 3` failed.
+> The justification for the breaking default above rested entirely on an opt-out
+> that did not work. `--after` now defaults to `None`. Every test written at the
+> time used `--after 3` and stayed green throughout; the boundary value is the
+> one that mattered and the one nothing covered.
+
 **Fix follow's starting point.** `--follow` should prime from the tail and then
 stream — default `--tail 20`, with `--after 0 --follow` for a full replay. A
 follow that begins by replaying 400 historical events is not a follow.

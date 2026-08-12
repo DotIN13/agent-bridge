@@ -134,7 +134,7 @@ def _scan_file(path: Path, max_lines: int = 4000) -> SessionInfo | None:
     summary = ""
     messages = 0
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
                     break
@@ -306,7 +306,7 @@ def _has_conversation(path: Path, mtime: float, max_lines: int = 400) -> bool:
         return cached[1]
     found = False
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
                     found = True
@@ -348,7 +348,7 @@ def _first_title(path: Path, max_lines: int = 400) -> str | None:
     the one call an agent makes before it knows which project to ask about.
     """
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
                     break
@@ -409,7 +409,7 @@ def _dir_cwd(project_dir: Path) -> str | None:
 def _first_cwd(path: Path, max_lines: int = 50) -> str | None:
     """`cwd` from the first records of a transcript. It lands on line 3-4."""
     try:
-        with open(path, "r", errors="replace") as fh:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
                     break

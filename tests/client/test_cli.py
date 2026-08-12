@@ -229,6 +229,39 @@ def test_events_tail_conflicts_with_after(monkeypatch):
     assert exc.value.code == ab.EXIT_INVOCATION
 
 
+def test_after_zero_is_the_documented_escape_hatch(monkeypatch):
+    """`--after 0` must read top-down, and it is the boundary value.
+
+    `--after` used to default to 0, so "absent" and "explicitly zero" were the
+    same value and this -- the one opt-out design/08 offered for making `events`
+    tail by default -- silently returned a tail instead. Every test above used
+    `--after 3`, which is why the suite stayed green.
+    """
+    client = FakeHistoryClient()
+    monkeypatch.setattr(ab, "_client", lambda _args: client)
+    assert ab.main(["events", "job-1", "--after", "0", "--output", "json"]) == 0
+    assert client.events_calls[0]["tail"] is None
+    assert client.events_calls[0]["after"] == 0
+
+
+def test_tail_conflicts_with_after_zero_too(monkeypatch):
+    monkeypatch.setattr(ab, "_client", lambda _args: FakeHistoryClient())
+    with pytest.raises(SystemExit) as exc:
+        ab.main(["events", "job-1", "--tail", "5", "--after", "0"])
+    assert exc.value.code == ab.EXIT_INVOCATION
+
+
+def test_follow_after_zero_replays_instead_of_priming(monkeypatch):
+    """Following with `--after 0` asks for the whole log, not a short tail."""
+    client = FakeHistoryClient()
+    monkeypatch.setattr(ab, "_client", lambda _args: client)
+    assert ab.main(["events", "job-1", "-f", "--after", "0",
+                    "--output", "jsonl"]) == 0
+    primed = [c for c in client.events_calls
+              if c["tail"] == ab.FOLLOW_PRIME_TAIL]
+    assert not primed
+
+
 def test_events_passes_type_filter_to_the_server(monkeypatch):
     client = FakeHistoryClient()
     monkeypatch.setattr(ab, "_client", lambda _args: client)
