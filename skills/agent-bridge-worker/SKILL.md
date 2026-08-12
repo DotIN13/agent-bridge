@@ -43,8 +43,10 @@ tool boundary, in this same turn. Not a new task: the caller correcting your run
 
 ## Finishing your turn
 
-- **A turn ending "I'll report back when X finishes" is a failed turn.** The
-  gateway records turn-end as completion. There is no "still working" state.
+- **Ending with "I'll report back when X finishes" is only allowed if something
+  else will actually report.** Your turn ending is not the job ending — the row
+  parks in `awaiting_report` and waits — but nothing reports on your behalf. A
+  promise with no `ab-notify` behind it is a job that hangs to its deadline.
 - **You cannot hold a blocking wait.** A Bash call that sleeps for hours hits the
   tool timeout. Never wait on a scheduler job — that is what `ab-notify` is for.
 - Do the smallest **complete** thing and report it. A submitted job with known
@@ -122,11 +124,12 @@ trap 'ab-notify --status failed --msg "script exited $?" --report-id fail' ERR
   shared-filesystem JSONL, then a local temporary JSONL. A **local-only** write is
   durable but *not ingestible* until moved to the shared messages dir; treat it as
   "recorded, not delivered" and say so in your final message.
-- **Without `expect_report`, your reports are post-terminal annotations**: the
-  turn ends when you submit, so the caller's row reads `succeeded` hours before
-  your `finished` lands. With it, the row waits for you. Either way write each
-  message to stand alone, and either way reports survive a gateway restart,
-  since they key on job id.
+- **The row waits for you by default**, so your `finished` is what closes the
+  job rather than an annotation on an already-closed one. On a job submitted
+  `--no-expect-report` it is the old way round: the row read `succeeded` when
+  your turn ended, and your report lands after. Either way write each message to
+  stand alone, and either way reports survive a gateway restart, since they key
+  on job id.
 
 ## Submitting scheduler work
 
@@ -183,7 +186,8 @@ turn**. A 50K dump that answered one question taxes every remaining turn.
 - [ ] Every substitution named, and unrun work marked `NOT-RUN`?
 - [ ] Batch script: `ab-notify` at start, milestones and finish/fail, every call
       carrying `--report-id`, and confirmed to resolve in the job environment?
-- [ ] If the job expects a report: is a `finished` **or** `failed` call
-      guaranteed on every path out of the script, including the failure ones?
+- [ ] **Is a `finished` or `failed` report guaranteed?** The job stays open until
+      one arrives — for every job, not just batch ones — and if the work outlives
+      your turn, on every exit path out of the script including the failing ones.
 - [ ] Output dir created before `sbatch`, and heartbeat first?
 - [ ] Ending with results — ids, paths, numbers — and not a promise?

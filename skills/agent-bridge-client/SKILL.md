@@ -52,8 +52,8 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 - Narrow with `--type` before widening `--tail`, or a long job's tool results will flood you.
 - **Parse `--output json`**, and use `--output jsonl` when you want one typed record per line.
 - **`ab-notify` reports arrive as `message` events** — `ab events REF --type message` is the batch job's own progress log, separate from the agent's turn. What it ran is in `tool_use`/`tool_result`; there is no `ab-notify` or `tool` type, and `--type` rejects anything not in its list.
-- A `message` event carries the reporter's own `status` (`queued`/`running`/`finished`/`failed`), which is **not** the job's status. Without `--expect-report` a job row reads `succeeded` while its batch work is still `running`; with it the row stays `awaiting_report` until a `finished`/`failed` report closes it.
-- **Exit 4 is a timeout, and the job is still running** — it never cancels unless `--cancel-on-timeout`. Exit 3 is the job failing; inspecting a failed job still exits 0 unless `--fail-on-job-failure`.
+- A `message` event carries the reporter's own `status` (`queued`/`running`/`finished`/`failed`), which is **not** the job's status. By default the row stays `awaiting_report` until a `finished`/`failed` report closes it; under `--no-expect-report` the row reads `succeeded` while its batch work is still `running`.
+- **Exit 4 is a timeout, and the work is still outstanding** — it never cancels unless `--cancel-on-timeout`. Check the row before assuming an agent is alive: `awaiting_report` means the turn ended and the report has not come. Exit 3 is the job failing; inspecting a failed job still exits 0 unless `--fail-on-job-failure`.
 - **Transcripts are the last resort** — every tool call *and result*, megabytes. Filter on the remote host and download the extract. Claude Code keeps one file per session at `<home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl` (growing = working); opencode keeps one SQLite db, so `download` cannot help — run `opencode export <sessionID>` on the host.
 
 ## Files
