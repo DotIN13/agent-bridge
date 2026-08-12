@@ -17,7 +17,7 @@ sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
     AWAIT_SESSION_TIMEOUT, CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL,
-    Client, ConfigError, GatewayError, load_gateways,
+    WAIT_FOR, Client, ConfigError, GatewayError, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -345,7 +345,8 @@ def cmd_run(args):
     elif mode == "human" and args.stream:
         callback = _human_stream_printer()
     job = client.wait(accepted["id"], timeout=args.timeout, on_event=callback,
-                      cancel_on_timeout=args.cancel_on_timeout)
+                      cancel_on_timeout=args.cancel_on_timeout,
+                      until=getattr(args, "wait_for", "both"))
     if mode == "json":
         print(json.dumps(job, indent=2))
     elif mode == "jsonl":
@@ -449,6 +450,7 @@ def cmd_job(args):
 def cmd_wait(args):
     job = _client(args).wait(args.id, timeout=args.timeout,
                              cancel_on_timeout=args.cancel_on_timeout,
+                             until=getattr(args, "wait_for", "both"),
                              on_event=(lambda event: _emit_event(args, args.id, event))
                              if _mode(args) == "jsonl" else None)
     mode = _mode(args)
@@ -717,6 +719,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_sessions)
 
     sp = command("run", "submit a prompt and wait for completion")
+    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
+                    help="what to wait for: both (default), turn, report")
     prompt_flags(sp); job_flags(sp)
     sp.add_argument("--stream", action="store_true",
                     help="stream human assistant text; JSON remains one document")
@@ -756,6 +760,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id", metavar="REF", help=reference)
     sp.add_argument("--timeout", type=_positive_float, default=900.0)
     sp.add_argument("--cancel-on-timeout", action="store_true")
+    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
+                    help="what to wait for: both (default, the job is done), "
+                         "turn (the agent stopped talking), report (an "
+                         "ab-notify finished/failed)")
     sp.set_defaults(func=cmd_wait)
 
     sp = command("events", "read or follow a job event stream")

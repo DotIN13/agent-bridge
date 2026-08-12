@@ -21,6 +21,51 @@ except ImportError:  # copied client/ directory, without the repository root
     from _version import __version__ as CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+# Non-terminal: the turn ended but the work it started has not reported.
+AWAITING_REPORT = "awaiting_report"
+WAIT_FOR = ("both", "turn", "report")
+
+
+def _report_is_terminal(event: dict) -> bool:
+    """An ab-notify report that ends the work, as opposed to progress."""
+    if event.get("type") != "message":
+        return False
+    data = event.get("data") or {}
+    return data.get("status") in ("finished", "failed")
+
+
+def _may_have_ended(event: dict) -> bool:
+    """Is this the kind of event that could have moved the job?
+
+    The row is authoritative, but polling it after the stream pauses is far too
+    lazy: a parked job keeps its stream open on purpose, so `--for turn` would
+    sit through the whole read window after the milestone it wanted had already
+    passed. This says "worth re-checking now".
+    """
+    if _report_is_terminal(event):
+        return True
+    if event.get("type") != "status":
+        return False
+    return (event.get("data") or {}).get("stage") in ("done", "awaiting_report")
+
+
+def _wait_reached(job: dict, saw_report: bool, until: str) -> bool:
+    """Has the milestone the caller asked for actually happened?
+
+    Three, because a job now has two ends and they are hours apart: the
+    agent stops talking, and later the work it started reports. `both` is
+    the default and means the row is done however it got there.
+    """
+    status = job.get("status")
+    terminal = status in TERMINAL
+    if until == "turn":
+        return terminal or status == AWAITING_REPORT
+    if until == "report":
+        # Also stops on a terminal row: a job that failed, was canceled, or
+        # never expected a report is not going to send one, and blocking
+        # until the timeout would report "still running" about a finished job.
+        return saw_report or terminal
+    return terminal
 # Short by design: `ab gateways` probes every configured gateway, so this is
 # the worst case a listing waits on one dead entry, not a request budget.
 PROBE_TIMEOUT = 3.0
@@ -696,9 +741,11 @@ class Client:
                     raise _unreachable(self.base, path, exc) from exc
 
     def wait(self, job_id: str, *, timeout: float = 900.0, on_event=None,
-             types=None, cancel_on_timeout: bool = False) -> dict:
+             types=None, cancel_on_timeout: bool = False,
+             until: str = "both") -> dict:
         deadline = time.monotonic() + timeout
         after = 0
+        saw_report = False
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -712,12 +759,15 @@ class Client:
                     read_timeout=max(0.1, min(30.0, remaining)), reconnects=2,
                     deadline=deadline):
                 after = max(after, int(event.get("seq", 0)))
+                saw_report = saw_report or _report_is_terminal(event)
                 if on_event:
                     on_event(event)
+                if _may_have_ended(event):
+                    break
                 if time.monotonic() >= deadline:
                     break
             job = self.get_job(job_id)
-            if job.get("status") in TERMINAL:
+            if _wait_reached(job, saw_report, until):
                 return job
 
     def _poll_terminal(self, job_id: str, timeout: float, on_event=None,

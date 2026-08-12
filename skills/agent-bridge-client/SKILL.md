@@ -42,6 +42,7 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 - **Every job waits for a report by default.** When the turn ends the job parks in `awaiting_report`, and only `ab-notify --status finished|failed` closes it — so `ab wait` waits for the work, not for the agent to stop talking. Say so in the brief: the worker must report, or the job never closes.
 - **`--no-expect-report` for a turn that is the whole job** — a question answered, a file read, anything with no work outliving the turn. Use it deliberately; a job whose worker never reports sits until the gateway's deadline and then fails with `report_timeout`, which means it went quiet, not that the work failed.
 - A parked job is **not** `running`: no agent is alive, its session is free to resume, and it survives a gateway restart.
+- **`ab wait` has two ends to choose between.** Default waits for both — the job is done. `--for turn` returns as soon as the agent stops talking, with the work still out there, which is what you want before steering or reading the turn's own result. `--for report` waits specifically for the `ab-notify` finish.
 - **A coding-agent worker cannot wait hours for scheduler work.** For batch jobs, tell the remote agent to submit, return the identifiers, and end its turn — and always have the batch script report itself with `ab-notify` (see the worker skill). If the remote agent is running background work rather than a scheduler job, it can monitor that itself and `ab-notify` when done.
 
 ## Reading results

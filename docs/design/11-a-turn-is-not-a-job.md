@@ -116,6 +116,30 @@ ab wait                  -> exit 0
 The restart is proved by the *reason*: the job closed as `batch_report`, not
 `gateway_restarted`.
 
+## `ab wait --for`
+
+Parking gave a job two ends, and the first version of this left `wait` able to
+stop at only one of them — the later one. That silently removed a capability:
+before the flip, `ab wait` returned at turn end, and afterwards nothing could.
+
+```
+ab wait REF              both    the job is done, however it got there
+ab wait REF --for turn   turn    the agent stopped talking; work still running
+ab wait REF --for report report  an ab-notify finished/failed specifically
+```
+
+`--for report` also returns on a terminal row, because a canceled job, a failed
+turn, or one submitted `--no-expect-report` is never going to send a report, and
+blocking to the timeout to then claim "still running" about a job that ended ten
+minutes ago is a lie with a delay attached.
+
+The subtlety is *when* the milestone is noticed. The row is authoritative, but it
+was only consulted after the event stream paused — and a parked job keeps its
+stream open on purpose, so `--for turn` sat through the entire 60s timeout on a
+milestone that had passed one second in. It measured 60s before the fix and 1s
+after. The loop now re-checks the row as soon as an event arrives that could have
+moved it: a `status` at stage `done`/`awaiting_report`, or a terminal report.
+
 ## Left open
 
 The turn's result and the batch's result now share one `result` field, and the
