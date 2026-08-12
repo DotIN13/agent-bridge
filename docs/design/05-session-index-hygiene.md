@@ -137,6 +137,6 @@ messages). Dropping them cost nothing — now confirmed rather than assumed.
 
 ### Left open
 
-Title quality, split out as [10](../todo/10-untitled-sessions-and-a-slow-dirs-view.md):
+Title quality, split out as [10](10-untitled-sessions-and-a-slow-dirs-view.md):
 11 real sessions still read `(no prompt captured)`, and `list_dirs` spends ~390 ms
 parsing full transcripts for titles it could read in a few lines.

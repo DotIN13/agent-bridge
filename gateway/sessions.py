@@ -210,9 +210,10 @@ def scan(limit: int = 40, cwd: str | None = None,
     a busy one had filled the window. Filtering the candidate files first makes
     the bound per-directory, and `total` reports the real size either way.
 
-    Metadata-only transcripts are dropped before the limit and before `total`,
-    so a count never includes a row the caller cannot resume into. See
-    `_has_message` for why that is affordable.
+    Transcripts in which nothing happened -- subagent metadata, slash-command
+    residue -- are dropped before the limit and before `total`, so a count never
+    includes a row the caller cannot resume into. See `_has_conversation` for
+    what counts and why it is affordable.
     """
     if not _PROJECTS.is_dir():
         return SessionPage([], 0, None)
@@ -259,11 +260,10 @@ def list_dirs() -> list[DirInfo]:
         if not files:
             continue                      # only stubs here; nothing to resume
         newest = max(files, key=lambda p: p.stat().st_mtime)
-        info = _scan_file(newest)
         out.append(DirInfo(
             cwd=cwd, sessions=len(files), last_active=newest.stat().st_mtime,
             latest_session_id=newest.stem,
-            latest_title=info.title if info else None))
+            latest_title=_first_title(newest)))
     out.sort(key=lambda d: -d.last_active)
     return out
 
@@ -272,20 +272,33 @@ def _project_dirs() -> list[Path]:
     return [d for d in _PROJECTS.iterdir() if d.is_dir()]
 
 
-def _has_message(path: Path, mtime: float, max_lines: int = 400) -> bool:
-    """Does this transcript hold any conversation at all?
+def _has_conversation(path: Path, mtime: float, max_lines: int = 400) -> bool:
+    """Did anything actually happen in this transcript?
 
-    Claude Code writes a transcript for every subagent, but a subagent's turns
-    are recorded inline in its *parent*, so the child file ends up holding only
-    `ai-title`/`agent-name` metadata -- a session id with nothing behind it.
-    Resuming one lands in an empty conversation, so they are not sessions in the
-    sense this index means, and 10 of the 106 rows here were exactly that.
+    Two kinds of file carry a session id with nothing behind it, and counting
+    `user`/`assistant` records does not separate either of them from real work.
+
+    **Subagent transcripts.** Claude Code writes one per subagent but records the
+    subagent's turns inline in its *parent*, so the child keeps only
+    `ai-title`/`agent-name`. Ten of 106 rows here.
+
+    **Slash-command residue.** Someone types `/login` or `/resume`, and the
+    caveat, the command and its stdout are each stored as a `user` record. Eleven
+    more rows here, showing `messages` of 2-6 and holding no prompt, no reply and
+    no tool call -- `/resume` answered "that session is still running as a
+    background agent" and the session was abandoned.
+
+    So the test is whether a human spoke or the agent acted: a `user` record with
+    text surviving `_clean_user_text`, or an assistant `tool_use`. The tool_use
+    arm matters for a custom slash command that drives real work with no prose;
+    none exist on this store, but the arm costs nothing and its absence would be
+    a false negative, which is the failure this index keeps being fixed for.
 
     Cheap enough to run before the limit, which is the only place it works:
-    filtering a page after slicing it frees no slots and returns short pages.
-    The first real record lands on line 3 of a real transcript, so the early
-    exit fires almost immediately -- 12 ms across 113 files and 573 MB here.
-    Metadata-only files are read whole, but they are under 1.5 KB.
+    filtering a page after slicing it frees no slots and returns short pages. A
+    real prompt lands within the first few records, so the early exit fires
+    almost immediately. Past `max_lines` the answer is yes -- an unbounded read
+    is not worth a rarer mistake in the safe direction.
     """
     key = str(path)
     cached = _HAS_MSG.get(key)
@@ -296,7 +309,7 @@ def _has_message(path: Path, mtime: float, max_lines: int = 400) -> bool:
         with open(path, "r", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
-                    found = True   # far past any metadata preamble
+                    found = True
                     break
                 line = line.strip()
                 if not line.startswith("{") or '"type"' not in line:
@@ -305,19 +318,61 @@ def _has_message(path: Path, mtime: float, max_lines: int = 400) -> bool:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("type") in ("user", "assistant"):
-                    found = True
-                    break
+                rtype = rec.get("type")
+                msg = rec.get("message")
+                if not isinstance(msg, dict):
+                    continue
+                if rtype == "user":
+                    if _clean_user_text(msg.get("content")):
+                        found = True
+                        break
+                elif rtype == "assistant":
+                    content = msg.get("content")
+                    if isinstance(content, list) and any(
+                            isinstance(b, dict) and b.get("type") == "tool_use"
+                            for b in content):
+                        found = True
+                        break
     except OSError:
         return False
     _HAS_MSG[key] = (mtime, found)
     return found
 
 
+def _first_title(path: Path, max_lines: int = 400) -> str | None:
+    """The first human-authored prompt, read without parsing the whole file.
+
+    `list_dirs` wants one title per directory and nothing else, but `_scan_file`
+    parses up to 4000 lines to also count messages and collect a summary that
+    this caller discards -- 379 ms of the 390 ms the dirs view used to cost, on
+    the one call an agent makes before it knows which project to ask about.
+    """
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                line = line.strip()
+                if not line.startswith("{") or '"user"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = rec.get("message")
+                if rec.get("type") == "user" and isinstance(msg, dict):
+                    text = _clean_user_text(msg.get("content"))
+                    if text:
+                        return text[:200]
+    except OSError:
+        return None
+    return None
+
+
 def _resumable(root: Path) -> list[Path]:
     """Transcripts in one folder that something could actually be resumed into."""
     return [p for p in root.glob("*.jsonl")
-            if _RESUMABLE_ID.match(p.stem) and _has_message(p, p.stat().st_mtime)]
+            if _RESUMABLE_ID.match(p.stem) and _has_conversation(p, p.stat().st_mtime)]
 
 
 def _dir_cwd(project_dir: Path) -> str | None:

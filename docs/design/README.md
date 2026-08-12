@@ -18,6 +18,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [06](06-agent-first-cli-api.md) | Making the CLI contract agent-first: output protocol, exit codes, safe transfers | 0.3.0 |
 | [07](07-backend-api-contract.md) | Typed HTTP contract, monotonic events, idempotency, restart recovery | 0.3.0 |
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |
+| [10](10-untitled-sessions-and-a-slow-dirs-view.md) | Slash-command residue is not a session; the dirs view got ~65x faster | after 0.3.0 |
 
 ## The load-bearing bits
 
@@ -38,12 +39,17 @@ letting the session's recorded cwd always win means nothing downstream needs to
 know. The override is announced on the event stream, which is what makes
 overriding an explicit `--cwd` acceptable rather than another silent substitution.
 
-**04 and 05 are one subject in two passes**, and 05 is the reason to be careful
-with either. It was filed as cosmetic and was not: a folder's directory is read
-out of its transcripts, subagent stubs record none, so enough fresh stubs made an
-entire project resolve to nothing and drop out of both views. Anything that
-touches how transcripts are filtered should run
-`tests/backend/test_session_stubs.py`, which pins that case by name.
+**04, 05 and 10 are one subject in three passes**, and the later two are the
+reason to be careful with any of it. 05 was filed as cosmetic and was not: a
+folder's directory is read out of its transcripts, subagent stubs record none, so
+enough fresh stubs made an entire project resolve to nothing and drop out of both
+views. 10 then found that 05's own predicate was too loose — it counted `user`
+records, and slash-command wrappers are `user` records.
+
+The rule those three converge on: **a session exists if a human spoke or the
+agent acted.** Anything touching how transcripts are filtered should run
+`tests/backend/test_session_stubs.py`, which pins each failure by name — including
+the custom-slash-command case that no session on the development store exercises.
 
 **08 introduced the only breaking default in the set**: `ab events REF` returns
 the last 50 rather than the first 500. `--after 0` restores the old reading.

@@ -126,10 +126,13 @@ sample.
 sequence; ordering on a timestamp alone would skip or repeat rows whenever two
 share a millisecond.
 
-**Both routes list only sessions that hold a conversation**, and the counts match
-the listings. Claude Code writes a transcript per subagent but records its turns
-in the parent, leaving a child file of pure metadata: a real id, a real title,
-and nothing to resume into. `GET /v1/jobs` and a resume by explicit id are
+**Both routes list a session only if a human spoke or the agent acted**, and the
+counts match the listings. Three kinds of transcript exist without anything
+having happened in them: subagent files (Claude Code writes one per subagent but
+records its turns in the parent), slash-command residue (`/login`, `/resume` —
+the caveat, command and stdout are each stored as a `user` record, so a naive
+count reads 3 messages), and opencode sessions created and never used. Each has a
+real id and looks resumable. `GET /v1/jobs` and a resume by explicit id are
 unaffected — only the recommendations are filtered.
 
 > Superseded shape: this route used to return a bare `{"sessions":[...]}` in

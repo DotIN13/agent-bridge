@@ -120,10 +120,11 @@ The second is an **exact** directory match, not a prefix: `/project/x` and
 normalise, so `D:\x`, `D:/x` and `d:\X` all match. Page with `--limit` and
 `--cursor` (not `--after`; sessions have no sequence to count).
 
-Both views list only sessions holding a conversation, and counts match listings.
-Subagents leave metadata-only transcripts — real id, real title, nothing to
-resume into — so they are not offered. A `--session <id>` you name explicitly is
-still honoured; only the recommendations are filtered.
+Both views list a session only if **a human spoke or the agent acted**, and
+counts match listings. Subagent transcripts and slash-command residue (`/login`,
+`/resume`) carry a real id and look resumable while holding nothing, so they are
+not offered. A `--session <id>` you name explicitly is still honoured; only the
+recommendations are filtered.
 
 ## Continue existing work — first match wins
 
