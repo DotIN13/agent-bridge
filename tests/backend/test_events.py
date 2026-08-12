@@ -91,6 +91,58 @@ def test_report_id_deduplicates_across_http_and_file_fallback(tmp_path):
     db.close()
 
 
+def test_a_report_carrying_a_timestamp_is_accepted(tmp_path):
+    """`ab-notify` always sends an epoch `ts`, and with `--report-id`.
+
+    That combination raised ValueError -> HTTP 500: one line rewrote `ts` to ISO
+    before hashing, and the report branch then re-derived its own timestamp by
+    calling float() on the string that line had just written. The recommended
+    invocation was the broken one. Every test above omits `ts`, which is why
+    they stayed green.
+    """
+    db = Database(str(tmp_path / "events.db"))
+    job = make_job(db)
+    row = db.add_message(job, {"status": "running", "msg": "12/24",
+                               "report_id": "p12", "ts": 1786500000.0})
+    assert row["duplicate"] is False
+    event = db.events_after(job, 0)[0]
+    # Timestamped from the payload, not from arrival, and published as ISO.
+    assert event["ts"] == 1786500000.0
+    assert event["data"]["ts"].startswith("2026-")
+    db.close()
+
+
+def test_a_timestamped_report_keeps_one_identity_across_transports(tmp_path):
+    """The fallback path has to normalise too, or `ts` splits the dedup key."""
+    db = Database(str(tmp_path / "events.db"))
+    job = make_job(db)
+    payload = {"status": "running", "report_id": "both-ways", "ts": 1786500000.0}
+    first = db.add_message(job, payload)
+    messages = tmp_path / "messages"
+    messages.mkdir()
+    (messages / f"{job}.jsonl").write_text(json.dumps(payload) + "\n")
+    assert db.ingest_messages(job, str(messages)) == 0
+    assert len(db.events_after(job, 0)) == 1
+    assert db.events_after(job, 0)[0]["seq"] == first["seq"]
+    db.close()
+
+
+def test_normalising_a_report_twice_changes_nothing(tmp_path):
+    """Idempotent, so an already-ISO `ts` survives and re-ingestion is safe."""
+    db = Database(str(tmp_path / "events.db"))
+    job = make_job(db)
+    first = db.add_message(job, {"status": "running", "report_id": "iso",
+                                 "ts": 1786500000.0})
+    stored = db.events_after(job, 0)[0]["data"]["ts"]
+    # Feed the stored (ISO) form back in: same identity, same row, same instant.
+    again = db.add_message(job, {"status": "running", "report_id": "iso",
+                                 "ts": stored})
+    assert again["seq"] == first["seq"]
+    assert again["duplicate"] is True
+    assert db.events_after(job, 0)[0]["ts"] == 1786500000.0
+    db.close()
+
+
 def test_filesystem_reports_are_streamed_bounded_and_nonobjects_are_safe(
         client, auth, gateway):
     accepted = client.post("/v1/jobs", headers=auth,

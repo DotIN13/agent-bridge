@@ -16,8 +16,38 @@ import threading
 import time
 import uuid
 
+import datetime
+
 from .api_models import iso_local
 from typing import Any
+
+
+def _normalise_report(data: dict) -> tuple[dict, float]:
+    """Return the payload with an ISO `ts`, plus the epoch to timestamp it with.
+
+    `ab-notify` always sends an epoch float, and a report is otherwise the one
+    place a bare epoch still reaches a reader -- hidden inside a passthrough dict
+    the response models never touch. The event's own timestamp still needs the
+    number, so both come back rather than the caller re-deriving one from the
+    other: doing that is what broke the `--report-id` path, which parsed a `ts`
+    another line had already rewritten to a string.
+
+    Idempotent, and applied by every ingestion path before hashing, so the same
+    report keeps one dedup identity whether it arrives over HTTP, through the
+    shared-filesystem fallback, or twice.
+    """
+    raw = data.get("ts")
+    if isinstance(raw, bool) or raw is None:
+        return data, time.time()
+    if isinstance(raw, (int, float)):
+        epoch = float(raw)
+        return {**data, "ts": iso_local(epoch)}, epoch
+    if isinstance(raw, str):
+        try:                                  # already normalised; leave it alone
+            return data, datetime.datetime.fromisoformat(raw).timestamp()
+        except ValueError:
+            return data, time.time()
+    return data, time.time()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -533,7 +563,8 @@ class Database:
         return out
 
     def _report_locked(self, job_id: str, source: str, report_id: str,
-                       request_hash: str, data: dict) -> tuple[dict, bool]:
+                       request_hash: str, data: dict,
+                       epoch: float) -> tuple[dict, bool]:
         existing = self._conn.execute(
             "SELECT request_hash,seq FROM external_reports "
             "WHERE job_id=? AND source=? AND report_id=?",
@@ -548,8 +579,7 @@ class Database:
             row["data"] = json.loads(row["data"])
             row["job_id"] = job_id
             return row, True
-        row = self._append_event_locked(
-            job_id, "message", data, float(data.get("ts") or time.time()))
+        row = self._append_event_locked(job_id, "message", data, epoch)
         self._conn.execute(
             "INSERT INTO external_reports(job_id,source,report_id,request_hash,seq) "
             "VALUES (?,?,?,?,?)", (job_id, source, report_id, request_hash, row["seq"]))
@@ -558,16 +588,7 @@ class Database:
     def add_message(self, job_id: str, data: dict,
                     report_id: str | None = None) -> dict:
         report_id = report_id or data.get("report_id")
-        # `ab-notify` sends an epoch `ts`. Keep the number for the event's own
-        # timestamp, but publish ISO inside `data` too: a report is otherwise the
-        # one place a bare epoch still reaches a reader, hidden in a passthrough
-        # dict the models never touch. Rewritten before hashing so a retry with
-        # the same payload keeps the same dedup identity.
-        raw_ts = data.get("ts")
-        epoch = float(raw_ts) if isinstance(raw_ts, (int, float)) \
-            and not isinstance(raw_ts, bool) else time.time()
-        if raw_ts is not None:
-            data = {**data, "ts": iso_local(epoch)}
+        data, epoch = _normalise_report(data)
         request_hash = hashlib.sha256(
             json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         with self._lock:
@@ -575,7 +596,7 @@ class Database:
             try:
                 if report_id:
                     row, duplicate = self._report_locked(
-                        job_id, "report", str(report_id), request_hash, data)
+                        job_id, "report", str(report_id), request_hash, data, epoch)
                 else:
                     row = self._append_event_locked(
                         job_id, "message", data, epoch)
@@ -649,13 +670,18 @@ class Database:
                         report_id = str(explicit_id or hashlib.sha256(
                             f"{os.path.abspath(path)}:{index}:{line_digest}".encode()
                         ).hexdigest())
+                        # Same normalisation as the HTTP path, and before the
+                        # hash: a report that arrives both ways must reduce to
+                        # one identity, not two rows that disagree about `ts`.
+                        data, epoch = _normalise_report(data)
                         request_hash = hashlib.sha256(json.dumps(
                             data, sort_keys=True, separators=(",", ":")
                         ).encode()).hexdigest()
                         source_kind = "report" if explicit_id else "file"
                         try:
                             _row, duplicate = self._report_locked(
-                                job_id, source_kind, report_id, request_hash, data)
+                                job_id, source_kind, report_id, request_hash,
+                                data, epoch)
                         except ReportConflict:
                             duplicate = True
                         if not duplicate:

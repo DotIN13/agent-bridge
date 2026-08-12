@@ -34,8 +34,8 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 - **Known** — the goal, constraints, what is ruled out and why
 - **Assumed** — paths, modules, versions, data shapes you have *not* verified, labelled as assumptions
 - **Unknown** — what you want discovered and reported back
-- **Deliverable** — what the answer must contain to be usable without a follow-up
-- **Results** — ask the worker to report, in plain language, what the problem or goal was, what it did, and what it found
+- **Deliverable** — ask the worker to report, in plain language, what the problem or goal was, what it did, and what it found
+- **Results** — the remote agent should always report the status and results using `ab-notify` (see the worker skill). If the remote agent is running background work rather than a scheduler job, it can monitor that itself and `ab-notify` when done.
 
 ## Long and batch jobs
 
@@ -47,6 +47,8 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 - Then `ab events REF`, which reads from the **end** by default; `total`/`first_seq`/`last_seq` show the shape so you never page blind. `--after 0` restores top-down reading.
 - Narrow with `--type` before widening `--tail`, or a long job's tool results will flood you.
 - **Parse `--output json`**, and use `--output jsonl` when you want one typed record per line.
+- **`ab-notify` reports arrive as `message` events** — `ab events REF --type message` is the batch job's own progress log, separate from the agent's turn. What it ran is in `tool_use`/`tool_result`; there is no `ab-notify` or `tool` type, and `--type` rejects anything not in its list.
+- A `message` event carries the reporter's own `status` (`queued`/`running`/`finished`/`failed`), which is **not** the job's status — a job row can read `succeeded` while its batch work is still `running`.
 - **Exit 4 is a timeout, and the job is still running** — it never cancels unless `--cancel-on-timeout`. Exit 3 is the job failing; inspecting a failed job still exits 0 unless `--fail-on-job-failure`.
 - **Transcripts are the last resort** — every tool call *and result*, megabytes. Filter on the remote host and download the extract. Claude Code keeps one file per session at `<home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl` (growing = working); opencode keeps one SQLite db, so `download` cannot help — run `opencode export <sessionID>` on the host.
 
