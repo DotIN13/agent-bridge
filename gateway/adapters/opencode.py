@@ -31,6 +31,16 @@ from .base import Event, JobSpec, RunResult, interrupt_group, resume_cwd
 
 _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
 
+# A session with no message is one nothing can be resumed into -- the same class
+# of row the Claude backend drops as a metadata-only transcript, and dropped in
+# both places so "a session" means one thing across backends. Rare here (3 of
+# 1522 on the store this was measured against) but free to exclude.
+#
+# `message` is the authoritative table and `session_message` is an empty one
+# from a newer schema; correlating against the latter would have hidden all
+# 1522 sessions rather than 3. Check before changing this predicate.
+_NON_EMPTY = "EXISTS (SELECT 1 FROM message m WHERE m.session_id = session.id)"
+
 
 class OpenCodeAdapter:
     def __init__(self, cfg: AgentConfig) -> None:
@@ -92,7 +102,8 @@ class OpenCodeAdapter:
                 "         COUNT(*) OVER (PARTITION BY directory) AS n,"
                 "         ROW_NUMBER() OVER (PARTITION BY directory"
                 "             ORDER BY time_updated DESC) AS rn"
-                "  FROM session WHERE time_archived IS NULL AND directory IS NOT NULL"
+                "  FROM session WHERE time_archived IS NULL"
+                f"    AND directory IS NOT NULL AND {_NON_EMPTY}"
                 ") WHERE rn = 1").fetchall()
         except sqlite3.Error:
             return []
@@ -120,7 +131,7 @@ class OpenCodeAdapter:
         if con is None:
             return SessionPage([], 0, None)
         try:
-            where = "time_archived IS NULL"
+            where = f"time_archived IS NULL AND {_NON_EMPTY}"
             params: list = []
             if cwd:
                 # Exact match, resolved in Python: the two backends spell paths

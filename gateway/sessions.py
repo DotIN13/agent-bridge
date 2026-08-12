@@ -28,6 +28,9 @@ _RESUMABLE_ID = re.compile(r"^[0-9a-fA-F-]{36}$")
 # Folder -> (newest mtime, cwd). One folder is one project, so this is stable
 # until that folder changes.
 _DIR_CWD: dict[str, tuple[float, str]] = {}
+# Transcript -> (mtime, has-conversation). A file that later gains messages
+# gains an mtime with them, so the entry invalidates itself.
+_HAS_MSG: dict[str, tuple[float, bool]] = {}
 
 
 def _norm(path: str) -> str:
@@ -180,6 +183,11 @@ def find(session_id: str) -> SessionInfo | None:
     most recently modified transcripts, so a session outside the window would
     come back as "not found" and the caller would silently fall back to a
     default. A glob on the id is exact and costs one directory walk.
+
+    Unlike the listings, this does not skip metadata-only transcripts. A listing
+    is a recommendation and should offer only sessions worth continuing; a
+    lookup by explicit id is an instruction, and reporting "no such session"
+    about a file that plainly exists would send the caller somewhere worse.
     """
     if not session_id or not _PROJECTS.is_dir():
         return None
@@ -201,6 +209,10 @@ def scan(limit: int = 40, cwd: str | None = None,
     then ranked by cwd, so a session in a quiet project was invisible whenever
     a busy one had filled the window. Filtering the candidate files first makes
     the bound per-directory, and `total` reports the real size either way.
+
+    Metadata-only transcripts are dropped before the limit and before `total`,
+    so a count never includes a row the caller cannot resume into. See
+    `_has_message` for why that is affordable.
     """
     if not _PROJECTS.is_dir():
         return SessionPage([], 0, None)
@@ -210,8 +222,7 @@ def scan(limit: int = 40, cwd: str | None = None,
     else:
         roots = _project_dirs()
 
-    files = [p for root in roots for p in root.glob("*.jsonl")
-             if _RESUMABLE_ID.match(p.stem)]
+    files = [p for root in roots for p in _resumable(root)]
     files.sort(key=lambda p: (-p.stat().st_mtime, p.name))
     total = len(files)
 
@@ -244,9 +255,9 @@ def list_dirs() -> list[DirInfo]:
         cwd = _dir_cwd(d)
         if not cwd:
             continue                      # metadata-only folder; nothing to resume
-        files = [p for p in d.glob("*.jsonl") if _RESUMABLE_ID.match(p.stem)]
+        files = _resumable(d)
         if not files:
-            continue
+            continue                      # only stubs here; nothing to resume
         newest = max(files, key=lambda p: p.stat().st_mtime)
         info = _scan_file(newest)
         out.append(DirInfo(
@@ -261,6 +272,54 @@ def _project_dirs() -> list[Path]:
     return [d for d in _PROJECTS.iterdir() if d.is_dir()]
 
 
+def _has_message(path: Path, mtime: float, max_lines: int = 400) -> bool:
+    """Does this transcript hold any conversation at all?
+
+    Claude Code writes a transcript for every subagent, but a subagent's turns
+    are recorded inline in its *parent*, so the child file ends up holding only
+    `ai-title`/`agent-name` metadata -- a session id with nothing behind it.
+    Resuming one lands in an empty conversation, so they are not sessions in the
+    sense this index means, and 10 of the 106 rows here were exactly that.
+
+    Cheap enough to run before the limit, which is the only place it works:
+    filtering a page after slicing it frees no slots and returns short pages.
+    The first real record lands on line 3 of a real transcript, so the early
+    exit fires almost immediately -- 12 ms across 113 files and 573 MB here.
+    Metadata-only files are read whole, but they are under 1.5 KB.
+    """
+    key = str(path)
+    cached = _HAS_MSG.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    found = False
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    found = True   # far past any metadata preamble
+                    break
+                line = line.strip()
+                if not line.startswith("{") or '"type"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") in ("user", "assistant"):
+                    found = True
+                    break
+    except OSError:
+        return False
+    _HAS_MSG[key] = (mtime, found)
+    return found
+
+
+def _resumable(root: Path) -> list[Path]:
+    """Transcripts in one folder that something could actually be resumed into."""
+    return [p for p in root.glob("*.jsonl")
+            if _RESUMABLE_ID.match(p.stem) and _has_message(p, p.stat().st_mtime)]
+
+
 def _dir_cwd(project_dir: Path) -> str | None:
     """The working directory a folder's sessions belong to.
 
@@ -271,15 +330,20 @@ def _dir_cwd(project_dir: Path) -> str | None:
     would drop sessions, which is the bug being fixed.
     """
     key = str(project_dir)
-    cached = _DIR_CWD.get(key)
-    files = sorted(project_dir.glob("*.jsonl"),
+    # Only transcripts with a conversation, and for a load-bearing reason: a
+    # metadata-only stub records no cwd, so probing the newest few files raw
+    # would resolve the whole folder to nothing whenever enough subagent stubs
+    # landed on top of the real work -- and every session in it would drop out
+    # of both views at once. Subagents produce those constantly.
+    files = sorted(_resumable(project_dir),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         return None
     stamp = files[0].stat().st_mtime
+    cached = _DIR_CWD.get(key)
     if cached and cached[0] == stamp:
         return cached[1]
-    for candidate in files[:3]:           # newest may be a metadata-only stub
+    for candidate in files[:3]:
         cwd = _first_cwd(candidate)
         if cwd:
             _DIR_CWD[key] = (stamp, cwd)

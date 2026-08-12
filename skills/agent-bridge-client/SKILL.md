@@ -120,6 +120,11 @@ The second is an **exact** directory match, not a prefix: `/project/x` and
 normalise, so `D:\x`, `D:/x` and `d:\X` all match. Page with `--limit` and
 `--cursor` (not `--after`; sessions have no sequence to count).
 
+Both views list only sessions holding a conversation, and counts match listings.
+Subagents leave metadata-only transcripts — real id, real title, nothing to
+resume into — so they are not offered. A `--session <id>` you name explicitly is
+still honoured; only the recommendations are filtered.
+
 ## Continue existing work — first match wins
 
 Check `ab jobs` then `ab sessions` before submitting.

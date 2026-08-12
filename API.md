@@ -126,6 +126,12 @@ sample.
 sequence; ordering on a timestamp alone would skip or repeat rows whenever two
 share a millisecond.
 
+**Both routes list only sessions that hold a conversation**, and the counts match
+the listings. Claude Code writes a transcript per subagent but records its turns
+in the parent, leaving a child file of pure metadata: a real id, a real title,
+and nothing to resume into. `GET /v1/jobs` and a resume by explicit id are
+unaffected — only the recommendations are filtered.
+
 > Superseded shape: this route used to return a bare `{"sessions":[...]}` in
 > which `cwd` only *sorted*, after the newest `limit * 3` sessions had already
 > been selected across all directories. On a real store that hid entire

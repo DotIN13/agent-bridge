@@ -14,6 +14,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [02](02-mid-turn-steering-or-liveness-gate.md) | Mid-turn steering over streaming stdin, plus a liveness gate on in-place resume | with 01 |
 | [03](03-direct-mode-resumes-in-wrong-cwd.md) | A named session's recorded cwd always wins, and the substitution is announced | after 0.3.0 |
 | [04](04-session-index-cwd-is-sort-only.md) | Session index split into directories + paged sessions; neither can lose a row | after 0.3.0 |
+| [05](05-session-index-hygiene.md) | Only sessions with a conversation are listed — subagent stubs could hide a directory | after 0.3.0 |
 | [06](06-agent-first-cli-api.md) | Making the CLI contract agent-first: output protocol, exit codes, safe transfers | 0.3.0 |
 | [07](07-backend-api-contract.md) | Typed HTTP contract, monotonic events, idempotency, restart recovery | 0.3.0 |
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |
@@ -36,6 +37,13 @@ existed to distinguish "the caller passed a cwd" from "the server defaulted it";
 letting the session's recorded cwd always win means nothing downstream needs to
 know. The override is announced on the event stream, which is what makes
 overriding an explicit `--cwd` acceptable rather than another silent substitution.
+
+**04 and 05 are one subject in two passes**, and 05 is the reason to be careful
+with either. It was filed as cosmetic and was not: a folder's directory is read
+out of its transcripts, subagent stubs record none, so enough fresh stubs made an
+entire project resolve to nothing and drop out of both views. Anything that
+touches how transcripts are filtered should run
+`tests/backend/test_session_stubs.py`, which pins that case by name.
 
 **08 introduced the only breaking default in the set**: `ab events REF` returns
 the last 50 rather than the first 500. `--after 0` restores the old reading.
