@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
 from . import __version__
 from .config import load
 from .server import Gateway
+
+
+def find_ab_notify() -> str | None:
+    """Resolve the reporter, preferring PATH and falling back to the checkout."""
+    found = shutil.which("ab-notify")
+    if found:
+        return found
+    local = Path(__file__).resolve().parent.parent / "bin" / "ab-notify"
+    return str(local) if local.is_file() else None
 
 
 def main(argv=None) -> int:
@@ -36,6 +46,22 @@ def main(argv=None) -> int:
     if args.print_token:
         print(cfg.token)
         return 0
+
+    # Refuse to start without the reporter. A job submitted with
+    # `expect_report` parks until `ab-notify` closes it, so a gateway that
+    # cannot resolve the binary hands out jobs that can never finish -- and it
+    # fails at the far end, hours later, on a compute node, as silence. Better
+    # to fail here, where someone is watching.
+    notifier = find_ab_notify()
+    if not notifier:
+        print("agent-bridge: cannot find the 'ab-notify' executable.\n"
+              "  Batch jobs report completion through it, and a job submitted\n"
+              "  with expect_report cannot finish without it.\n"
+              "  Install the package (pip install -e .) so the console script\n"
+              "  is on PATH, or keep bin/ab-notify in the checkout.",
+              file=sys.stderr)
+        return 2
+    print(f"reporter: {notifier}", file=sys.stderr, flush=True)
 
     token_file = Path(cfg.data_dir) / ".token"
     where = str(token_file) if token_file.exists() else "configured auth token"

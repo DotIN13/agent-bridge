@@ -19,6 +19,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [07](07-backend-api-contract.md) | Typed HTTP contract, monotonic events, idempotency, restart recovery | 0.3.0 |
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |
 | [10](10-untitled-sessions-and-a-slow-dirs-view.md) | Slash-command residue is not a session; the dirs view got ~65x faster | after 0.3.0 |
+| [11](11-a-turn-is-not-a-job.md) | `expect_report`: a job that hands work to a scheduler waits for it | after 0.3.0 |
 
 ## The load-bearing bits
 
@@ -50,6 +51,13 @@ The rule those three converge on: **a session exists if a human spoke or the
 agent acted.** Anything touching how transcripts are filtered should run
 `tests/backend/test_session_stubs.py`, which pins each failure by name — including
 the custom-slash-command case that no session on the development store exercises.
+
+**11 partly supersedes 07**, and the pair is worth reading together. 07 decided
+a coding-agent job and external compute must not be merged into one status
+machine, which was right and is still the default. 11 is the opt-in it
+anticipated: `expect_report` parks a job in `awaiting_report` until `ab-notify`
+closes it. Note that a parked job is deliberately not `running` -- steering, the
+session-busy gate and restart recovery all read `running` as "an agent is alive".
 
 **08 introduced the only breaking default in the set**: `ab events REF` returns
 the last 50 rather than the first 500. `--after 0` restores the old reading.

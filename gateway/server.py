@@ -129,6 +129,25 @@ class Gateway:
                     log_level="warning")
 
 
+async def _expire_reports(gw: Gateway, interval: float = 60.0) -> None:
+    """Give up on parked jobs whose report never came.
+
+    Runs on a timer rather than at read time so a job that nobody polls still
+    reaches a terminal state, and so the deadline survives a restart: the row
+    carries it, this only notices.
+    """
+    while True:
+        try:
+            expired = await run_in_threadpool(gw.db.expire_awaiting_reports)
+            for job_id in expired:
+                gw.bus.close(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                       # never kill the loop
+            print(f"warning: report sweep failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(interval)
+
+
 def create_app(gw: Gateway) -> FastAPI:
     cfg = gw.cfg
 
@@ -139,9 +158,11 @@ def create_app(gw: Gateway) -> FastAPI:
         await run_in_threadpool(gw.pool.start)
         if gw.cluster:
             gw.cluster.start_async()
+        sweeper = asyncio.create_task(_expire_reports(gw))
         print(f"agent-bridge {__version__} listening on "
               f"http://{cfg.host}:{cfg.port}  (db: {cfg.db_path})", flush=True)
         yield
+        sweeper.cancel()
         await run_in_threadpool(gw.pool.stop)
         gw.db.close()
 
@@ -382,6 +403,7 @@ def create_app(gw: Gateway) -> FastAPI:
                 "id": job_id, "status": "queued", "agent": agent_name,
                 "cwd": cwd, "title": title, "fork": spec.fork,
                 "include_thinking": spec.include_thinking, "files": paths,
+                "expect_report": spec.expect_report,
                 "replayed": False,
                 "session": spec.session,
                 "session_state": "pinned" if spec.session else "pending"}
@@ -390,7 +412,8 @@ def create_app(gw: Gateway) -> FastAPI:
                 requested_session=spec.session,
                 permission_mode=spec.permission_mode, model=spec.model,
                 title=title, fork=spec.fork,
-                include_thinking=spec.include_thinking, files=paths)
+                include_thinking=spec.include_thinking, files=paths,
+                expect_report=spec.expect_report)
             if idempotency_key:
                 try:
                     response, created = gw.db.create_job_idempotent(
@@ -448,8 +471,15 @@ def create_app(gw: Gateway) -> FastAPI:
                 gw.db.add_message, job["id"], data, message.report_id)
         except ReportConflict as exc:
             raise ApiError(409, "report_id_conflict", str(exc)) from exc
+        closing = row.pop("closing_event", None)
         if not row.get("duplicate"):
             gw.bus.publish(job["id"], row)
+        if closing:
+            # This report ended a parked job. Publish the terminal status and
+            # close the stream, so a follow that has been open since the turn
+            # ended sees the finish rather than hanging.
+            gw.bus.publish(job["id"], closing)
+            gw.bus.close(job["id"])
         return {"id": job["id"], "seq": row["seq"],
                 "duplicate": bool(row.get("duplicate"))}
 

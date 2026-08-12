@@ -126,6 +126,25 @@ sample.
 sequence; ordering on a timestamp alone would skip or repeat rows whenever two
 share a millisecond.
 
+### Job status and `expect_report`
+
+`POST /v1/jobs` accepts `expect_report: true` for a turn that hands work to a
+scheduler. Such a job does **not** go terminal when its turn succeeds: it enters
+`awaiting_report`, a non-terminal status, and only an `ab-notify --status
+finished|failed` closes it (`finished` → `succeeded`, `failed` → `failed`).
+Progress reports leave it parked, and a report cannot move a job that was already
+terminal.
+
+A parked job is deliberately not `running`: the agent process is gone, so its
+session claim is released, steering it is meaningless, and it survives a gateway
+restart rather than being failed as stale. `finished_at` stays null until the
+work actually finishes. If no report arrives within `worker.report_timeout_sec`
+(default 86400, 0 disables) the gateway fails it with `report_timeout`.
+
+Reports close a parked job through either transport — HTTP, or the
+shared-filesystem JSONL, which is the usual path from a compute node that cannot
+reach the gateway.
+
 **Both routes list a session only if a human spoke or the agent acted**, and the
 counts match the listings. Three kinds of transcript exist without anything
 having happened in them: subagent files (Claude Code writes one per subagent but

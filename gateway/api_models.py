@@ -89,6 +89,10 @@ class JobCreate(StrictModel):
     model: str | None = None
     permission_mode: str | None = None
     include_thinking: bool = False
+    # The turn is not the job: work handed to a scheduler outlives it. A job
+    # that sets this parks in `awaiting_report` when its turn succeeds, and
+    # only an `ab-notify --status finished|failed` closes it.
+    expect_report: bool = False
     files: list[FileItem] = Field(default_factory=list)
 
     @model_validator(mode="after")

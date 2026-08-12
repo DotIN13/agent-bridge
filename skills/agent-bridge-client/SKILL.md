@@ -39,6 +39,8 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 
 ## Long and batch jobs
 
+- **Submit with `--expect-report` when the turn hands work to a scheduler.** The job then parks in `awaiting_report` when the turn ends instead of reporting success, and `ab wait` blocks until `ab-notify` reports `finished` or `failed`. Without it a batch submission reads `succeeded` the moment the agent stops talking — hours before the work runs.
+- A parked job is **not** `running`: no agent is alive, its session is free to resume, and it survives a gateway restart. If no report arrives before the gateway's deadline it fails with `report_timeout`, which means the batch went quiet, not that it failed.
 - **A coding-agent worker cannot wait hours for scheduler work.** For batch jobs, tell the remote agent to submit, return the identifiers, and end its turn — and always have the batch script report itself with `ab-notify` (see the worker skill). If the remote agent is running background work rather than a scheduler job, it can monitor that itself and `ab-notify` when done.
 
 ## Reading results
@@ -48,7 +50,7 @@ You cannot see the remote filesystem, versions, cluster state, or prior runs. Th
 - Narrow with `--type` before widening `--tail`, or a long job's tool results will flood you.
 - **Parse `--output json`**, and use `--output jsonl` when you want one typed record per line.
 - **`ab-notify` reports arrive as `message` events** — `ab events REF --type message` is the batch job's own progress log, separate from the agent's turn. What it ran is in `tool_use`/`tool_result`; there is no `ab-notify` or `tool` type, and `--type` rejects anything not in its list.
-- A `message` event carries the reporter's own `status` (`queued`/`running`/`finished`/`failed`), which is **not** the job's status — a job row can read `succeeded` while its batch work is still `running`.
+- A `message` event carries the reporter's own `status` (`queued`/`running`/`finished`/`failed`), which is **not** the job's status. Without `--expect-report` a job row reads `succeeded` while its batch work is still `running`; with it the row stays `awaiting_report` until a `finished`/`failed` report closes it.
 - **Exit 4 is a timeout, and the job is still running** — it never cancels unless `--cancel-on-timeout`. Exit 3 is the job failing; inspecting a failed job still exits 0 unless `--fail-on-job-failure`.
 - **Transcripts are the last resort** — every tool call *and result*, megabytes. Filter on the remote host and download the extract. Claude Code keeps one file per session at `<home>/.claude/projects/<slugified-cwd>/<session-id>.jsonl` (growing = working); opencode keeps one SQLite db, so `download` cannot help — run `opencode export <sessionID>` on the host.
 

@@ -395,10 +395,10 @@ def test_cancel_during_terminal_commit_cannot_be_falsely_accepted(
     release = threading.Event()
     original_finish = db.finish_job_with_events
 
-    def paused_finish(job_id, fields, events):
+    def paused_finish(job_id, fields, events, **kwargs):
         entered.set()
         assert release.wait(2)
-        return original_finish(job_id, fields, events)
+        return original_finish(job_id, fields, events, **kwargs)
 
     monkeypatch.setattr(db, "finish_job_with_events", paused_finish)
     worker = threading.Thread(target=pool._run_job, args=(job,))

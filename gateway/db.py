@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     cost_usd          REAL,
     created_at        REAL NOT NULL,
     started_at        REAL,
-    finished_at       REAL
+    finished_at       REAL,
+    expect_report     INTEGER,
+    report_deadline   REAL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -110,6 +112,12 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 """
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+# Non-terminal, and deliberately not "running": the turn is over and the
+# agent process is gone, so everything that reads "running" as "an agent is
+# alive" -- steering, the session-busy gate, restart recovery -- has to be
+# able to tell the difference. The row stays open because the work it
+# describes is still out there on a scheduler.
+AWAITING_REPORT = "awaiting_report"
 _REPORT_BATCH_LINES = 256
 _REPORT_LINE_MAX_BYTES = 64 * 1024
 
@@ -191,7 +199,9 @@ class Database:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
         for name, decl in (("files", "TEXT"), ("title", "TEXT"),
                            ("title_norm", "TEXT"), ("fork", "INTEGER"),
-                           ("include_thinking", "INTEGER")):
+                           ("include_thinking", "INTEGER"),
+                           ("expect_report", "INTEGER"),
+                           ("report_deadline", "REAL")):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
         self._conn.execute(
@@ -220,21 +230,24 @@ class Database:
                            cwd: str | None, requested_session: str | None,
                            permission_mode: str | None, model: str | None,
                            title: str | None, fork: bool,
-                           include_thinking: bool, files: list[str] | None) -> None:
+                           include_thinking: bool, files: list[str] | None,
+                           expect_report: bool = False) -> None:
         title = (title or "").strip() or derive_title(prompt)
         self._conn.execute(
             "INSERT INTO jobs (id,status,agent,prompt,cwd,requested_session,"
-            "permission_mode,model,title,title_norm,fork,include_thinking,files,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "permission_mode,model,title,title_norm,fork,include_thinking,files,"
+            "expect_report,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (job_id, "queued", agent, prompt, cwd, requested_session,
              permission_mode, model, title, norm_title(title),
              1 if fork else 0, 1 if include_thinking else 0,
-             json.dumps(files or []), time.time()))
+             json.dumps(files or []), 1 if expect_report else 0, time.time()))
 
     def create_job(self, *, agent: str, prompt: str, cwd: str | None,
                    requested_session: str | None, permission_mode: str | None,
                    model: str | None, title: str | None = None, fork: bool = True,
                    include_thinking: bool = False, files: list[str] | None = None,
+                   expect_report: bool = False,
                    job_id: str | None = None) -> str:
         job_id = job_id or str(uuid.uuid4())
         with self._lock:
@@ -242,7 +255,8 @@ class Database:
                 job_id=job_id, agent=agent, prompt=prompt, cwd=cwd,
                 requested_session=requested_session,
                 permission_mode=permission_mode, model=model, title=title,
-                fork=fork, include_thinking=include_thinking, files=files)
+                fork=fork, include_thinking=include_thinking, files=files,
+                expect_report=expect_report)
             self._conn.commit()
         return job_id
 
@@ -337,14 +351,40 @@ class Database:
                 raise
 
     def finish_job_with_events(self, job_id: str, fields: dict[str, Any],
-                               events: list[tuple[str, dict]]) -> list[dict]:
-        """Publish terminal fields and their final events in one transaction."""
+                               events: list[tuple[str, dict]],
+                               report_timeout_sec: float = 0.0) -> list[dict]:
+        """Publish terminal fields and their final events in one transaction.
+
+        A job that declared `expect_report` and whose turn *succeeded* parks in
+        `awaiting_report` instead: the turn is done but the work it started is
+        not, and the row is what `ab wait` blocks on. `finished_at` stays null,
+        because the job has not finished.
+
+        Only a successful turn parks. If the turn failed or was canceled there is
+        no reason to believe anything was submitted, and waiting for a report
+        that nobody will send is worse than reporting the failure now.
+        """
         values = dict(fields)
-        values.setdefault("finished_at", time.time())
-        columns = ", ".join(f"{key}=?" for key in values)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                row = self._conn.execute(
+                    "SELECT expect_report FROM jobs WHERE id=?", (job_id,)).fetchone()
+                parking = bool(row and row["expect_report"]
+                               and values.get("status") == "succeeded")
+                if parking:
+                    values["status"] = AWAITING_REPORT
+                    values["finished_at"] = None
+                    if report_timeout_sec > 0:
+                        values["report_deadline"] = time.time() + report_timeout_sec
+                    events = [*events, ("status", {
+                        "stage": "awaiting_report",
+                        "status": AWAITING_REPORT,
+                        "detail": "turn complete; waiting for ab-notify "
+                                  "--status finished|failed"})]
+                else:
+                    values.setdefault("finished_at", time.time())
+                columns = ", ".join(f"{key}=?" for key in values)
                 cursor = self._conn.execute(
                     f"UPDATE jobs SET {columns} WHERE id=? "
                     "AND status NOT IN ('succeeded','failed','canceled')",
@@ -585,6 +625,68 @@ class Database:
             "VALUES (?,?,?,?,?)", (job_id, source, report_id, request_hash, row["seq"]))
         return row, False
 
+    def _close_awaiting_locked(self, job_id: str, data: dict,
+                               epoch: float) -> dict | None:
+        """A terminal report closes a parked job. Anything else leaves it open.
+
+        Only `finished` and `failed` are terminal; `running`, `queued` and
+        `unknown` are progress, which is the whole point of sending them. A job
+        that never declared `expect_report` is untouched -- its row already
+        finished when the turn did, and reopening a terminal job would break the
+        monotonicity `wait` and SSE depend on.
+        """
+        status = data.get("status")
+        if status not in ("finished", "failed"):
+            return None
+        row = self._conn.execute(
+            "SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row or row["status"] != AWAITING_REPORT:
+            return None
+        final = "succeeded" if status == "finished" else "failed"
+        error = None
+        if final == "failed":
+            error = data.get("msg") or data.get("report") or "batch work reported failed"
+        self._conn.execute(
+            "UPDATE jobs SET status=?,finished_at=?,report_deadline=NULL,"
+            "error=COALESCE(error,?) WHERE id=?",
+            (final, epoch, error, job_id))
+        return self._append_event_locked(
+            job_id, "status",
+            {"stage": "done", "status": final, "reason": "batch_report"}, epoch)
+
+    def expire_awaiting_reports(self, now: float | None = None) -> list[str]:
+        """Fail parked jobs whose report never came.
+
+        Without this a scheduler job that dies silently leaves its row open
+        forever, and `ab wait` blocks on something nobody will ever send. The
+        deadline is set when the job parks.
+        """
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT id FROM jobs WHERE status=? AND report_deadline IS NOT NULL "
+                    "AND report_deadline <= ?", (AWAITING_REPORT, now)).fetchall()
+                expired = [r["id"] for r in rows]
+                for jid in expired:
+                    message = ("no ab-notify report arrived before the deadline; "
+                               "the batch work may still be running")
+                    self._conn.execute(
+                        "UPDATE jobs SET status='failed',error=?,finished_at=?,"
+                        "report_deadline=NULL WHERE id=?", (message, now, jid))
+                    self._append_event_locked(
+                        jid, "error",
+                        {"code": "report_timeout", "message": message}, now)
+                    self._append_event_locked(
+                        jid, "status", {"stage": "done", "status": "failed",
+                                        "reason": "report_timeout"}, now)
+                self._conn.commit()
+                return expired
+            except Exception:
+                self._conn.rollback()
+                raise
+
     def add_message(self, job_id: str, data: dict,
                     report_id: str | None = None) -> dict:
         report_id = report_id or data.get("report_id")
@@ -601,8 +703,15 @@ class Database:
                     row = self._append_event_locked(
                         job_id, "message", data, epoch)
                     duplicate = False
+                closing = None
+                if not duplicate:
+                    closing = self._close_awaiting_locked(job_id, data, epoch)
                 self._conn.commit()
                 row["duplicate"] = duplicate
+                # The caller has to publish this and close the stream: a
+                # follower watching a parked job learns it ended here, not from
+                # the worker, which stopped talking when the turn did.
+                row["closing_event"] = closing
                 return row
             except Exception:
                 self._conn.rollback()
@@ -686,6 +795,12 @@ class Database:
                             duplicate = True
                         if not duplicate:
                             inserted += 1
+                            # A terminal report closes a parked job here too.
+                            # On a cluster this is the *usual* path, not the
+                            # exception: compute nodes routinely cannot reach
+                            # the gateway, so the report lands as a file and a
+                            # job closed only over HTTP would wait forever.
+                            self._close_awaiting_locked(job_id, data, epoch)
                     self._conn.commit()
                 except Exception:
                     self._conn.rollback()
@@ -704,7 +819,14 @@ class Database:
         return added
 
     def reconcile_startup(self) -> list[str]:
-        """Fail stale running work and return persisted queued jobs to requeue."""
+        """Fail stale running work and return persisted queued jobs to requeue.
+
+        `running` only, and that exclusion is deliberate: an `awaiting_report`
+        job has no local process to have lost, and its scheduler work is still
+        out there and will report whenever it lands. Failing those on restart
+        would destroy exactly the state this status exists to keep. Do not
+        broaden this query without moving them somewhere they survive.
+        """
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:

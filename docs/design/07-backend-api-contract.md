@@ -105,6 +105,14 @@ machine. `message` events are **post-terminal annotations**:
 This is explicit and testable. A first-class scheduler-work resource/status can
 be designed later without overloading current job semantics.
 
+> **Superseded in part by [11](11-a-turn-is-not-a-job.md).** The paragraph above
+> is still exactly right for a job that does not opt in, and that is still the
+> default. But "not silently merged" turned out to be doing two jobs: it kept the
+> status machines separate *and* left the caller with no way to wait for the work
+> at all, which is what `ab wait` is for. `expect_report` is the later design
+> this anticipated — opt-in, so nothing is silent, and a separate non-terminal
+> status rather than an overload of `running`.
+
 ## Compatibility and residual non-goals
 
 - No synchronous server `run`/`wait`; those are client compositions.

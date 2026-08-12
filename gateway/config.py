@@ -16,6 +16,12 @@ _DEFAULTS: dict = {
         # Cancel sends SIGINT first (the ESC equivalent) and only escalates if
         # the agent hasn't wound down within this many seconds.
         "cancel_grace_sec": 15,
+        # How long a job that declared `expect_report` may sit in
+        # `awaiting_report` before the gateway gives up on it. Without a
+        # deadline a scheduler job that dies silently leaves its row open
+        # forever and `ab wait` blocks on a report nobody will send.
+        # 0 disables the deadline, which means exactly that.
+        "report_timeout_sec": 86400,
     },
     "db": {"path": "gateway.db"},
     # Where `ab-notify` drops messages when it cannot reach the gateway over
@@ -87,6 +93,7 @@ class Config:
     db_path: str          # absolute
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
+    report_timeout_sec: float = 86400.0
     messages_dir: str = ""        # absolute; ab-notify's fallback drop point
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
@@ -210,6 +217,8 @@ def load(path: str | os.PathLike | None) -> Config:
         token=token,
         concurrency=int(raw["worker"]["concurrency"]),
         cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
+        report_timeout_sec=float(
+            raw["worker"].get("report_timeout_sec", 86400)),
         db_path=str(db_path),
         messages_dir=str(messages_dir),
         data_dir=str(data_dir),

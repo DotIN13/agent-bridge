@@ -79,12 +79,23 @@ outside the gateway's `allowed_dirs`, or too large to be worth downloading.
 signal is output-file mtimes, which cannot distinguish *queued* from *died before
 writing* from *filesystem unreachable*.
 
+**If the job was submitted with `expect_report`, the job does not end when your
+turn does.** Its row parks in `awaiting_report` and the caller's `ab wait` is
+blocked on it. Only `ab-notify --status finished` or `--status failed` closes it;
+progress reports (`running`, `queued`) deliberately do not. Send nothing and the
+job sits until its deadline expires and is then failed with `report_timeout` —
+the caller learns nothing except that you went quiet. Arrange the finish report
+before you end your turn, including on the failure paths (`trap`, `set -e`).
+
 ```bash
 #SBATCH --export=ALL,AB_JOB_ID=<ab job uuid>,AB_DATA_DIR=<gateway data dir>
 ab-notify --status running  --msg "server up, generating" --report-id start
 ab-notify --status running  --msg "12/24 sources done"    --report-id p12
 ab-notify --status finished --report "$RUNS/RESULTS.md"   --report-id done
 ab-notify --status failed   --msg-file "$RUNS/error.log"  --report-id fail
+
+# Guarantee the finish on every exit path, not just the happy one.
+trap 'ab-notify --status failed --msg "script exited $?" --report-id fail' ERR
 ```
 
 - Call it when work **actually starts** (after the model loads, not at submit),
@@ -103,10 +114,11 @@ ab-notify --status failed   --msg-file "$RUNS/error.log"  --report-id fail
   shared-filesystem JSONL, then a local temporary JSONL. A **local-only** write is
   durable but *not ingestible* until moved to the shared messages dir; treat it as
   "recorded, not delivered" and say so in your final message.
-- **Your reports are post-terminal annotations.** Your turn ends when you submit,
-  so the caller's row may read `succeeded` hours before your `finished` lands.
-  Write each message to stand alone. Reports survive a gateway restart, since
-  they key on job id.
+- **Without `expect_report`, your reports are post-terminal annotations**: the
+  turn ends when you submit, so the caller's row reads `succeeded` hours before
+  your `finished` lands. With it, the row waits for you. Either way write each
+  message to stand alone, and either way reports survive a gateway restart,
+  since they key on job id.
 
 ## Submitting scheduler work
 
@@ -163,5 +175,7 @@ turn**. A 50K dump that answered one question taxes every remaining turn.
 - [ ] Every substitution named, and unrun work marked `NOT-RUN`?
 - [ ] Batch script: `ab-notify` at start, milestones and finish/fail, every call
       carrying `--report-id`, and confirmed to resolve in the job environment?
+- [ ] If the job expects a report: is a `finished` **or** `failed` call
+      guaranteed on every path out of the script, including the failure ones?
 - [ ] Output dir created before `sbatch`, and heartbeat first?
 - [ ] Ending with results — ids, paths, numbers — and not a promise?
