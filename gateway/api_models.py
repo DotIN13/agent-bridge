@@ -131,8 +131,7 @@ class MessageRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     report_id: str | None = Field(default=None, max_length=200)
     status: Literal["queued", "running", "finished", "failed", "unknown"] | None = None
-    msg: str | None = Field(default=None, max_length=16000)
-    report: str | None = None
+    msg: str | None = Field(default=None, max_length=1_000_000)
     host: str | None = None
     slurm_job_id: str | None = None
     ts: float | None = None

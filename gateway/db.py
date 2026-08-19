@@ -627,25 +627,25 @@ class Database:
 
     def _close_awaiting_locked(self, job_id: str, data: dict,
                                epoch: float) -> dict | None:
-        """A terminal report closes a parked job. Anything else leaves it open.
+        """A terminal report closes the job. Anything else leaves it open.
 
         Only `finished` and `failed` are terminal; `running`, `queued` and
-        `unknown` are progress, which is the whole point of sending them. A job
-        that never declared `expect_report` is untouched -- its row already
-        finished when the turn did, and reopening a terminal job would break the
-        monotonicity `wait` and SSE depend on.
+        `unknown` are progress. A terminal report is honoured whether the job
+        is still `running` (the finish arrived mid-turn) or parked in
+        `awaiting_report`; an already-terminal job is left alone so `wait` and
+        SSE keep their monotonic status.
         """
         status = data.get("status")
         if status not in ("finished", "failed"):
             return None
         row = self._conn.execute(
             "SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if not row or row["status"] != AWAITING_REPORT:
+        if not row or row["status"] not in ("running", AWAITING_REPORT):
             return None
         final = "succeeded" if status == "finished" else "failed"
         error = None
         if final == "failed":
-            error = data.get("msg") or data.get("report") or "batch work reported failed"
+            error = data.get("msg") or "batch work reported failed"
         self._conn.execute(
             "UPDATE jobs SET status=?,finished_at=?,report_deadline=NULL,"
             "error=COALESCE(error,?) WHERE id=?",

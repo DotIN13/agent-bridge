@@ -77,8 +77,7 @@ def build_parser():
     parser.add_argument("--status", required=True, choices=STATUSES)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--msg")
-    group.add_argument("--msg-file", help="read message from a file")
-    parser.add_argument("--report")
+    group.add_argument("--msg-file", help="read the message from a file (full content)")
     parser.add_argument("--report-id", default=os.environ.get("AB_REPORT_ID"),
                         help="stable retry-deduplication id")
     parser.add_argument("--job-id", default=os.environ.get("AB_JOB_ID"))
@@ -99,7 +98,7 @@ def main(argv=None) -> int:
     if args.msg_file:
         try:
             with open(args.msg_file, encoding="utf-8", errors="replace") as stream:
-                message = stream.read()[:16000]
+                message = stream.read()
         except OSError as exc:
             print(f"ab-notify: cannot read --msg-file: {exc}", file=sys.stderr)
             return 2
@@ -108,8 +107,6 @@ def main(argv=None) -> int:
                "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
     if message:
         payload["msg"] = message
-    if args.report:
-        payload["report"] = os.path.abspath(args.report)
     if args.report_id:
         payload["report_id"] = args.report_id
 
