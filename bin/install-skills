@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Install agent-bridge skills into ~/.agents/skills and ~/.claude/skills.
+
+Each skill under this repo's `skills/` tree is copied into the per-user skill
+directories the agents read, so editing a skill here and running this script
+keeps every local agent's copy in sync. Stdlib only.
+
+Targets (override with env):
+  ~/.agents/skills/<name>/SKILL.md    AB_SKILLS_AGENTS_DIR
+  ~/.claude/skills/<name>/SKILL.md    AB_SKILLS_CLAUDE_DIR
+  home base for both                  AB_SKILLS_HOME
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SKILLS_DIR = REPO_ROOT / "skills"
+
+
+def _targets() -> list[tuple[str, Path]]:
+    home = Path(os.environ.get("AB_SKILLS_HOME", Path.home()))
+    agents = Path(os.environ.get(
+        "AB_SKILLS_AGENTS_DIR", home / ".agents" / "skills"))
+    claude = Path(os.environ.get(
+        "AB_SKILLS_CLAUDE_DIR", home / ".claude" / "skills"))
+    return [("agents", agents), ("claude", claude)]
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(prog="install-skills")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print what would be copied and change nothing")
+    parser.add_argument("name", nargs="*",
+                        help="only install these skill names (default: all)")
+    args = parser.parse_args(argv)
+
+    if not SKILLS_DIR.is_dir():
+        print(f"install-skills: no skills dir at {SKILLS_DIR}", file=sys.stderr)
+        return 1
+
+    skills = sorted(p for p in SKILLS_DIR.iterdir()
+                    if p.is_dir() and (p / "SKILL.md").is_file())
+    if args.name:
+        wanted = set(args.name)
+        skills = [s for s in skills if s.name in wanted]
+
+    if not skills:
+        print("install-skills: no skills to install", file=sys.stderr)
+        return 1
+
+    targets = _targets()
+    count = 0
+    for skill in skills:
+        src = skill / "SKILL.md"
+        for label, target_root in targets:
+            dst = target_root / skill.name / "SKILL.md"
+            if args.dry_run:
+                print(f"would copy {skill.name}/SKILL.md -> {dst}")
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                print(f"installed {skill.name} -> {dst}")
+            count += 1
+    verb = "would install" if args.dry_run else "installed"
+    print(f"install-skills: {verb} {count} file(s) for {len(skills)} skill(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
