@@ -33,7 +33,7 @@ Your last message is stored whole and returned by `ab job <ref>`.
 
 **If you write the batch script, you own the reporting.** Otherwise the only signal is output-file mtimes, which cannot distinguish *queued* from *died before writing* from *filesystem unreachable*.
 
-**Your turn ending does not end the job — you have to say so.** By default a job parks in `awaiting_report` when your turn finishes, and the caller's `ab wait` is blocked on it. Only `ab-notify --status finished` or `--status failed` closes it; progress reports (`running`, `queued`) deliberately do not.
+**Your turn ending does not end the job — you have to say so.** By default a job parks in `awaiting_report` when your turn finishes, and the caller's `ab wait` is blocked on it. Only `ab-notify --status finished` or `--status failed` closes it; progress reports (`running`, `queued`) deliberately do not. A terminal report is honoured the moment it arrives — mid-turn or after the turn parks — so sending `finished` as your last action before ending the turn is fine.
 
 **This applies to every job, not just batch ones.** Answer a question and stop, and the job stays open until its deadline expires and is failed with `report_timeout` — the caller learns nothing except that you went quiet. So:
 
@@ -45,13 +45,14 @@ Your last message is stored whole and returned by `ab job <ref>`.
 #SBATCH --export=ALL,AB_JOB_ID=<ab job uuid>,AB_DATA_DIR=<gateway data dir>
 ab-notify --status running  --msg "server up, generating" --report-id start
 ab-notify --status running  --msg "12/24 sources done"    --report-id p12
-ab-notify --status finished --report "$RUNS/RESULTS.md"   --report-id done
+ab-notify --status finished --msg-file "$RUNS/RESULTS.md" --report-id done
 ab-notify --status failed   --msg-file "$RUNS/error.log"  --report-id fail
 
 # Guarantee the finish on every exit path, not just the happy one.
 trap 'ab-notify --status failed --msg "script exited $?" --report-id fail' ERR
 ```
 
+- **`--msg-file` uploads the whole file** — full content, no truncation, sent as a multipart file to the gateway. Point it at your real report or log; `--msg` is for short inline notes. The old `--report` flag is gone (merged into `--msg-file`).
 - Call it when work **actually starts** (after the model loads, not at submit), again at real milestones so a long run doesn't look hung, and at finish/fail.
 - **Give every call a `--report-id`.** Stable dedup key: a retried step updates its report instead of appending a duplicate.
 - **Export both `AB_JOB_ID` and `AB_DATA_DIR`.** The first identifies the job, the second locates `gateway-endpoint.json` and `.token`. Token resolution is `--token` → `$AB_TOKEN` → `<data_dir>/.token`.
