@@ -148,6 +148,24 @@ def test_http_report_id_is_deduplicated(client, auth):
     assert second.json()["duplicate"] is True
 
 
+def test_multipart_message_file_upload(client, auth, gateway):
+    job = client.post("/v1/jobs", headers=auth,
+                      json={"prompt": "report"}).json()
+    files = {"file": ("report.md", b"# Full report\n\nbody text",
+                       "text/markdown")}
+    response = client.post(
+        f"/v1/jobs/{job['id']}/message/file",
+        headers=auth,
+        data={"status": "finished", "report_id": "batch-1"},
+        files=files)
+    assert response.status_code == 200
+    messages = gateway.db.events_tail(job["id"], 10, types=("message",))
+    assert messages, "expected a message event"
+    assert messages[-1]["data"]["msg"] == "# Full report\n\nbody text"
+    assert messages[-1]["data"]["status"] == "finished"
+    assert messages[-1]["data"]["report_id"] == "batch-1"
+
+
 def test_bounds_and_agent_capabilities(client, auth):
     assert client.get("/v1/jobs?limit=0", headers=auth).status_code == 422
     assert client.get("/v1/jobs?limit=201", headers=auth).status_code == 422

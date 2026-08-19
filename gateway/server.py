@@ -60,6 +60,23 @@ def _error_content(code: str, message: str,
     return {"error": {"code": code, "message": message, "details": details}}
 
 
+async def _parse_message_request(request: Request) -> MessageRequest:
+    """Parse a report message from a JSON body or a multipart file upload."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+        parsed: dict = {}
+        for key, value in form.items():
+            if isinstance(value, UploadFile):
+                if key == "file":
+                    content = await value.read()
+                    parsed["msg"] = content.decode("utf-8", errors="replace")
+                continue
+            parsed[key] = value
+        return MessageRequest.model_validate(parsed)
+    return MessageRequest.model_validate(await request.json())
+
+
 def _inline_model_schema(model) -> dict:
     """Return a standalone schema whose references resolve in-place."""
     schema = model.model_json_schema()
@@ -459,12 +476,7 @@ def create_app(gw: Gateway) -> FastAPI:
         return {"jobs": rows, "next_cursor": next_cursor,
                 "has_more": has_more}
 
-    @app.post("/v1/jobs/{job_id}/message", dependencies=[auth],
-              response_model=MessageResponse, responses=ERROR_RESPONSES)
-    async def add_message(job_id: str, message: MessageRequest,
-                          request: Request):
-        _reject_oversize(request, cfg, maximum_mb=1)
-        job = resolve_job(job_id)
+    async def _store_message(job: dict, message: MessageRequest) -> dict:
         data = message.model_dump(exclude_none=True)
         try:
             row = await run_in_threadpool(
@@ -482,6 +494,22 @@ def create_app(gw: Gateway) -> FastAPI:
             gw.bus.close(job["id"])
         return {"id": job["id"], "seq": row["seq"],
                 "duplicate": bool(row.get("duplicate"))}
+
+    @app.post("/v1/jobs/{job_id}/message", dependencies=[auth],
+              response_model=MessageResponse, responses=ERROR_RESPONSES)
+    async def add_message(job_id: str, message: MessageRequest,
+                          request: Request):
+        _reject_oversize(request, cfg, maximum_mb=1)
+        job = resolve_job(job_id)
+        return await _store_message(job, message)
+
+    @app.post("/v1/jobs/{job_id}/message/file", dependencies=[auth],
+              response_model=MessageResponse, responses=ERROR_RESPONSES)
+    async def add_message_file(job_id: str, request: Request):
+        _reject_oversize(request, cfg, maximum_mb=1)
+        job = resolve_job(job_id)
+        message = await _parse_message_request(request)
+        return await _store_message(job, message)
 
     @app.post("/v1/jobs/{job_id}/steer", dependencies=[auth],
               response_model=SteerResponse, status_code=202,

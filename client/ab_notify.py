@@ -10,6 +10,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 STATUSES = ("queued", "running", "finished", "failed")
 
@@ -72,6 +73,35 @@ def _post(url, token, job_id, payload, timeout):
         response.read()
 
 
+def _post_multipart(url, token, job_id, fields, file_path, timeout):
+    boundary = "----ab-notify-" + uuid.uuid4().hex
+    parts = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+            f"{value}\r\n")
+    filename = os.path.basename(file_path)
+    parts.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n")
+    header = "".join(parts).encode("utf-8")
+    with open(file_path, "rb") as stream:
+        file_bytes = stream.read()
+    trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = header + file_bytes + trailer
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}/v1/jobs/{job_id}/message/file",
+        data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        response.read()
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="ab-notify")
     parser.add_argument("--status", required=True, choices=STATUSES)
@@ -94,36 +124,47 @@ def main(argv=None) -> int:
     if not args.job_id:
         print("ab-notify: no job id (set AB_JOB_ID or pass --job-id)", file=sys.stderr)
         return 2
-    message = args.msg
-    if args.msg_file:
-        try:
-            with open(args.msg_file, encoding="utf-8", errors="replace") as stream:
-                message = stream.read()
-        except OSError as exc:
-            print(f"ab-notify: cannot read --msg-file: {exc}", file=sys.stderr)
-            return 2
-    payload = {"ts": time.time(), "status": args.status,
-               "host": socket.gethostname(),
-               "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
-    if message:
-        payload["msg"] = message
+
+    base = {"ts": time.time(), "status": args.status,
+            "host": socket.gethostname(),
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
     if args.report_id:
-        payload["report_id"] = args.report_id
+        base["report_id"] = args.report_id
 
     errors = []
     url, source = _gateway_url(args.url, args.data_dir)
     token = _token(args.token, args.data_dir)
-    if url and token:
+    can_http = bool(url and token)
+    if not can_http:
+        errors.append(
+            f"http: no gateway url ({source})" if not url else "http: no token found")
+
+    # HTTP first. --msg-file uploads the file via multipart; --msg sends JSON.
+    if can_http:
         try:
-            _post(url, token, args.job_id, payload, args.timeout)
+            if args.msg_file:
+                _post_multipart(url, token, args.job_id, base,
+                                args.msg_file, args.timeout)
+            else:
+                if args.msg:
+                    base["msg"] = args.msg
+                _post(url, token, args.job_id, base, args.timeout)
             print(f"ab-notify: sent via http ({args.status}) -> {url}")
             return 0
         except (urllib.error.URLError, OSError, ValueError) as exc:
             errors.append(f"http {url}: {exc}")
-    elif not url:
-        errors.append(f"http: no gateway url ({source})")
-    else:
-        errors.append("http: no token found")
+
+    # Fallback: JSONL. Inline the message (or file) content into the payload.
+    payload = dict(base)
+    if args.msg_file:
+        try:
+            with open(args.msg_file, encoding="utf-8", errors="replace") as stream:
+                payload["msg"] = stream.read()
+        except OSError as exc:
+            print(f"ab-notify: cannot read --msg-file: {exc}", file=sys.stderr)
+            return 2
+    elif args.msg:
+        payload["msg"] = args.msg
 
     shared = args.messages_dir or (
         os.path.join(args.data_dir, "messages") if args.data_dir else None)
