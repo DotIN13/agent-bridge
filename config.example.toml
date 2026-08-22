@@ -27,6 +27,14 @@ cancel_grace_sec = 15
 # This is how long to wait before giving up. 0 = wait forever.
 report_timeout_sec = 86400
 
+# What this machine's owner knows and no probe can discover: scheduler
+# accounts, full filesystems, which env holds which package. Served beside the
+# probed facts on /v1/info. Edited on the host — by an agent job, by `ab
+# upload`, or in an editor over ssh — so there is no write endpoint.
+[notes]
+path = "gateway.md"    # relative paths resolve against the data dir
+max_bytes = 65536      # how much of it is served
+
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 

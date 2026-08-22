@@ -30,7 +30,7 @@ from .api_models import (
     CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
     JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
     SessionDirsResponse, SessionsResponse, SteerRequest, SteerResponse,
-    UploadResponse,
+    UploadResponse, iso_local,
 )
 from .bus import Bus
 from .cluster import ClusterInfo
@@ -39,6 +39,7 @@ from .db import (Database, IdempotencyConflict, ReportConflict, TERMINAL,
                  derive_title)
 from .docs import render_llms_txt
 from .files import FileError
+from .notes import NotesStore
 from .worker import WorkerPool
 
 _SSE_POLL = 0.3
@@ -118,6 +119,8 @@ class Gateway:
         self.cluster = ClusterInfo(
             cfg.cluster_probe_timeout, cfg.cluster_env_presence
         ) if cfg.cluster_enabled else None
+        # What the owner knows and the probes cannot discover (gateway/notes.py).
+        self.notes = NotesStore(cfg.notes_path, cfg.notes_max_bytes)
 
     def publish_endpoint(self) -> dict:
         loopback = self.cfg.host in ("127.0.0.1", "localhost", "::1", "")
@@ -311,12 +314,31 @@ def create_app(gw: Gateway) -> FastAPI:
     @app.get("/v1/info", dependencies=[auth], response_model=dict[str, Any],
              responses=ERROR_RESPONSES)
     async def info(refresh: bool = False):
+        """What this machine is, and what its owner says about it.
+
+        Two kinds of knowledge in one answer, deliberately. Above: what the
+        probes measured — hostname, GPUs, scheduler. Below, under `notes`: the
+        markdown file on this host, which is where the things no probe can
+        discover live — which account to charge, which filesystem is full,
+        which env has which package. A caller that reads one has read the
+        other, which is the point: nobody thinks to ask for local conventions
+        they do not know exist.
+        """
         if not gw.cluster:
             raise ApiError(404, "cluster_info_disabled",
                            "cluster probing is disabled")
         if refresh:
             gw.cluster.refresh_async()
-        return gw.cluster.get()
+        doc = gw.notes.read()
+        return {**gw.cluster.get(),
+                # ISO with the offset, like every other timestamp this API
+                # publishes — a bare epoch float has never reached a caller and
+                # should not start here.
+                "notes": {"text": doc.text,
+                          "updated_at": iso_local(doc.updated_at) if doc.updated_at else None,
+                          # The path, so an agent asked to update the notes
+                          # knows which file to open.
+                          "path": gw.notes.path}}
 
     @app.get("/v1/session-dirs", dependencies=[auth],
              response_model=SessionDirsResponse, responses=ERROR_RESPONSES)

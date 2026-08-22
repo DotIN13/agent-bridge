@@ -252,8 +252,17 @@ def cmd_help(args):
 
 def cmd_info(args):
     data = _client(args).info(refresh=args.refresh)
-    _emit(args, data,
-          lambda value: print(value.get("summary") or json.dumps(value, indent=2)))
+
+    def human(value):
+        print(value.get("summary") or json.dumps(
+            {k: v for k, v in value.items() if k != "notes"}, indent=2))
+        notes = (value.get("notes") or {}).get("text", "").strip()
+        if notes:
+            # After the probes, because it answers a different question: what
+            # this machine *is*, then what its owner says about working on it.
+            print("\n-- operator notes " + "-" * 42)
+            print(notes)
+    _emit(args, data, human)
 
 
 def cmd_models(args):

@@ -34,6 +34,12 @@ _DEFAULTS: dict = {
         # env vars reported presence-only (never their values) at /v1/info
         "env_presence": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
     },
+    # Operator notes: what this machine's owner knows and the probes cannot
+    # discover. One markdown file, served to every client (see gateway/notes.py).
+    "notes": {
+        "path": "gateway.md",      # relative paths resolve against the data dir
+        "max_bytes": 65536,
+    },
     "files": {
         "enabled": True,
         "dir": "",                 # "" -> per-user dir under $TMPDIR; abs or data_dir-relative otherwise
@@ -102,6 +108,8 @@ class Config:
     files_dir: str = ""
     files_max_file_mb: int = 100
     files_max_request_mb: int = 512
+    notes_path: str = ""          # absolute; the operator notes document
+    notes_max_bytes: int = 65536
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @property
@@ -210,6 +218,10 @@ def load(path: str | os.PathLike | None) -> Config:
 
     cl = raw.get("cluster", {})
     fl = raw.get("files", {})
+    nt = raw.get("notes", {})
+    notes_path = Path(nt.get("path", "gateway.md")).expanduser()
+    if not notes_path.is_absolute():
+        notes_path = data_dir / notes_path
     files_dir = _resolve_files_dir(fl.get("dir", ""), data_dir)
     return Config(
         host=raw["server"]["host"],
@@ -229,6 +241,8 @@ def load(path: str | os.PathLike | None) -> Config:
         files_dir=files_dir,
         files_max_file_mb=int(fl.get("max_file_mb", 100)),
         files_max_request_mb=int(fl.get("max_request_mb", 512)),
+        notes_path=str(notes_path),
+        notes_max_bytes=int(nt.get("max_bytes", 65536)),
         agents=agents,
     )
 

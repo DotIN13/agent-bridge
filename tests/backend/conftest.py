@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from gateway.bus import Bus
 from gateway.config import AgentConfig, Config
 from gateway.db import Database
+from gateway.notes import NotesStore
 from gateway.server import create_app
 
 
@@ -58,10 +59,12 @@ def gateway(tmp_path):
         host="127.0.0.1", port=8787, token="test-token", concurrency=1,
         db_path=str(tmp_path / "gateway.db"), data_dir=str(tmp_path),
         messages_dir=str(messages), files_dir=str(files),
-        files_enabled=True, cluster_enabled=False, agents={"claude": agent})
+        files_enabled=True, cluster_enabled=False, agents={"claude": agent},
+        notes_path=str(tmp_path / "gateway.md"))
     gw = SimpleNamespace(
         cfg=cfg, db=Database(cfg.db_path), bus=Bus(),
-        pool=FakePool(), cluster=None)
+        pool=FakePool(), cluster=None,
+        notes=NotesStore(cfg.notes_path, cfg.notes_max_bytes))
     yield gw
     try:
         gw.db.close()

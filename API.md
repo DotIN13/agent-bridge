@@ -36,7 +36,7 @@ validation. Unknown job-submission fields are rejected rather than ignored.
 | GET | `/llms.txt`, `/v1/help` | live instance-specific guide; no auth |
 | GET | `/v1/agents` | agents, models, defaults, capabilities, server features |
 | GET | `/v1/models?agent=` | retained model-catalog projection |
-| GET | `/v1/info?refresh=1` | cached cluster capabilities; optional background refresh |
+| GET | `/v1/info?refresh=1` | cached cluster capabilities plus operator notes; optional background refresh |
 | GET | `/v1/session-dirs?agent=` | directories holding sessions; complete, unpaged |
 | GET | `/v1/sessions?cwd=&agent=&limit=&cursor=` | sessions in one directory (exact match), paged |
 | POST | `/v1/jobs` | validate, persist, and enqueue a job |
@@ -91,6 +91,35 @@ Ambiguous references return `409 ambiguous_reference` with candidates.
 Capabilities are adapter/mode-specific. Consult them before steering or
 resuming. `/v1/models` remains for compatibility; configured model ids are
 advertised strings and are passed to the backend verbatim.
+
+### `GET /v1/info` and operator notes
+
+Two kinds of knowledge in one answer. Above: what the probes measured. Below,
+under `notes`: a markdown file on the gateway host, holding what no probe can
+discover — which account to charge, which filesystem is full, which env has
+which package.
+
+```json
+{ "ready": true, "summary": "login5 · 64 CPU/251GB · slurm 20.11.8",
+  "notes": {"text": "## Slurm
+- --account=pi-jevans …",
+            "updated_at": "2026-08-22T11:06:34.748-05:00",
+            "path": "/home/you/.agent-bridge/gateway.md"} }
+```
+
+They are together on purpose: nobody thinks to ask for local conventions they
+do not know exist, so the request that answers "what is this machine" answers
+"how do I work on it" as well. `text` is `""` when the file is absent, which is
+not an error — a gateway whose owner has written nothing is not broken. An
+unreadable file reads as empty too, because these notes must never be able to
+take `/v1/info` down.
+
+**There is no write endpoint.** The file lives on the host that serves it, so
+the ways to change it already exist and are better: an agent with file tools
+edits it in place, `POST /v1/files` uploads it, or its owner opens an editor
+over ssh. A fourth way could only clobber the other three. `path` is published
+so an agent asked to update the notes knows what to open, and `[notes] path`
+in the config moves it (default `gateway.md` in the data dir).
 
 ### `GET /v1/session-dirs?agent=<name>`
 

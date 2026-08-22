@@ -109,7 +109,7 @@ Full reference: [API.md](API.md). Live instances serve `/llms.txt`, `/v1/help`,
 | GET | `/health` | public liveness/version |
 | GET | `/llms.txt`, `/v1/help` | live agent guide |
 | GET | `/v1/agents` | agents, models, capabilities, features |
-| GET | `/v1/info`, `/v1/sessions` | cluster and session discovery |
+| GET | `/v1/info`, `/v1/sessions` | cluster and session discovery, plus operator notes |
 | POST/GET | `/v1/jobs` | idempotent submit; paged summaries |
 | GET | `/v1/jobs/{ref}` | full typed detail |
 | GET | `/v1/jobs/{ref}/events` | JSON page or resumable SSE |
@@ -174,6 +174,21 @@ These `message` events are **post-terminal annotations**, not a second job
 status machine. The coding-agent SSE closes when the job becomes terminal.
 Reports arriving later are retrieved by reconnecting with the last cursor or
 polling events. `report_id` deduplicates a retried report.
+
+## Operator notes
+
+`GET /v1/info` returns the probed facts about the host and, beside them, the
+contents of one markdown file — `gateway.md` in the data dir by default:
+
+```bash
+ab info          # probes first, then the notes under a rule
+```
+
+It is for what a person knows and a probe cannot find: the account to charge,
+the partition with the GPUs, the filesystem that is nearly full. Edit it on the
+host — an agent job can, `ab upload` can, an editor over ssh can — and the next
+`/v1/info` reflects it. There is no write endpoint on purpose; `[notes] path`
+and `[notes] max_bytes` are the only configuration.
 
 ## Configuration and operations
 
