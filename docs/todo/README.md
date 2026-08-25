@@ -11,11 +11,20 @@ records refer to them.
 | # | Item | Severity | Blocked on |
 |---|---|---|---|
 | [09](09-steer-vs-resume-is-a-race.md) | Steer-vs-resume is a race the caller has to arbitrate | medium | a design decision |
+| [12](12-fleet-drift-and-self-update.md) | Five deployments drift silently; three have no update path | high | nothing — staged, phase 1 is standalone |
 
 ## Suggested order
 
-**09 is the only thing open**, and it is blocked on a decision rather than on
-work. It is friction and a lost race, not corruption; the guards added in
+**12 first, and only its first phase.** The version string has not moved since
+2026-08-10 and `main` is 28 commits past it, so every gateway in the fleet
+reports `0.3.0` and two of them demonstrably run different code. Phase 1 —
+stamp the commit, serve it, and add `ab fleet` — is a day's work, carries no
+operational risk, and is what turns "probably stale" into a number. The
+self-updating parts behind it can wait for that number to say how badly they
+are needed.
+
+**09 is blocked on a decision rather than on work.** It is friction and a lost
+race, not corruption; the guards added in
 [design/02](../design/02-mid-turn-steering-or-liveness-gate.md) keep it safe, and
 "do nothing, document the pairing" is a defensible end state. Worth taking when
 the shape of the CLI is being revisited anyway.
