@@ -267,6 +267,16 @@ Pass `next_cursor` unchanged to fetch the next page. Public booleans are JSON
 booleans, `files` is always an array in detail, and internal DB fields are not
 exposed.
 
+**`session` is one field, and it is populated from the first moment the run
+knows it.** It starts as whatever the caller pinned, or null for a fresh run,
+and is replaced by the id the agent actually reports -- so a `running` job names
+its session, and the value is always the one to pass back as `session` on the
+next job. It used to be three columns (`requested_session`, `chosen_session`,
+`forked_session`) written only when the job reached a terminal state, which left
+every running job blank and every caller guessing which of the three to read.
+Older databases are migrated in place; the three no longer appear in any
+response.
+
 ### `GET /v1/jobs/{ref}`
 
 Returns full detail: summary fields plus `prompt`, `permission_mode`, `files`,

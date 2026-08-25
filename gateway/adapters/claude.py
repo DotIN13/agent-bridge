@@ -30,7 +30,6 @@ from ..sessions import (DirInfo, SessionInfo, SessionPage,
 from .base import (Event, JobSpec, RunResult, Steering, interrupt_group,
                    resume_cwd)
 
-_RESUME_RE = re.compile(r"--resume[= ]+([0-9a-fA-F-]{36})")
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
 
 _DISPATCH_PROMPT = """\
@@ -245,7 +244,7 @@ class ClaudeAdapter:
                               "session": spec.requested_session or "NEW",
                               "fork": spec.fork,
                               "steerable": True}))
-        res = RunResult(ok=False, chosen_session=spec.requested_session)
+        res = RunResult(ok=False, session=spec.requested_session)
         self._stream(args, self._cwd_for(spec, emit), emit, res,
                      capture_nested=False, cancel=spec.cancel, steer=spec.steer,
                      first_message=spec.prompt)
@@ -387,7 +386,7 @@ class ClaudeAdapter:
         if spec.model or self.cfg.model:
             exec_args += ["--model", spec.model or self.cfg.model]
 
-        res = RunResult(ok=False, chosen_session=chosen)
+        res = RunResult(ok=False, session=chosen)
         self._stream(exec_args, target_cwd, emit, res, capture_nested=False,
                      cancel=spec.cancel)
         return res
@@ -471,8 +470,8 @@ class ClaudeAdapter:
             # from `ab jobs` which session a fresh run created, which is
             # exactly the id you need for the follow-up `--session`.
             sid = rec.get("session_id")
-            if sid and not res.forked_session:
-                res.forked_session = sid
+            if sid:
+                res.session = sid
             emit(Event("status", {"subtype": rec.get("subtype"),
                                   "session_id": sid,
                                   "model": rec.get("model"),
@@ -485,13 +484,8 @@ class ClaudeAdapter:
                 elif bt == "thinking":
                     emit(Event("thinking", {"text": block.get("thinking", "")}))
                 elif bt == "tool_use":
-                    inp = block.get("input", {})
-                    emit(Event("tool_use", {"name": block.get("name"), "input": inp}))
-                    if capture_nested:
-                        cmd = inp.get("command", "") if isinstance(inp, dict) else ""
-                        m = _RESUME_RE.search(cmd or "")
-                        if m:
-                            res.chosen_session = m.group(1)
+                    emit(Event("tool_use", {"name": block.get("name"),
+                                            "input": block.get("input", {})}))
         elif rtype == "user":
             blocks = _as_list(rec.get("message", {}).get("content"))
             texts = [b.get("text", "") for b in blocks
@@ -525,12 +519,10 @@ class ClaudeAdapter:
             res.ok = not rec.get("is_error", False)
             m = _ARROW_RE.search(text)
             if m and capture_nested:
-                if m.group(1) != "NEW":
-                    res.chosen_session = res.chosen_session or m.group(1)
-                res.forked_session = res.forked_session or m.group(2)
+                # `session: <parent> -> <branch>`; the branch is the answer.
+                res.session = m.group(2)
             emit(Event("result", {"text": text, "cost_usd": res.cost_usd,
-                                  "chosen_session": res.chosen_session,
-                                  "forked_session": res.forked_session,
+                                  "session": res.session,
                                   "is_error": rec.get("is_error", False)}))
 
     def _absorb_nested(self, text: str, res: RunResult):
@@ -539,7 +531,7 @@ class ClaudeAdapter:
         obj = _find_json_with(text, "session_id")
         if not obj:
             return
-        res.forked_session = res.forked_session or obj.get("session_id")
+        res.session = obj.get("session_id") or res.session
         if obj.get("result"):
             res.result = obj["result"]
         if obj.get("total_cost_usd") is not None:

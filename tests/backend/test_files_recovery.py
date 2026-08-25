@@ -94,10 +94,10 @@ def test_restart_reconciles_running_and_returns_queued(tmp_path):
     db = Database(str(tmp_path / "recovery.db"))
     queued = db.create_job(
         agent="claude", prompt="queued", cwd=str(tmp_path),
-        requested_session=None, permission_mode=None, model=None)
+        session=None, permission_mode=None, model=None)
     running = db.create_job(
         agent="claude", prompt="running", cwd=str(tmp_path),
-        requested_session=None, permission_mode=None, model=None)
+        session=None, permission_mode=None, model=None)
     db.mark_running(running)
     db.append_event(running, "status", {"stage": "running"})
 

@@ -18,7 +18,7 @@ from gateway.worker import WorkerPool
 
 def make_job(db: Database, title="event-job") -> str:
     return db.create_job(
-        agent="claude", prompt=title, cwd="/tmp", requested_session=None,
+        agent="claude", prompt=title, cwd="/tmp", session=None,
         permission_mode=None, model=None, title=title)
 
 
@@ -300,7 +300,7 @@ def test_job_row_exposes_one_canonical_session(client, auth, gateway):
     jid = accepted["id"]
     detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
     assert detail["session"] == "asked"          # falls back before init
-    gateway.db.finish_job(jid, status="succeeded", forked_session="wrote")
+    gateway.db.finish_job(jid, status="succeeded", session="wrote")
     detail = client.get(f"/v1/jobs/{jid}", headers=auth).json()
     assert detail["session"] == "wrote"          # the id actually written wins
 
@@ -383,7 +383,7 @@ def test_cancel_during_terminal_commit_cannot_be_falsely_accepted(
     db = Database(cfg.db_path)
     job = db.create_job(
         agent="claude", prompt="race", cwd=str(allowed),
-        requested_session=None, permission_mode=None, model=None)
+        session=None, permission_mode=None, model=None)
     pool = WorkerPool(cfg, db, Bus())
 
     class Adapter:

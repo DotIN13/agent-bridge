@@ -60,9 +60,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     fork              INTEGER,
     include_thinking  INTEGER,
     cwd               TEXT,
-    requested_session TEXT,
-    chosen_session    TEXT,
-    forked_session    TEXT,
+    session           TEXT,
     permission_mode   TEXT,
     model             TEXT,
     files             TEXT,
@@ -160,6 +158,10 @@ def _decode_job(row, *, detail: bool = True) -> dict | None:
     out = dict(row)
     out.pop("title_norm", None)
     out.pop("_rowid", None)
+    # Dead since the session columns were collapsed, and still on disk in any
+    # database old enough to have them.
+    for legacy in ("requested_session", "chosen_session", "forked_session"):
+        out.pop(legacy, None)
     out["fork"] = True if out.get("fork") is None else bool(out["fork"])
     out["include_thinking"] = bool(out.get("include_thinking"))
     out["files"] = _decode_files(out.get("files"))
@@ -197,6 +199,7 @@ class Database:
 
     def _migrate_locked(self) -> None:
         cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+        self._migrate_sessions_locked(cols)
         for name, decl in (("files", "TEXT"), ("title", "TEXT"),
                            ("title_norm", "TEXT"), ("fork", "INTEGER"),
                            ("include_thinking", "INTEGER"),
@@ -215,6 +218,34 @@ class Database:
             "ON CONFLICT(job_id) DO UPDATE SET next_seq="
             "MAX(event_counters.next_seq,excluded.next_seq)")
 
+    def _migrate_sessions_locked(self, cols: set[str]) -> None:
+        """Three session columns become one.
+
+        `requested_session`, `chosen_session` and `forked_session` date from the
+        dispatcher modes, where an agent chose which session to use and the
+        three were genuinely different things. Under `direct` dispatch only one
+        of them is ever written -- across a hundred real jobs on one gateway,
+        the other two had never held a value -- and callers had to be told which
+        of the three to read. Now there is one: what the caller asked for,
+        overwritten by what the run actually used.
+
+        The old columns are left where they are rather than dropped. `DROP
+        COLUMN` wants a recent SQLite and cannot be undone on a login node at
+        two in the morning; ignoring three dead columns costs nothing, and
+        `_decode_job` keeps them out of the API either way.
+        """
+        if "session" in cols:
+            return
+        self._conn.execute("ALTER TABLE jobs ADD COLUMN session TEXT")
+        legacy = [name for name in
+                  ("forked_session", "chosen_session", "requested_session")
+                  if name in cols]
+        if legacy:
+            # In that order: the id a run created wins over the one an agent
+            # picked, which wins over the one the caller asked for.
+            self._conn.execute(
+                f"UPDATE jobs SET session = COALESCE({', '.join(legacy)})")
+
     def _backfill_titles_locked(self) -> None:
         rows = self._conn.execute(
             "SELECT id,prompt FROM jobs WHERE title IS NULL OR title=''"
@@ -227,24 +258,24 @@ class Database:
 
     # ---- jobs -----------------------------------------------------------
     def _insert_job_locked(self, *, job_id: str, agent: str, prompt: str,
-                           cwd: str | None, requested_session: str | None,
+                           cwd: str | None, session: str | None,
                            permission_mode: str | None, model: str | None,
                            title: str | None, fork: bool,
                            include_thinking: bool, files: list[str] | None,
                            expect_report: bool = False) -> None:
         title = (title or "").strip() or derive_title(prompt)
         self._conn.execute(
-            "INSERT INTO jobs (id,status,agent,prompt,cwd,requested_session,"
+            "INSERT INTO jobs (id,status,agent,prompt,cwd,session,"
             "permission_mode,model,title,title_norm,fork,include_thinking,files,"
             "expect_report,created_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (job_id, "queued", agent, prompt, cwd, requested_session,
+            (job_id, "queued", agent, prompt, cwd, session,
              permission_mode, model, title, norm_title(title),
              1 if fork else 0, 1 if include_thinking else 0,
              json.dumps(files or []), 1 if expect_report else 0, time.time()))
 
     def create_job(self, *, agent: str, prompt: str, cwd: str | None,
-                   requested_session: str | None, permission_mode: str | None,
+                   session: str | None, permission_mode: str | None,
                    model: str | None, title: str | None = None, fork: bool = True,
                    include_thinking: bool = False, files: list[str] | None = None,
                    expect_report: bool = False,
@@ -253,7 +284,7 @@ class Database:
         with self._lock:
             self._insert_job_locked(
                 job_id=job_id, agent=agent, prompt=prompt, cwd=cwd,
-                requested_session=requested_session,
+                session=session,
                 permission_mode=permission_mode, model=model, title=title,
                 fork=fork, include_thinking=include_thinking, files=files,
                 expect_report=expect_report)
@@ -399,6 +430,16 @@ class Database:
             except Exception:
                 self._conn.rollback()
                 raise
+
+    def set_job_session(self, job_id: str, session_id: str) -> None:
+        """The session a run is using, the moment it says so.
+
+        The terminal write records it too, but only at the end -- so a running
+        job, which is the one anybody is actually watching, had an empty session
+        for its whole life, and a run that died on an exception took the id with
+        it.
+        """
+        self._update(job_id, session=session_id)
 
     def mark_running(self, job_id: str) -> None:
         self._update(job_id, status="running", started_at=time.time())

@@ -448,7 +448,7 @@ def create_app(gw: Gateway) -> FastAPI:
                 "session_state": "pinned" if spec.session else "pending"}
             job_data = dict(
                 job_id=job_id, agent=agent_name, prompt=spec.prompt, cwd=cwd,
-                requested_session=spec.session,
+                session=spec.session,
                 permission_mode=spec.permission_mode, model=spec.model,
                 title=title, fork=spec.fork,
                 include_thinking=spec.include_thinking, files=paths,

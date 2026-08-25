@@ -112,7 +112,14 @@ class WorkerPool:
             holder = self._claimed.get(session_id)
             if holder and holder != job_id:
                 return holder
+            fresh = self._claimed.get(session_id) != job_id
             self._claimed[session_id] = job_id
+        if fresh:
+            # On the row, not only in memory. The claim is what stops two jobs
+            # sharing a session; the row is what lets anybody see which session
+            # a running job is in -- and the terminal write is far too late for
+            # that, since it never comes at all if the run raises.
+            self.db.set_job_session(job_id, session_id)
         return None
 
     def _release_locked(self, job_id: str) -> None:
@@ -185,7 +192,7 @@ class WorkerPool:
                 job_id=job_id,
                 prompt=job["prompt"],
                 cwd=job["cwd"] or agent_cfg.default_cwd,
-                requested_session=job["requested_session"],
+                requested_session=job["session"],
                 permission_mode=job["permission_mode"],
                 model=job["model"],
                 cancel=cancel,
@@ -246,8 +253,7 @@ class WorkerPool:
         with self._lock:
             fields = {
                 "result": result.result or None,
-                "chosen_session": result.chosen_session,
-                "forked_session": result.forked_session,
+                "session": result.session,
                 "cost_usd": result.cost_usd,
             }
             if cancel.cancelled():

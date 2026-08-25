@@ -153,9 +153,9 @@ class JobSummary(BaseModel):
     agent: str
     title: str | None = None
     cwd: str | None = None
-    requested_session: str | None = None
-    chosen_session: str | None = None
-    forked_session: str | None = None
+    #: What the caller asked for, overwritten by what the run actually used --
+    #: so this is always the id to pass back as `session` on the next job.
+    session: str | None = None
     model: str | None = None
     fork: bool = True
     include_thinking: bool = False
@@ -164,21 +164,6 @@ class JobSummary(BaseModel):
     started_at: IsoTimestamp = None
     finished_at: IsoTimestamp = None
     last_event_at: IsoTimestamp = None
-
-    @computed_field
-    @property
-    def session(self) -> str | None:
-        """The session to pass back as `session` on the next job.
-
-        There are three session columns and nothing previously said which one
-        a caller should reuse, so this is the single documented answer. Under
-        `direct` dispatch `forked_session` is correct in every case: a fresh run
-        reports the id it created, a fork reports the new branch, and an
-        in-place resume reports the target it appended to. The other two are
-        fallbacks for a row that has not reached its init record yet.
-        """
-        return self.forked_session or self.chosen_session or self.requested_session
-
 
 class JobDetail(JobSummary):
     prompt: str

@@ -69,11 +69,12 @@ def _wait_reached(job: dict, saw_report: bool, until: str) -> bool:
 # Short by design: `ab gateways` probes every configured gateway, so this is
 # the worst case a listing waits on one dead entry, not a request budget.
 PROBE_TIMEOUT = 3.0
-# How long `submit` waits for the session id a fresh job will create. Generous
-# enough to cover an agent's startup and a short queue, short enough that a
-# submit never feels like a wait. Exceeding it is not an error: the job is
-# running and the id can still be read off the row.
-AWAIT_SESSION_TIMEOUT = 30.0
+# How long `submit` waits for the session id a fresh job will create. The id
+# arrives on the agent's first record -- the third event, a second or two in --
+# so ten seconds covers a slow start and a short queue while keeping a submit
+# something you wait through rather than walk away from. Exceeding it is not an
+# error: the job is running and the id can still be read off the row.
+AWAIT_SESSION_TIMEOUT = 10.0
 EVENT_TYPES = {
     "assistant", "thinking", "tool_use", "tool_result", "result", "status",
     "error", "log", "message", "steer",

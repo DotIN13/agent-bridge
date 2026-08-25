@@ -353,8 +353,9 @@ class Event:
 class RunResult:
     ok: bool
     result: str = ""
-    chosen_session: str | None = None
-    forked_session: str | None = None
+    #: The session this run used. Starts as the caller's request, if there was
+    #: one, and is replaced by the real id the moment the agent reports it.
+    session: str | None = None
     cost_usd: float | None = None
     error: str | None = None
 

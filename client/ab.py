@@ -369,7 +369,7 @@ def cmd_run(args):
             print(f"[timeout] job {job.get('id')} continues with status "
                   f"{job.get('status')}", file=sys.stderr)
         print(f"[{job.get('status')}] id={job.get('id')} "
-              f"chosen={job.get('chosen_session')} forked={job.get('forked_session')} "
+              f"session={job.get('session')} "
               f"cost=${job.get('cost_usd')}", file=sys.stderr)
     _remote_exit(job)
 

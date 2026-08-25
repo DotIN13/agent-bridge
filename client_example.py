@@ -69,8 +69,8 @@ def _render(etype, ev):
     elif etype == "result":
         print("\n\n=== RESULT ===")
         print(d.get("text", ""))
-        print(f"(chosen={d.get('chosen_session')} forked={d.get('forked_session')} "
-              f"cost=${d.get('cost_usd')})", file=sys.stderr)
+        print(f"(session={d.get('session')} cost=${d.get('cost_usd')})",
+              file=sys.stderr)
     elif etype == "error":
         print(f"\n[ERROR] {d.get('message')}", file=sys.stderr)
 

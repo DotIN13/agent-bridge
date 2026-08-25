@@ -61,10 +61,10 @@ Two properties make it worth doing server-side rather than as a client loop:
   only acceptable if the caller can see which way it went.
 
 Collapsing job refs and session ids into one address space also removes a
-papercut: continuing a finished job currently means digging `forked_session` off
-the row and passing it back, which is what the canonical `session` field from
-[design/08](../design/08-resume-handles-readable-time-and-tailing.md) already
-half-solves.
+papercut: continuing a finished job means reading `session` off the row and
+passing it back. Collapsing the three session columns into that one field
+already did most of this — the remaining step is not having to read the row at
+all.
 
 ## The decision this needs
 

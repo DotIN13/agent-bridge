@@ -251,7 +251,7 @@ class OpenCodeAdapter:
                               "session": spec.requested_session or "NEW",
                               "fork": spec.fork}))
         text: list[str] = []
-        res = RunResult(ok=False, chosen_session=spec.requested_session)
+        res = RunResult(ok=False, session=spec.requested_session)
         self._stream(args, cwd, spec.prompt, emit, res, text,
                      cancel=spec.cancel)
         return res
@@ -311,14 +311,13 @@ class OpenCodeAdapter:
             res.ok = True
             res.result = "\n".join(text)
             emit(Event("result", {"text": res.result, "cost_usd": res.cost_usd,
-                                  "chosen_session": res.chosen_session,
-                                  "forked_session": res.forked_session,
+                                  "session": res.session,
                                   "is_error": False}))
 
     def _handle_record(self, rec, emit, res: RunResult, text: list[str]):
         sid = rec.get("sessionID")
-        if sid and not res.forked_session:
-            res.forked_session = sid
+        if sid:
+            res.session = sid
         t = rec.get("type")
         part = rec.get("part") or {}
         if t == "step_start":

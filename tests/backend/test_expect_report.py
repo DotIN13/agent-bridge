@@ -24,7 +24,7 @@ from abclient import _job_payload  # noqa: E402
 def _job(db, *, expect_report=False):
     return db.create_job(
         agent="claude", prompt="submit the sweep", cwd=None,
-        requested_session=None, permission_mode=None, model=None,
+        session=None, permission_mode=None, model=None,
         expect_report=expect_report)
 
 
