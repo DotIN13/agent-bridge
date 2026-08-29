@@ -6,6 +6,7 @@ import queue
 import threading
 import traceback
 
+from . import jobdir
 from .adapters import build as build_adapter
 from .adapters.base import Cancellation, Event, JobSpec, Steering
 from .bus import Bus
@@ -188,6 +189,16 @@ class WorkerPool:
             self._steers[job_id] = steer
 
         try:
+            # Created before the agent starts, so `$AB_JOB_DIR/progress/` is
+            # already there the first time the delegate reaches for it. A dir we
+            # cannot create is not worth failing a job over -- the job simply
+            # runs without one, and the preamble then says nothing about it.
+            try:
+                job_dir = str(jobdir.prepare(self.cfg.data_dir, job_id))
+            except OSError as exc:
+                job_dir = ""
+                self.db.append_event(job_id, "log", {
+                    "job_dir": "unavailable", "reason": str(exc)})
             spec = JobSpec(
                 job_id=job_id,
                 prompt=job["prompt"],
@@ -201,6 +212,7 @@ class WorkerPool:
                 title=job.get("title") or "",
                 fork=bool(job.get("fork", True)),
                 include_thinking=bool(job.get("include_thinking")),
+                job_dir=job_dir,
             )
             if not spec.fork:
                 holder = self._claim(job_id, spec.requested_session)

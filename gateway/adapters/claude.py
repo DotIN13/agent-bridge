@@ -27,8 +27,8 @@ from typing import Callable
 from ..config import AgentConfig
 from ..sessions import (DirInfo, SessionInfo, SessionPage,
                         find as find_session, list_dirs, scan)
-from .base import (Event, JobSpec, RunResult, Steering, interrupt_group,
-                   resume_cwd)
+from .base import (Event, JobSpec, RunResult, Steering, child_env,
+                   interrupt_group, job_dir_note, resume_cwd)
 
 _ARROW_RE = re.compile(r"session:\s*(\S+)\s*->\s*(\S+)")
 
@@ -187,6 +187,17 @@ class ClaudeAdapter:
     def _attached_note(self, spec: JobSpec) -> str:
         return _attached_block(spec.files).strip()
 
+    def _system_block(self, spec: JobSpec) -> str:
+        """What the gateway itself has to tell the agent, or "" if nothing.
+
+        Two facts, both of which the caller's prompt cannot supply: where the
+        attached files landed, and where to write to be heard. Joined into one
+        `--append-system-prompt` because the flag takes a single value.
+        """
+        return "\n".join(
+            part for part in (job_dir_note(spec), _attached_block(spec.files))
+            if part).strip()
+
     def run(self, spec: JobSpec, emit: Callable[[Event], None]) -> RunResult:
         if self.cfg.dispatch_mode == "direct":
             return self._run_direct(spec, emit)
@@ -235,8 +246,9 @@ class ClaudeAdapter:
             return res
         if spec.model or self.cfg.model:
             args += ["--model", spec.model or self.cfg.model]
-        if spec.files:
-            args += ["--append-system-prompt", _attached_block(spec.files)]
+        system = self._system_block(spec)
+        if system:
+            args += ["--append-system-prompt", system]
         for d in _parent_dirs(spec.files):
             args += ["--add-dir", d]
 
@@ -247,7 +259,7 @@ class ClaudeAdapter:
         res = RunResult(ok=False, session=spec.requested_session)
         self._stream(args, self._cwd_for(spec, emit), emit, res,
                      capture_nested=False, cancel=spec.cancel, steer=spec.steer,
-                     first_message=spec.prompt)
+                     first_message=spec.prompt, env=child_env(spec))
         return res
 
     def _cwd_for(self, spec: JobSpec, emit) -> str:
@@ -309,7 +321,7 @@ class ClaudeAdapter:
             allowed_dirs=", ".join(self.cfg.allowed_dirs),
             attached=_attached_block(spec.files),
             sessions_json=self._index_json(spec.cwd),
-        )
+        ) + job_dir_note(spec)
         args = [
             self.cfg.bin, "-p", spec.prompt,
             "--output-format", "stream-json", "--verbose",
@@ -326,7 +338,7 @@ class ClaudeAdapter:
 
         res = RunResult(ok=False)
         self._stream(args, spec.cwd, emit, res, capture_nested=True,
-                     cancel=spec.cancel)
+                     cancel=spec.cancel, env=child_env(spec))
         return res
 
     # -- mode 2: model selects, worker executes ---------------------------
@@ -377,8 +389,9 @@ class ClaudeAdapter:
         exec_args = [self.cfg.bin, "-p", spec.prompt,
                      "--output-format", "stream-json", "--verbose",
                      "--permission-mode", perm]
-        if spec.files:
-            exec_args += ["--append-system-prompt", _attached_block(spec.files)]
+        system = self._system_block(spec)
+        if system:
+            exec_args += ["--append-system-prompt", system]
         if chosen:
             exec_args += ["--resume", chosen]
             if spec.fork:
@@ -388,13 +401,14 @@ class ClaudeAdapter:
 
         res = RunResult(ok=False, session=chosen)
         self._stream(exec_args, target_cwd, emit, res, capture_nested=False,
-                     cancel=spec.cancel)
+                     cancel=spec.cancel, env=child_env(spec))
         return res
 
     # -- shared streaming -------------------------------------------------
     def _stream(self, args, cwd, emit, res: RunResult, *, capture_nested: bool,
                 cancel=None, steer: Steering | None = None,
-                first_message: str | None = None):
+                first_message: str | None = None,
+                env: dict[str, str] | None = None):
         streaming_in = first_message is not None
         if os.name == "nt":
             popen_kw: dict = dict(
@@ -409,6 +423,8 @@ class ClaudeAdapter:
             )
         if streaming_in:
             popen_kw["stdin"] = subprocess.PIPE
+        if env is not None:
+            popen_kw["env"] = env
         proc = subprocess.Popen(args, **popen_kw)
         if cancel is not None:
             cancel.bind(proc)  # kills the process group on cancel (even if already set)

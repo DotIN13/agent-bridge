@@ -341,6 +341,45 @@ class JobSpec:
     title: str = ""                # human handle for the job
     fork: bool = True              # False -> resume the target session in place
     include_thinking: bool = False # True -> keep model reasoning in the event stream
+    job_dir: str = ""              # absolute; the directory this job reports through
+
+
+#: Told to every job, in whatever way the backend can carry a system prompt.
+#: Facts only -- where to write and what the words mean. What makes a *good*
+#: report belongs in the brief and in the worker skill, which can be argued
+#: with; this is the part that has to be true even when neither is present.
+_JOB_DIR_NOTE = """\
+REPORTING (agent-bridge)
+Your job has a directory of its own, and it is already created:
+    AB_JOB_DIR = {job_dir}
+Write there to be heard. No job id, url or token is needed for any of it.
+  - a milestone:   echo "12/24 sources done" > "$AB_JOB_DIR/progress/010-sources.md"
+  - the finish:    echo finished > "$AB_JOB_DIR/status"      (or: failed)
+  - a long report: cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"
+Each file becomes one event on this job's stream, so the caller sees it without
+reading your transcript. Rewriting a file with new content reports again;
+rewriting it unchanged does not. Keep the whole content in the file rather than
+pointing at a path only you can open.
+"""
+
+
+def job_dir_note(spec: "JobSpec") -> str:
+    """The reporting preamble for this job, or "" when it has no directory."""
+    if not spec.job_dir:
+        return ""
+    return _JOB_DIR_NOTE.format(job_dir=spec.job_dir)
+
+
+def child_env(spec: "JobSpec") -> dict[str, str] | None:
+    """The environment a job's process should run with.
+
+    Inherits the gateway's, plus `AB_JOB_DIR`. Nothing secret is added: the
+    token stays out on purpose, since a job environment is readable from
+    scheduler metadata on a shared node.
+    """
+    if not spec.job_dir:
+        return None
+    return {**os.environ, "AB_JOB_DIR": spec.job_dir}
 
 
 @dataclass

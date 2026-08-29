@@ -27,7 +27,8 @@ from typing import Callable
 from ..config import AgentConfig
 from ..sessions import (DirInfo, SessionInfo, SessionPage, _cursor_decode,
                         _cursor_encode, _norm)
-from .base import Event, JobSpec, RunResult, interrupt_group, resume_cwd
+from .base import (Event, JobSpec, RunResult, child_env, interrupt_group,
+                   job_dir_note, resume_cwd)
 
 _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
 
@@ -252,13 +253,20 @@ class OpenCodeAdapter:
                               "fork": spec.fork}))
         text: list[str] = []
         res = RunResult(ok=False, session=spec.requested_session)
-        self._stream(args, cwd, spec.prompt, emit, res, text,
-                     cancel=spec.cancel)
+        # `opencode run` has no system-prompt flag, so the reporting preamble
+        # rides in front of the prompt on stdin. Weaker than a system prompt --
+        # it is visible to the model as something the caller said, and a caller
+        # could contradict it -- but the alternative is a job that cannot report
+        # at all, and AB_JOB_DIR is in the environment either way.
+        note = job_dir_note(spec)
+        prompt = f"{note}\n{spec.prompt}" if note else spec.prompt
+        self._stream(args, cwd, prompt, emit, res, text,
+                     cancel=spec.cancel, env=child_env(spec))
         return res
 
     # -- shared streaming -------------------------------------------------
     def _stream(self, args, cwd, prompt, emit, res: RunResult, text: list[str],
-                cancel=None):
+                cancel=None, env: dict[str, str] | None = None):
         if os.name == "nt":
             # Windows: start_new_session requires CREATE_NEW_PROCESS_GROUP;
             # .cmd/.ps1 binaries need shell=True to be found.
@@ -274,6 +282,8 @@ class OpenCodeAdapter:
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1, start_new_session=True,
             )
+        if env is not None:
+            popen_kw["env"] = env
         proc = subprocess.Popen(args, **popen_kw)
         if cancel is not None:
             cancel.bind(proc)  # kills the process group on cancel (even if already set)

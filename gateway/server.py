@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from . import __version__, files as filemod
+from . import __version__, files as filemod, jobdir
 from .adapters import build as build_adapter, known_agents
 from .adapters.base import SteerError
 from .api_models import (
@@ -149,18 +149,49 @@ class Gateway:
                     log_level="warning")
 
 
-async def _expire_reports(gw: Gateway, interval: float = 60.0) -> None:
-    """Give up on parked jobs whose report never came.
+def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
+    """Pull in everything a job reported outside its own event stream.
 
-    Runs on a timer rather than at read time so a job that nobody polls still
-    reaches a terminal state, and so the deadline survives a restart: the row
-    carries it, this only notices.
+    The job dir first, then the JSONL fallback: both are idempotent, both are
+    keyed so a second pass inserts nothing, and a caller should never have to
+    know which channel a delegate used. Returns the rows inserted by the job
+    dir so a live-stream sweeper can publish them; the JSONL path predates the
+    bus and stays read-triggered.
     """
+    job_dir = str(jobdir.path_for(gw.cfg.data_dir, job_id))
+    rows = gw.db.ingest_job_dir(job_id, job_dir)
+    gw.db.ingest_messages(job_id, gw.cfg.messages_dir)
+    return rows
+
+
+async def _sweep_reports(gw: Gateway, interval: float = 5.0,
+                         expire_every: float = 60.0) -> None:
+    """Notice what a delegate wrote, and give up on reports that never came.
+
+    Two reasons this cannot be read-triggered only. A follower that has been
+    streaming since the turn started never issues another read, so a milestone
+    drop would sit unseen until it reconnected. And a parked job that nobody
+    polls has to still reach a terminal state, which is what the deadline is
+    for -- the row carries it, this only notices.
+
+    The job-dir scan is a handful of stats over at most 200 rows, so it runs
+    often; expiry is checked on the slower beat it was written for.
+    """
+    since_expiry = 0.0
     while True:
         try:
-            expired = await run_in_threadpool(gw.db.expire_awaiting_reports)
-            for job_id in expired:
-                gw.bus.close(job_id)
+            for row in await run_in_threadpool(gw.db.jobs_with_open_dirs):
+                for event in await run_in_threadpool(
+                        _ingest_external, gw, row["id"]):
+                    gw.bus.publish(row["id"], event)
+                    if event.get("closing"):
+                        gw.bus.close(row["id"])
+            since_expiry += interval
+            if since_expiry >= expire_every:
+                since_expiry = 0.0
+                expired = await run_in_threadpool(gw.db.expire_awaiting_reports)
+                for job_id in expired:
+                    gw.bus.close(job_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                       # never kill the loop
@@ -178,7 +209,7 @@ def create_app(gw: Gateway) -> FastAPI:
         await run_in_threadpool(gw.pool.start)
         if gw.cluster:
             gw.cluster.start_async()
-        sweeper = asyncio.create_task(_expire_reports(gw))
+        sweeper = asyncio.create_task(_sweep_reports(gw))
         print(f"agent-bridge {__version__} listening on "
               f"http://{cfg.host}:{cfg.port}  (db: {cfg.db_path})", flush=True)
         yield
@@ -559,8 +590,7 @@ def create_app(gw: Gateway) -> FastAPI:
              response_model=JobDetail, responses=ERROR_RESPONSES)
     async def get_job(job_id: str):
         job = resolve_job(job_id)
-        await run_in_threadpool(
-            gw.db.ingest_messages, job["id"], cfg.messages_dir)
+        await run_in_threadpool(_ingest_external, gw, job["id"])
         return gw.db.get_job(job["id"])
 
     @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth],
@@ -606,7 +636,7 @@ def create_app(gw: Gateway) -> FastAPI:
                          legacy: bool = True):
         job = resolve_job(job_id)
         jid = job["id"]
-        await run_in_threadpool(gw.db.ingest_messages, jid, cfg.messages_dir)
+        await run_in_threadpool(_ingest_external, gw, jid)
         start = _parse_after(after, request.headers.get("last-event-id"))
         if tail is not None and after:
             # Anchoring from both ends at once has no single sensible reading;

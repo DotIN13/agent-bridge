@@ -18,6 +18,7 @@ import uuid
 
 import datetime
 
+from . import jobdir
 from .api_models import iso_local
 from typing import Any
 
@@ -666,8 +667,8 @@ class Database:
             "VALUES (?,?,?,?,?)", (job_id, source, report_id, request_hash, row["seq"]))
         return row, False
 
-    def _close_awaiting_locked(self, job_id: str, data: dict,
-                               epoch: float) -> dict | None:
+    def _close_awaiting_locked(self, job_id: str, data: dict, epoch: float,
+                               *, parked_only: bool = False) -> dict | None:
         """A terminal report closes the job. Anything else leaves it open.
 
         Only `finished` and `failed` are terminal; `running`, `queued` and
@@ -675,13 +676,21 @@ class Database:
         is still `running` (the finish arrived mid-turn) or parked in
         `awaiting_report`; an already-terminal job is left alone so `wait` and
         SSE keep their monotonic status.
+
+        `parked_only` is for the job dir. A file sitting in a directory is not
+        the same promise as a call placed while the work was running: the
+        delegate may write `finished` about a step, then keep working, and
+        ending its row underneath it would strand a live agent. So a job dir
+        can close a row that is *waiting* for a report and cannot end a turn
+        that is still going -- the turn's own end does that.
         """
         status = data.get("status")
         if status not in ("finished", "failed"):
             return None
+        allowed = (AWAITING_REPORT,) if parked_only else ("running", AWAITING_REPORT)
         row = self._conn.execute(
             "SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if not row or row["status"] not in ("running", AWAITING_REPORT):
+        if not row or row["status"] not in allowed:
             return None
         final = "succeeded" if status == "finished" else "failed"
         error = None
@@ -858,6 +867,71 @@ class Database:
         if batch:
             added += ingest_batch(batch)
         return added
+
+    def ingest_job_dir(self, job_id: str, job_dir: str) -> list[dict]:
+        """Turn every new file in a job's directory into one `message` event.
+
+        Dedup identity is the relative path *and* the content digest, which is
+        what makes rewriting a file useful rather than either duplicated or
+        ignored: `status` going `running` -> `finished` is two drops, writing
+        the same milestone twice is one. That is also why this cannot reuse
+        `report_id` semantics, where a changed body under a used id is a
+        conflict.
+
+        Returns the event rows it inserted, in order, so a caller holding the
+        bus can publish them to a live follower. A row that ended a parked job
+        is flagged `closing`; the caller closes the stream on it, exactly as the
+        HTTP report path does.
+
+        Cheap enough to call on every read: `jobdir.scan` stats a fixed set of
+        names and one directory, and an unchanged dir inserts nothing.
+        """
+        drops = jobdir.scan(job_dir)
+        if not drops:
+            return []
+        rows: list[dict] = []
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                for drop in drops:
+                    data, epoch = _normalise_report(jobdir.event_data(drop))
+                    request_hash = hashlib.sha256(json.dumps(
+                        data, sort_keys=True, separators=(",", ":")
+                    ).encode()).hexdigest()
+                    key = f"{drop.rel}:{drop.digest}"
+                    try:
+                        row, duplicate = self._report_locked(
+                            job_id, "job_dir", key, request_hash, data, epoch)
+                    except ReportConflict:      # same path+content, other ts
+                        continue
+                    if duplicate:
+                        continue
+                    rows.append(row)
+                    closing = self._close_awaiting_locked(
+                        job_id, data, epoch, parked_only=True)
+                    if closing:
+                        closing["closing"] = True
+                        rows.append(closing)
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+        return rows
+
+    def jobs_with_open_dirs(self) -> list[dict]:
+        """Jobs whose directory is still worth scanning, newest first.
+
+        A live follower has to learn about a milestone drop without
+        reconnecting, and a parked job has to be closeable by a file that
+        arrives after everyone stopped reading -- so the sweeper needs a bounded
+        list of candidates rather than the whole table.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id FROM jobs WHERE status IN ('running',?) "
+                "ORDER BY created_at DESC LIMIT 200", (AWAITING_REPORT,)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def reconcile_startup(self) -> list[str]:
         """Fail stale running work and return persisted queued jobs to requeue.
