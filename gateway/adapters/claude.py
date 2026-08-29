@@ -537,6 +537,12 @@ class ClaudeAdapter:
             if m and capture_nested:
                 # `session: <parent> -> <branch>`; the branch is the answer.
                 res.session = m.group(2)
+            elif not res.session and rec.get("session_id"):
+                # The init record above is where this normally comes from. The
+                # result record carries it too, and a run whose row says null is
+                # a run the caller cannot follow up with `--session`, so take it
+                # from whichever arrives.
+                res.session = rec["session_id"]
             emit(Event("result", {"text": text, "cost_usd": res.cost_usd,
                                   "session": res.session,
                                   "is_error": rec.get("is_error", False)}))

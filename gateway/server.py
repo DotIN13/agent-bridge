@@ -496,13 +496,16 @@ def create_app(gw: Gateway) -> FastAPI:
         other, which is the point: nobody thinks to ask for local conventions
         they do not know exist.
         """
-        if not gw.cluster:
-            raise ApiError(404, "cluster_info_disabled",
-                           "cluster probing is disabled")
-        if refresh:
+        # `[cluster] enabled = false` used to 404 this whole route, which took
+        # the notes with it -- and the notes are the half a probe cannot
+        # produce, configured separately, on a gateway whose operator has
+        # already gone to the trouble of writing them. So probing off means
+        # fewer keys, not a missing document.
+        probed = gw.cluster.get() if gw.cluster else {"cluster_enabled": False}
+        if refresh and gw.cluster:
             gw.cluster.refresh_async()
         doc = gw.notes.read()
-        return {**gw.cluster.get(),
+        return {**probed,
                 # ISO with the offset, like every other timestamp this API
                 # publishes — a bare epoch float has never reached a caller and
                 # should not start here.
