@@ -157,13 +157,16 @@ share a millisecond.
 
 ### Job status and `expect_report`
 
-`POST /v1/jobs` takes `expect_report`, and it **defaults to true**. A job does
-**not** go terminal when its turn succeeds: it enters `awaiting_report`, a
-non-terminal status, and only an `ab-notify --status finished|failed` closes it
-(`finished` → `succeeded`, `failed` → `failed`). Send `expect_report: false`
-(`ab submit --no-expect-report`) for a turn that is the whole of the job.
-Progress reports leave it parked, and a report cannot move a job that was already
-terminal.
+`POST /v1/jobs` takes `expect_report`, and it **defaults to false**: a job goes
+terminal when its turn does. Work that outlives the turn is a monitor with its
+own lifecycle rather than a row held open — see *Monitors* below.
+
+Send `expect_report: true` (`ab submit --expect-report`) to park instead: the job
+does **not** go terminal when its turn succeeds, it enters `awaiting_report`, a
+non-terminal status, and only a terminal report closes it (`finished` →
+`succeeded`, `failed` → `failed`). That is still the only way to make one
+`ab wait` cover both the turn and the work it started. Progress reports leave it
+parked, and a report cannot move a job that was already terminal.
 
 A parked job is deliberately not `running`: the agent process is gone, so its
 session claim is released, steering it is meaningless, and it survives a gateway
@@ -171,7 +174,7 @@ restart rather than being failed as stale. `finished_at` stays null until the
 work actually finishes. If no report arrives within `worker.report_timeout_sec`
 (default 86400, 0 disables) the gateway fails it with `report_timeout`.
 
-Reports close a parked job through either transport — HTTP, or the
+A parked job is closed by `status` in the job dir, by an HTTP report, or by the
 shared-filesystem JSONL, which is the usual path from a compute node that cannot
 reach the gateway.
 

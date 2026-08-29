@@ -47,21 +47,16 @@ def main(argv=None) -> int:
         print(cfg.token)
         return 0
 
-    # Refuse to start without the reporter. A job submitted with
-    # `expect_report` parks until `ab-notify` closes it, so a gateway that
-    # cannot resolve the binary hands out jobs that can never finish -- and it
-    # fails at the far end, hours later, on a compute node, as silence. Better
-    # to fail here, where someone is watching.
+    # Once this refused to start without `ab-notify`, because a job submitted
+    # with `expect_report` parked until the reporter closed it and a missing
+    # binary meant jobs that could never finish. Reporting is a directory now:
+    # every job is handed `$AB_JOB_DIR` and closes itself with `echo`, so a
+    # missing reporter costs an old sbatch script its progress calls, not a
+    # gateway that hands out unfinishable work. Worth saying, not worth
+    # refusing to boot over.
     notifier = find_ab_notify()
-    if not notifier:
-        print("agent-bridge: cannot find the 'ab-notify' executable.\n"
-              "  Batch jobs report completion through it, and a job submitted\n"
-              "  with expect_report cannot finish without it.\n"
-              "  Install the package (pip install -e .) so the console script\n"
-              "  is on PATH, or keep bin/ab-notify in the checkout.",
-              file=sys.stderr)
-        return 2
-    print(f"reporter: {notifier}", file=sys.stderr, flush=True)
+    print(f"reporter: {notifier or 'not found (jobs report through $AB_JOB_DIR)'}",
+          file=sys.stderr, flush=True)
 
     token_file = Path(cfg.data_dir) / ".token"
     where = str(token_file) if token_file.exists() else "configured auth token"

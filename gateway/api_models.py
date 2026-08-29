@@ -89,11 +89,12 @@ class JobCreate(StrictModel):
     model: str | None = None
     permission_mode: str | None = None
     include_thinking: bool = False
-    # The turn is not the job. Default true: a job is finished when the work
-    # says so, not when the agent stops talking, so every job parks in
-    # `awaiting_report` until `ab-notify --status finished|failed` closes it.
-    # Send false for a job whose turn really is the whole of it.
-    expect_report: bool = True
+    # Default false: a job is its turn, and long-running external work is a
+    # monitor with its own lifecycle rather than a row held open (see
+    # docs/todo/15). Send true to park in `awaiting_report` until a terminal
+    # report closes it -- still supported, and still the only way to make one
+    # `ab wait` cover both the turn and the work it started.
+    expect_report: bool = False
     files: list[FileItem] = Field(default_factory=list)
 
     @model_validator(mode="after")

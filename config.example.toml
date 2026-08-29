@@ -22,9 +22,11 @@ concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
 # exit, so the session stays resumable. Escalates to SIGTERM then SIGKILL only
 # if it hasn't wound down in this long.
 cancel_grace_sec = 15
-# A job submitted with expect_report parks in `awaiting_report` when its
-# turn ends and only an `ab-notify --status finished|failed` closes it.
-# This is how long to wait before giving up. 0 = wait forever.
+# Only for jobs submitted with expect_report (opt-in): such a job parks in
+# `awaiting_report` when its turn ends, and only a terminal report closes it --
+# `echo finished > "$AB_JOB_DIR/status"`, or an HTTP report. This is how long to
+# wait before giving up. 0 = wait forever. Ordinary jobs finish with their turn
+# and never park, so this does not apply to them.
 report_timeout_sec = 86400
 
 # What this machine's owner knows and no probe can discover: scheduler

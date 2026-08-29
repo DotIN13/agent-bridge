@@ -160,7 +160,7 @@ def _submission(args) -> dict:
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=uploads, title=args.title,
                 fork=args.fork, include_thinking=args.include_thinking,
-                expect_report=getattr(args, "expect_report", True),
+                expect_report=getattr(args, "expect_report", False),
                 idempotency_key=args.idempotency_key)
 
 
@@ -682,10 +682,17 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--permission-mode", dest="permission_mode")
         sp.add_argument("--include-thinking", action="store_true",
                         help="retain reasoning events")
+        sp.add_argument("--expect-report", dest="expect_report",
+                        action="store_true", default=False,
+                        help="park the job in awaiting_report when the turn "
+                             "ends, until a finished/failed report closes it; "
+                             "otherwise the job is its turn and long work is a "
+                             "monitor")
+        # Now the default. Kept so scripts written against the old default keep
+        # working rather than failing on an unknown flag.
         sp.add_argument("--no-expect-report", dest="expect_report",
-                        action="store_false", default=True,
-                        help="finish the job when the turn ends, instead of "
-                             "waiting for an ab-notify finished/failed report")
+                        action="store_false", default=False,
+                        help=argparse.SUPPRESS)
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="attach a local regular file (repeatable)")
         sp.add_argument("--upload-as", action="append", default=[],

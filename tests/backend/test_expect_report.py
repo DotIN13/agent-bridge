@@ -1,9 +1,15 @@
-"""A job that hands work to a scheduler does not finish when its turn does.
+"""`expect_report` parks a job until the work it started reports back.
 
 The turn and the job were the same thing, so a batch submission looked
 `succeeded` the moment the agent stopped talking -- hours before the work it
-started actually ran. `expect_report` parks the row in `awaiting_report` until
-`ab-notify --status finished|failed` closes it.
+started actually ran. `expect_report` parks the row in `awaiting_report` until a
+terminal report closes it.
+
+It is now **opt-in**. Holding every row open by default made a caller's mistake
+(a brief that never arranged a report) indistinguishable from work still
+running, and cost a day per occurrence at the default deadline; long-running
+external work is a monitor with its own lifecycle instead (docs/todo/15). What
+this module pins is that the opt-in still works, in every way it used to.
 """
 from __future__ import annotations
 
@@ -44,27 +50,46 @@ def test_a_job_that_opted_out_finishes_with_its_turn(tmp_path):
     db.close()
 
 
-def test_the_api_expects_a_report_by_default():
-    """Waiting is the default, so forgetting to ask for it cannot lose the work.
+def test_the_api_does_not_expect_a_report_by_default():
+    """The turn is the job unless the caller says otherwise.
 
-    The whole suite stayed green when this default flipped, because nothing
-    asserted what an API-submitted job does at the end of its turn. These two
-    pin the contract in both directions.
+    The whole suite stayed green the last time this default moved, because
+    nothing asserted what an API-submitted job does at the end of its turn.
+    These pin the contract in both directions.
     """
-    assert JobCreate(prompt="x").expect_report is True
-    assert JobCreate(prompt="x", expect_report=False).expect_report is False
+    assert JobCreate(prompt="x").expect_report is False
+    assert JobCreate(prompt="x", expect_report=True).expect_report is True
 
 
-def test_the_cli_sends_the_opt_out_explicitly():
-    """The server default is on, so `--no-expect-report` has to be transmitted.
+def test_the_cli_sends_the_opt_in_explicitly():
+    """The server default is off, so `--expect-report` has to be transmitted.
 
-    Omitting a false value would silently mean "wait" -- the opposite of what
-    the caller asked for.
+    Omitting a true value would silently mean "the turn is the whole job" --
+    the opposite of what the caller asked for.
     """
     assert "expect_report" not in _job_payload(
         "p", None, None, None, None, None, None)
     assert _job_payload("p", None, None, None, None, None, None,
-                        expect_report=False)["expect_report"] is False
+                        expect_report=True)["expect_report"] is True
+
+
+def test_an_api_submitted_job_finishes_with_its_turn_by_default(client, auth, gateway):
+    """The whole way through: DTO default, job row, and the end of the turn.
+
+    Asserting the DTO alone would not have caught a server that passed a
+    hardcoded true into `create_job`, which is the shape of the bug this
+    default's history is made of.
+    """
+    created = client.post("/v1/jobs", json={"prompt": "answer a question"},
+                          headers=auth)
+    job = created.json()["id"]
+    assert created.json()["expect_report"] is False
+
+    _succeed(gateway.db, job, report_timeout_sec=3600)
+
+    row = client.get(f"/v1/jobs/{job}", headers=auth).json()
+    assert row["status"] == "succeeded"
+    assert row["finished_at"] is not None
 
 
 def test_expect_report_parks_instead_of_finishing(tmp_path):
@@ -226,8 +251,11 @@ def test_the_closing_status_reaches_the_stream(tmp_path):
     db.close()
 
 
-def test_the_reporter_must_be_resolvable_at_startup(tmp_path, monkeypatch, capsys):
-    """No `ab-notify` means a parked job could never be closed, so refuse to start.
+def test_a_missing_reporter_no_longer_refuses_to_start(tmp_path, monkeypatch, capsys):
+    """Startup used to exit 2 without `ab-notify`, because a parked job could
+    never be closed without it. Every job now gets `$AB_JOB_DIR` and closes
+    itself with `echo`, so a missing reporter is worth saying and not worth
+    refusing to boot over.
 
     The config has to be valid, or `main` returns 2 for the missing file and the
     test passes without reaching the guard at all.
@@ -247,12 +275,13 @@ def test_the_reporter_must_be_resolvable_at_startup(tmp_path, monkeypatch, capsy
     assert entry.main(["--config", str(cfg)]) == 0
     assert served == [True]
 
-    # Not resolvable: exit 2, and never reach the server.
+    # Not resolvable: still serves, and says where reporting goes instead.
     served.clear()
+    capsys.readouterr()
     monkeypatch.setattr(entry, "find_ab_notify", lambda: None)
-    assert entry.main(["--config", str(cfg)]) == 2
-    assert served == []
-    assert "ab-notify" in capsys.readouterr().err
+    assert entry.main(["--config", str(cfg)]) == 0
+    assert served == [True]
+    assert "AB_JOB_DIR" in capsys.readouterr().err
 
 
 def test_ab_notify_resolves_from_the_checkout_when_not_on_path(monkeypatch):

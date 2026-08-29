@@ -535,7 +535,7 @@ class Client:
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
                session=None, permission_mode=None, files=None, upload=None,
                upload_names=None, title=None, fork=True, include_thinking=False,
-               expect_report=True, idempotency_key=None) -> dict:
+               expect_report=False, idempotency_key=None) -> dict:
         payload = _job_payload(prompt, cwd, agent, model, session,
                                permission_mode, files, title, fork,
                                include_thinking, expect_report)
@@ -851,7 +851,7 @@ class Client:
 
 def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
                  title=None, fork=True, include_thinking=False,
-                 expect_report=True) -> dict:
+                 expect_report=False) -> dict:
     body = {"prompt": prompt}
     for key, value in (("cwd", cwd), ("agent", agent), ("model", model),
                        ("session", session), ("permission_mode", permission_mode),
@@ -862,9 +862,9 @@ def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
         body["fork"] = False
     if include_thinking:
         body["include_thinking"] = True
-    if not expect_report:
-        # The server defaults this on, so opting out has to be explicit.
-        body["expect_report"] = False
+    if expect_report:
+        # The server defaults this off, so opting *in* is what has to travel.
+        body["expect_report"] = True
     if files:
         body["files"] = [{"path": path} for path in files]
     return body
