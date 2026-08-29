@@ -231,18 +231,29 @@ def monitor_drops(job_dir: str | os.PathLike[str]) -> list[tuple[str, dict]]:
     return out
 
 
-def event_data(drop: Drop) -> dict:
+#: How much of `report.md` rides along on a terminal `status`, as the reason.
+REASON_CHARS = 2000
+
+
+def event_data(drop: Drop, reason: str = "") -> dict:
     """The `message` payload for one drop.
 
     Shaped like an `ab-notify` report on purpose -- same `status`/`msg` keys, so
     `ab events --type message` reads the same whichever way the report arrived,
     and `_close_awaiting_locked` needs no special case.
+
+    `reason` is the report's own text, passed in when a terminal `status` is
+    ingested alongside a `report.md`. Without it a failed job's row reads "batch
+    work reported failed" while the actual reason sits in a different event --
+    true, but it makes `ab wait` exit 3 with nothing to act on.
     """
     data: dict = {"source": "job_dir", "file": drop.rel}
     if drop.status is not None:
         data["status"] = drop.status
         if drop.status == "unknown" and drop.text:
             data["raw"] = drop.text[:2000]
+        if drop.status in ("finished", "failed") and reason:
+            data["msg"] = reason[:REASON_CHARS]
         return data
     if drop.oversized:
         data["error"] = f"{drop.rel} exceeded {MAX_FILE_BYTES} bytes; truncated"

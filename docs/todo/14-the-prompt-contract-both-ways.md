@@ -5,9 +5,11 @@ unverifiable reports)
 **Status:** open, partly shipped — the client skill's brief template is now six
 named sections (Goal, Task, Known, Assumed, Verification, Finishing) written to
 a file and submitted with `-F`, with **Verification** and **Finishing**
-required. Still open: "never delegate understanding" in the client skill, the
-worker-skill additions, and the injected preamble, which needs a decision on
-where it lives
+required. The injected preamble now exists, carrying the facts only — where to
+write and what the words mean (design/15). Still open: "never delegate
+understanding" in the client skill, the worker-skill additions, and whether the
+preamble should also carry the report contract and the trust boundary, which is
+the question of where the authoritative copy lives
 **Scope:** `skills/agent-bridge-client/SKILL.md`,
 `skills/agent-bridge-worker/SKILL.md`, `gateway/adapters/claude.py`,
 `gateway/adapters/opencode.py`, `gateway/adapters/base.py` (capabilities),

@@ -41,7 +41,10 @@ max_bytes = 65536      # how much of it is served
 path = "gateway.db"  # relative paths resolve against the data dir
 
 [messages]
-# Where `ab-notify` drops a message when it cannot reach the gateway over HTTP.
+# Legacy: where the retired `ab-notify` fallback dropped JSONL reports when it
+# could not reach the gateway. Still ingested so nothing already on disk is lost.
+# Reporting now goes to <data_dir>/reports/<job-id> ($AB_JOB_DIR), which needs
+# the same thing of this filesystem: the COMPUTE NODES must share it.
 # Must be on a filesystem the COMPUTE NODES share with the login node (GPFS
 # /project, not /tmp). Relative paths resolve against the data dir.
 #
@@ -64,6 +67,23 @@ enabled = true
 dir = ""
 max_file_mb = 100          # per-file cap
 max_request_mb = 512       # whole-request cap; larger data -> scp + pass {path}
+
+# Watching work that outlives an agent turn. A delegate registers a monitor --
+# `ab-monitor add --slurm 12345`, or a key-value file in $AB_JOB_DIR/monitors/ --
+# and the gateway runs its poll command on a timer until it resolves.
+#
+# Note what that means: the gateway executes a command the delegate wrote, on a
+# schedule, after the job that wrote it has finished. It is the same trust level
+# as a job (which already runs arbitrary code in allowed_dirs under a
+# noninteractive permission mode), but longer-lived, which is what these bound.
+# Set enabled = false to refuse monitors entirely.
+[monitors]
+enabled = true
+max_active = 32            # refuse a new watch beyond this many unresolved ones
+default_interval_sec = 300 # when the delegate does not say
+min_interval_sec = 30      # floor; a request for less gets this
+poll_timeout_sec = 20      # a hung poll command is a failed read, not a hang
+max_deadline_sec = 604800  # 7d ceiling on how long a watch may live
 
 [cluster]
 # /v1/info advertises this machine's capabilities (host/CPU/RAM, local GPUs,

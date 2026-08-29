@@ -1,201 +1,125 @@
 #!/usr/bin/env python3
-"""Compute-side batch lifecycle reporter; stdlib only."""
+"""Compatibility shim. Reporting is a directory now; write to it instead.
+
+`ab-notify` existed because the gateway could not see a compute node, so the
+compute node had to call in: it resolved a job id from `$AB_JOB_ID`, a url from
+`gateway-endpoint.json`, and a token from the data dir, then tried HTTP, then a
+shared-filesystem JSONL drop, then a local one. Every one of those was a way for
+a report to be lost, and the first was worse than that -- nothing in the gateway
+ever set `$AB_JOB_ID`, so a job whose caller had not pasted the uuid into the
+brief could not close itself at all.
+
+Every job is now handed a directory in `$AB_JOB_DIR` and reports by writing
+files into it, with no id, url or token involved:
+
+    echo "12/24 sources done" > "$AB_JOB_DIR/progress/010-sources.md"
+    echo finished             > "$AB_JOB_DIR/status"
+    cp "$RUNS/RESULTS.md"      "$AB_JOB_DIR/report.md"
+
+This shim translates the old flags into exactly those writes so that batch
+scripts already on disk keep reporting, and prints what it did. It will be
+deleted; `--url`, `--token` and the JSONL fallbacks are already gone, because a
+file in a directory the gateway reads needs none of them.
+
+Compute nodes must see `$AB_JOB_DIR` -- it lives under the gateway's data dir, so
+put that on the shared filesystem, the same requirement `[messages] dir` had.
+"""
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import socket
+import re
 import sys
 import time
-import urllib.error
-import urllib.request
-import uuid
+from pathlib import Path
 
 STATUSES = ("queued", "running", "finished", "failed")
+_SAFE = re.compile(r"[^a-z0-9._-]+")
 
 
-def _data_dirs(data_dir):
-    for base in (data_dir, os.environ.get("AB_DATA_DIR"), os.getcwd()):
-        if base:
-            yield base
+def _job_dir(explicit: str | None, job_id: str | None,
+             data_dir: str | None) -> Path | None:
+    """Where to write. `$AB_JOB_DIR` first, then rebuilt from the old flags."""
+    for candidate in (explicit, os.environ.get("AB_JOB_DIR")):
+        if candidate:
+            return Path(candidate)
+    base = data_dir or os.environ.get("AB_DATA_DIR")
+    if base and job_id:
+        return Path(base) / "reports" / job_id
+    return None
 
 
-def _gateway_url(explicit, data_dir):
-    if explicit:
-        return explicit, "--url"
-    if os.environ.get("AB_URL"):
-        return os.environ["AB_URL"], "AB_URL"
-    for base in _data_dirs(data_dir):
-        path = os.path.join(base, "gateway-endpoint.json")
-        try:
-            with open(path, encoding="utf-8") as stream:
-                info = json.load(stream)
-        except (OSError, ValueError):
-            continue
-        if info.get("url"):
-            return info["url"], path
-        return "", f"{path} says loopback-only"
-    return "", "no --url, AB_URL, or gateway-endpoint.json"
-
-
-def _token(explicit, data_dir):
-    if explicit:
-        return explicit
-    if os.environ.get("AB_TOKEN"):
-        return os.environ["AB_TOKEN"]
-    for base in _data_dirs(data_dir):
-        try:
-            with open(os.path.join(base, ".token"), encoding="utf-8") as stream:
-                return stream.read().strip()
-        except OSError:
-            pass
-    return ""
-
-
-def _append_jsonl(path, payload):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    line = json.dumps(payload, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
-    try:
-        os.write(fd, line.encode())
-    finally:
-        os.close(fd)
-
-
-def _post(url, token, job_id, payload, timeout):
-    request = urllib.request.Request(
-        f"{url.rstrip('/')}/v1/jobs/{job_id}/message",
-        data=json.dumps(payload).encode(), method="POST",
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        response.read()
-
-
-def _post_multipart(url, token, job_id, fields, file_path, timeout):
-    boundary = "----ab-notify-" + uuid.uuid4().hex
-    parts = []
-    for key, value in fields.items():
-        if value is None:
-            continue
-        parts.append(
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
-            f"{value}\r\n")
-    filename = os.path.basename(file_path)
-    parts.append(
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        "Content-Type: application/octet-stream\r\n\r\n")
-    header = "".join(parts).encode("utf-8")
-    with open(file_path, "rb") as stream:
-        file_bytes = stream.read()
-    trailer = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    body = header + file_bytes + trailer
-    request = urllib.request.Request(
-        f"{url.rstrip('/')}/v1/jobs/{job_id}/message/file",
-        data=body, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
-                 "Authorization": f"Bearer {token}"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        response.read()
+def _publish(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="ab-notify")
+    parser = argparse.ArgumentParser(
+        prog="ab-notify",
+        description="deprecated; write to $AB_JOB_DIR instead")
     parser.add_argument("--status", required=True, choices=STATUSES)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--msg")
-    group.add_argument("--msg-file", help="read the message from a file (full content)")
+    group.add_argument("--msg-file", help="read the message from a file")
     parser.add_argument("--report-id", default=os.environ.get("AB_REPORT_ID"),
-                        help="stable retry-deduplication id")
+                        help="kept as the progress file's name")
     parser.add_argument("--job-id", default=os.environ.get("AB_JOB_ID"))
-    parser.add_argument("--url")
-    parser.add_argument("--token")
+    parser.add_argument("--job-dir", default=None)
     parser.add_argument("--data-dir", default=os.environ.get("AB_DATA_DIR"))
-    parser.add_argument("--messages-dir", default=os.environ.get("AB_MESSAGES_DIR"))
-    parser.add_argument("--timeout", type=float, default=10.0)
     return parser
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
-    if not args.job_id:
-        print("ab-notify: no job id (set AB_JOB_ID or pass --job-id)", file=sys.stderr)
+    args, unknown = build_parser().parse_known_args(argv)
+    for flag in unknown:
+        # --url/--token/--messages-dir/--timeout: accepted and ignored rather
+        # than fatal, so an old script reports instead of dying on argv.
+        if flag.startswith("-"):
+            print(f"ab-notify: ignoring {flag} (reporting is a directory now)",
+                  file=sys.stderr)
+
+    root = _job_dir(args.job_dir, args.job_id, args.data_dir)
+    if root is None:
+        print("ab-notify: no $AB_JOB_DIR, and no --job-id/--data-dir to rebuild "
+              "one from. Nothing was reported.", file=sys.stderr)
         return 2
 
-    base = {"ts": time.time(), "status": args.status,
-            "host": socket.gethostname(),
-            "slurm_job_id": os.environ.get("SLURM_JOB_ID")}
-    if args.report_id:
-        base["report_id"] = args.report_id
-
-    errors = []
-    url, source = _gateway_url(args.url, args.data_dir)
-    token = _token(args.token, args.data_dir)
-    can_http = bool(url and token)
-    if not can_http:
-        errors.append(
-            f"http: no gateway url ({source})" if not url else "http: no token found")
-
-    # HTTP first. --msg-file uploads the file via multipart; --msg sends JSON.
-    if can_http:
-        try:
-            if args.msg_file:
-                _post_multipart(url, token, args.job_id, base,
-                                args.msg_file, args.timeout)
-            else:
-                if args.msg:
-                    base["msg"] = args.msg
-                _post(url, token, args.job_id, base, args.timeout)
-            print(f"ab-notify: sent via http ({args.status}) -> {url}")
-            return 0
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            errors.append(f"http {url}: {exc}")
-
-    # Fallback: JSONL. Inline the message (or file) content into the payload.
-    payload = dict(base)
+    text = args.msg or ""
     if args.msg_file:
         try:
-            with open(args.msg_file, encoding="utf-8", errors="replace") as stream:
-                payload["msg"] = stream.read()
+            text = Path(args.msg_file).read_text(encoding="utf-8",
+                                                 errors="replace")
         except OSError as exc:
             print(f"ab-notify: cannot read --msg-file: {exc}", file=sys.stderr)
             return 2
-    elif args.msg:
-        payload["msg"] = args.msg
 
-    shared = args.messages_dir or (
-        os.path.join(args.data_dir, "messages") if args.data_dir else None)
-    if shared:
-        try:
-            _append_jsonl(os.path.join(shared, f"{args.job_id}.jsonl"), payload)
-            print(f"ab-notify: wrote shared jsonl ({args.status}) — {shared}")
-            for error in errors:
-                print(f"ab-notify: fell back, {error}", file=sys.stderr)
-            return 0
-        except OSError as exc:
-            errors.append(f"shared: {exc}")
-    else:
-        errors.append("shared: no messages dir")
-
-    local = os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                         "agent-bridge-messages", f"{args.job_id}.jsonl")
+    written = []
     try:
-        _append_jsonl(local, payload)
-        print(f"ab-notify: WROTE LOCAL ONLY — {local}", file=sys.stderr)
-        print("ab-notify: move this file into <data_dir>/messages/ for ingestion",
-              file=sys.stderr)
-        for error in errors:
-            print(f"ab-notify: {error}", file=sys.stderr)
-        return 0
+        if text:
+            # `finished`/`failed` carry the deliverable, so they land as the
+            # report; progress lands as a milestone under a name derived from
+            # --report-id, which is what made a retried step idempotent.
+            if args.status in ("finished", "failed"):
+                _publish(root / "report.md", text)
+                written.append("report.md")
+            else:
+                stem = _SAFE.sub("-", (args.report_id or "").lower()).strip("-")
+                name = f"{stem or int(time.time())}.md"
+                _publish(root / "progress" / name, text)
+                written.append(f"progress/{name}")
+        _publish(root / "status", args.status + "\n")
+        written.append("status")
     except OSError as exc:
-        errors.append(f"local: {exc}")
-    print("ab-notify: ALL WRITE PATHS FAILED", file=sys.stderr)
-    for error in errors:
-        print(f"  {error}", file=sys.stderr)
-    return 1
+        print(f"ab-notify: cannot write into {root}: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"ab-notify: wrote {', '.join(written)} in {root}")
+    print("ab-notify: deprecated — write these files directly; see the worker "
+          "skill.", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

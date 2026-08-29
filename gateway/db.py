@@ -921,12 +921,16 @@ class Database:
         drops = jobdir.scan(job_dir)
         if not drops:
             return []
+        # A terminal `status` carries the report's text as its reason when both
+        # were written before this scan, which is the usual order.
+        reason = next((d.text for d in drops if d.rel == jobdir.REPORT_FILE), "")
         rows: list[dict] = []
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 for drop in drops:
-                    data, epoch = _normalise_report(jobdir.event_data(drop))
+                    data, epoch = _normalise_report(
+                        jobdir.event_data(drop, reason))
                     request_hash = hashlib.sha256(json.dumps(
                         data, sort_keys=True, separators=(",", ":")
                     ).encode()).hexdigest()
@@ -950,19 +954,28 @@ class Database:
                 raise
         return rows
 
-    def jobs_with_open_dirs(self) -> list[dict]:
+    def jobs_with_open_dirs(self, now: float | None = None,
+                            grace_sec: float = 900.0) -> list[dict]:
         """Jobs whose directory is still worth scanning, newest first.
 
         A live follower has to learn about a milestone drop without
         reconnecting, and a parked job has to be closeable by a file that
         arrives after everyone stopped reading -- so the sweeper needs a bounded
         list of candidates rather than the whole table.
+
+        Recently-finished jobs are included, and that is not tidiness: the
+        delegate registers a monitor as the last thing it does, so the drop
+        routinely lands in the same seconds the turn is ending. Watching only
+        live rows lost exactly the watches that matter, which an end-to-end run
+        found and no unit test would have.
         """
+        now = time.time() if now is None else now
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id FROM jobs WHERE status IN ('running',?) "
-                "ORDER BY created_at DESC LIMIT 200", (AWAITING_REPORT,)
-            ).fetchall()
+                "OR (finished_at IS NOT NULL AND finished_at >= ?) "
+                "ORDER BY created_at DESC LIMIT 200",
+                (AWAITING_REPORT, now - grace_sec)).fetchall()
         return [dict(row) for row in rows]
 
     # -- monitors ---------------------------------------------------------

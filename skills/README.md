@@ -8,7 +8,7 @@ only hold on one side.
 | Skill | Install on | Covers |
 |---|---|---|
 | [`agent-bridge-client`](agent-bridge-client/SKILL.md) | the machine you work from | driving the `ab` CLI, session targeting, monitoring, when a job is actually done |
-| [`agent-bridge-worker`](agent-bridge-worker/SKILL.md) | the gateway host | the remote agent's remit, finishing a turn, submitting batch work, `ab-notify` |
+| [`agent-bridge-worker`](agent-bridge-worker/SKILL.md) | the gateway host | the remote agent's remit, finishing a turn, submitting batch work, reporting through `$AB_JOB_DIR`, registering a monitor |
 
 ```bash
 mkdir -p ~/.claude/skills
@@ -30,7 +30,7 @@ records turn-end as task completion, and a non-interactive agent turn (`claude
 -p` or `opencode run`) cannot hold a blocking wait — so that promise reads as
 **success with no deliverable**. The worker skill forbids it; the client skill
 explains how to structure a brief so the situation doesn't arise, and
-`ab-notify` gives the batch job its own voice.
+a monitor gives the batch job its own lifecycle, watched by the gateway rather than promised by the agent.
 
 ## Adapting them
 

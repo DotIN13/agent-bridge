@@ -2,7 +2,11 @@
 
 **Severity:** medium overall, with one high item — concurrent jobs in one
 checkout have no write isolation, and one job cannot name itself to `ab-notify`.
-**Status:** open — study done, staged proposal, nothing implemented
+**Status:** open, partly shipped — phase 1 landed as something better than it
+proposed (see [design/15](../design/15-reporting-is-a-directory-and-watching-is-a-monitor.md)):
+rather than injecting `AB_JOB_ID`, the job is handed `$AB_JOB_DIR` and needs no
+id, url or token at all. Phases 2-6 are open, and phase 2 (worktree isolation)
+is now the highest item here
 **Scope:** `gateway/adapters/claude.py`, `gateway/adapters/base.py`,
 `gateway/config.py`, `gateway/api_models.py`, `gateway/worker.py`,
 `client/ab.py`, both skills, `config.example.toml`.
@@ -238,7 +242,7 @@ Ordered by ratio of harm removed to code written. Each phase stands alone.
 
 | # | Change | Buys | Cost / risk |
 |---|---|---|---|
-| 1 | Inject job identity: spawn the child with `AB_JOB_ID`, `AB_DATA_DIR`, `AB_URL` in its env, and one `--append-system-prompt` line naming the job and how to close it | every job can close itself; `expect_report` stops depending on the caller's prompt hygiene; the sbatch line becomes `--export=ALL,AB_JOB_ID,AB_DATA_DIR` | ~15 lines in `claude.py`/`opencode.py`; must **not** export `AB_TOKEN` (worker skill already warns why) |
+| 1 | ~~Inject job identity~~ **shipped, differently.** The child gets `AB_JOB_DIR` and a preamble naming it; reporting is files in that directory, so there is no id to plumb, no url to discover and no token to protect. `expect_report` also stopped defaulting on, which removed the failure mode this phase existed to fix | design/15 | done |
 | 2 | `isolation = "worktree"` per job: `git worktree add` under the data dir, run there, announce the substitution on the event stream as design/03 does for cwd, return path+branch in the result, remove the worktree when nothing changed | concurrent jobs in one repo stop sharing a working tree | needs a non-git fallback (refuse, or run shared and say so); worktree reaping is real operational surface |
 | 3 | Delegate profiles: `[profiles.<name>]` in config (`description`, `tools`, `disallowed_tools`, `model`, `effort`, `permission_mode`, `isolation`, `max_turns`, `prompt`), `profile` on `JobCreate`, published in `/v1/agents` and `ab agents --output json` | a role becomes reusable and *enforceable* rather than prose the caller retypes; `--tools` clamping becomes available to any job, not just the router | one new config block and one new job field; profiles must degrade per-backend through the existing `capabilities()` dict |
 | 4 | Refuse rather than drop: any request a mode cannot honour (`--model` under `agent_exec`, a profile the backend cannot clamp) becomes a typed error at submit | matches design/03's rule and the error envelope we already have | may reject jobs that "worked" before, in the sense of quietly doing something else |

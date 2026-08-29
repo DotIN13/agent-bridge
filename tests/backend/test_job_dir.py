@@ -279,3 +279,41 @@ def test_a_drop_shows_up_on_the_event_stream_over_http(client, auth, gateway):
     events = client.get(f"/v1/jobs/{job}/events?after=0&type=message",
                         headers=auth).json()["events"]
     assert [e["data"]["msg"] for e in events] == ["server up"]
+
+
+def test_a_failed_status_carries_the_report_as_its_reason(tmp_path):
+    """Without this the row reads "batch work reported failed" while the actual
+    reason sits in a different event -- true, and useless to `ab wait`, which
+    exits 3 printing `error`."""
+    db = _db(tmp_path)
+    job = _job(db, expect_report=True)
+    db.finish_job_with_events(
+        job, {"status": "succeeded", "result": "submitted"},
+        [("status", {"stage": "done", "status": "succeeded"})],
+        report_timeout_sec=3600)
+
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "report.md", "CUDA OOM at step 200\n")
+    jobdir.publish(root / "status", "failed")
+    db.ingest_job_dir(job, str(root))
+
+    row = db.get_job(job)
+    assert row["status"] == "failed"
+    assert "CUDA OOM at step 200" in row["error"]
+    db.close()
+
+
+def test_a_finish_without_a_report_still_closes_cleanly(tmp_path):
+    db = _db(tmp_path)
+    job = _job(db, expect_report=True)
+    db.finish_job_with_events(
+        job, {"status": "succeeded", "result": "submitted"},
+        [("status", {"stage": "done", "status": "succeeded"})],
+        report_timeout_sec=3600)
+
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "status", "finished")
+    db.ingest_job_dir(job, str(root))
+
+    assert db.get_job(job)["status"] == "succeeded"
+    db.close()

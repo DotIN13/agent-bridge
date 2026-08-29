@@ -15,7 +15,7 @@ laptop: ab
 FastAPI gateway ── bounded workers ── Claude Code / opencode
        │
        ├── SQLite jobs + one monotonic event stream per job
-       └── files + shared ab-notify fallback
+       └── files, per-job report dirs, gateway-polled monitors
 ```
 
 ## Install and run
@@ -30,10 +30,11 @@ Stable console commands are installed together:
 
 - `agent-bridge` — gateway process
 - `ab` — CLI
-- `ab-notify` — compute/batch reporter
+- `ab-monitor` — register a watch on work that outlives a turn
+- `ab-notify` — deprecated shim over `$AB_JOB_DIR`
 
 Legacy invocation remains supported: `python -m gateway`,
-`python client/ab.py`, and `bin/ab-notify`.
+`python client/ab.py`, `bin/ab-monitor`, and `bin/ab-notify`.
 
 On a laptop, keep one tunnel alive:
 
@@ -153,27 +154,53 @@ symlink roots, collisions, and existing files, and publish through atomic
 temporary files. Use `--overwrite` explicitly. `--flatten` is a legacy layout;
 collisions are still errors.
 
-## Batch and external reports
+## Reporting, and work that outlives a turn
 
-An agent turn may finish after submitting Slurm work. Put `ab-notify` in the
-batch script:
+Every job is handed a directory of its own in `$AB_JOB_DIR`
+(`<data_dir>/reports/<job-id>`, created before the agent starts). It reports by
+writing files there — no job id, url or token:
 
 ```bash
-#SBATCH --export=ALL,AB_JOB_ID=<job-uuid>,AB_DATA_DIR=<gateway-data-dir>
-ab-notify --status running  --msg "server up" --report-id run-start
-ab-notify --status finished --report "$RUNS/RESULTS.md" --report-id run-finished
-ab-notify --status failed   --msg-file "$RUNS/error.log" --report-id run-failed
+echo "12/24 sources done" > "$AB_JOB_DIR/progress/020-sources.md"
+cp "$RUNS/RESULTS.md"       "$AB_JOB_DIR/report.md"
+echo finished             > "$AB_JOB_DIR/status"       # or: failed
 ```
 
-Delivery tries HTTP, shared `<data_dir>/messages/<job>.jsonl`, then local
-`$TMPDIR`. HTTP URL discovery is `--url`, `$AB_URL`, then
-`gateway-endpoint.json`; token discovery is `--token`, `$AB_TOKEN`, then
-`<data_dir>/.token`.
+Each readable file becomes one `message` event, deduplicated by path *and*
+content, so rewriting a file with new content reports again and rewriting it
+unchanged does not. Compute nodes write here too, which is why the data dir
+belongs on the shared filesystem.
 
-These `message` events are **post-terminal annotations**, not a second job
-status machine. The coding-agent SSE closes when the job becomes terminal.
-Reports arriving later are retrieved by reconnecting with the last cursor or
-polling events. `report_id` deduplicates a retried report.
+A job goes terminal when its turn does. Work that outlives the turn is a
+**monitor**: its own row, with a poll command the delegate authors, run by the
+gateway on a timer.
+
+```bash
+JOBID=$(sbatch --parsable run.sbatch)
+ab-monitor add --slurm "$JOBID" --label train --interval 15m --deadline 12h \
+  --result "$RUNS/RESULTS.md"
+```
+
+`--slurm` reads `sacct` rather than `squeue`, which forgets a job once it leaves
+the queue. Anything else is `--poll <cmd>`, whose first word of output is the
+status; plain words (`running`/`finished`/`failed`) and Slurm state names are
+both understood, and `--map` covers the rest. `ab-monitor` only writes a
+key-value file into `$AB_JOB_DIR/monitors/`, so a heredoc does the same job when
+it is not on PATH.
+
+Callers read watches with `ab monitors --job <ref>` and `ab monitor <id>
+[--wait]`; transitions also land on the job's `message` stream as post-terminal
+annotations. `[monitors]` bounds how many watches a gateway keeps, the interval
+floor, the poll timeout, and the deadline ceiling.
+
+`ab-notify` is a deprecated shim that translates its old flags into those file
+writes. `POST /v1/jobs/{ref}/message` remains for anything that wants immediate
+delivery over HTTP.
+
+Opt into the old behaviour with `ab submit --expect-report` when you want one
+`ab wait` to cover both the turn and the work it started: the row parks in
+`awaiting_report` until `status` says `finished`/`failed`, and fails with
+`report_timeout` if nothing ever does.
 
 ## Operator notes
 

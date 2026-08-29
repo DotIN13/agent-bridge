@@ -1,6 +1,6 @@
 ---
 name: agent-bridge-worker
-description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, and reporting progress with ab-notify. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
+description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, reporting through $AB_JOB_DIR, and registering a monitor for work that outlives your turn. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
@@ -8,14 +8,14 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSear
 
 You are the **remote agent**. A local session, working with a human, wrote the brief you are executing. `ab job <id>` shows which backend and model you are.
 
-**Flags are in `ab help` and `ab-notify --help`.** This file is the judgement that is not in either.
+**Flags are in `ab help` and `ab-monitor --help`.** This file is the judgement that is not in either.
 
 ## Workflow
 
 1. **Inventory, then do the work.** You can see this machine; the caller cannot.
 2. **If it hands off to a scheduler or a long background run**, submit it and monitor with bounded probes or a background wait — never a blocking sleep, which just hits the tool timeout.
-3. **Always do `ab-notify --status running` at real milestones**, so a long run does not look hung. Every call carries a `--report-id`.
-4. **Always do `ab-notify --status finished` — or `failed` — mandatory.** It is what closes the job. Send it from this turn if the work finished here; from inside the batch script if the work outlives your turn. No report, no finish: the job sits until its deadline and is failed as `report_timeout`.
+3. **Drop a milestone at each real step**, so a long run does not look hung: `echo "..." > "$AB_JOB_DIR/progress/010-slug.md"`.
+4. **If the work outlives your turn, register a monitor before you end it** — `ab-monitor add --slurm <id>`. Then end the turn and report what you submitted. The gateway watches the scheduler; you do not have to, and you must not block on it.
 
 ## Your report is the caller's only window
 
@@ -29,37 +29,59 @@ Your last message is stored whole and returned by `ab job <ref>`.
 - **Name what you could not deliver**, and why. `NOT-RUN`, not a plausible value.
 - Include what they cannot get and **would act differently for** — not everything you saw. A full log dump is the same round trip in the other direction, and it costs them context on every later turn.
 
-## Reporting with `ab-notify`
+## Reporting through `$AB_JOB_DIR`
 
-**If you write the batch script, you own the reporting.** Otherwise the only signal is output-file mtimes, which cannot distinguish *queued* from *died before writing* from *filesystem unreachable*.
-
-**Your turn ending does not end the job — you have to say so.** By default a job parks in `awaiting_report` when your turn finishes, and the caller's `ab wait` is blocked on it. Only `ab-notify --status finished` or `--status failed` closes it; progress reports (`running`, `queued`) deliberately do not. A terminal report is honoured the moment it arrives — mid-turn or after the turn parks — so sending `finished` as your last action before ending the turn is fine.
-
-**This applies to every job, not just batch ones.** Answer a question and stop, and the job stays open until its deadline expires and is failed with `report_timeout` — the caller learns nothing except that you went quiet. So:
-
-- **Finish every job with `ab-notify --status finished`**, or `failed` with the reason, as the last thing you do.
-- If the work outlives your turn, the *script* owns that call — arrange it on every exit path, including the failure ones (`trap`, `set -e`).
-- Report `failed` when the work failed. A `finished` report on broken work is worse than silence, because it closes the job as a success.
+Your job has a directory of its own, already created, in `$AB_JOB_DIR`. Writing a file there is how anything other than your final message reaches the caller. **No job id, url or token is involved** — that plumbing is gone, along with the failure where a job could not identify itself and sat until its deadline.
 
 ```bash
-#SBATCH --export=ALL,AB_JOB_ID=<ab job uuid>,AB_DATA_DIR=<gateway data dir>
-ab-notify --status running  --msg "server up, generating" --report-id start
-ab-notify --status running  --msg "12/24 sources done"    --report-id p12
-ab-notify --status finished --msg-file "$RUNS/RESULTS.md" --report-id done
-ab-notify --status failed   --msg-file "$RUNS/error.log"  --report-id fail
-
-# Guarantee the finish on every exit path, not just the happy one.
-trap 'ab-notify --status failed --msg "script exited $?" --report-id fail' ERR
+echo "server up, generating"      > "$AB_JOB_DIR/progress/010-up.md"
+echo "12/24 sources done"         > "$AB_JOB_DIR/progress/020-sources.md"
+cp "$RUNS/RESULTS.md"               "$AB_JOB_DIR/report.md"
+echo finished                     > "$AB_JOB_DIR/status"   # or: failed
 ```
 
-- **`--msg-file` uploads the whole file** — full content, no truncation, sent as a multipart file to the gateway. Point it at your real report or log; `--msg` is for short inline notes. The old `--report` flag is gone (merged into `--msg-file`).
-- Call it when work **actually starts** (after the model loads, not at submit), again at real milestones so a long run doesn't look hung, and at finish/fail.
-- **Give every call a `--report-id`.** Stable dedup key: a retried step updates its report instead of appending a duplicate.
-- **Export both `AB_JOB_ID` and `AB_DATA_DIR`.** The first identifies the job, the second locates `gateway-endpoint.json` and `.token`. Token resolution is `--token` → `$AB_TOKEN` → `<data_dir>/.token`.
-- **Never put the token in the script or in `--export`** — job environments appear in scheduler metadata other users can often read.
-- **Verify `ab-notify` resolves inside the job environment.** Where it isn't installed, call `<repo>/bin/ab-notify` by absolute path. A script that cannot find it reports nothing and fails silently.
-- **Three tiers, all exiting 0 — read stderr for which you got.** HTTP, then shared-filesystem JSONL, then a local temporary JSONL. A **local-only** write is durable but *not ingestible* until moved to the shared messages dir; treat it as "recorded, not delivered" and say so in your final message.
-- **The row waits for you by default**, so your `finished` is what closes the job rather than an annotation on an already-closed one. On a job submitted `--no-expect-report` it is the old way round: the row read `succeeded` when your turn ended, and your report lands after. Either way write each message to stand alone, and either way reports survive a gateway restart, since they key on job id.
+- **Each file becomes one event** on your job's stream, so the caller sees it without reading your transcript. `ab events <ref> --type message` is the progress log.
+- **Rewriting a file with new content reports again**; rewriting it unchanged does not. So `status` can go `running` then `finished`, and a retried step can overwrite its own milestone without piling up duplicates.
+- **Name milestones in order** — `010-`, `020-` — because they are ingested in name order, not by mtime.
+- **Put the whole content in the file.** A path only you can open is not evidence; `report.md` is uploaded whole and `ab job <ref>` prints it.
+- **`status` is advisory while your turn is running.** It records what you say; it does not end your turn. The turn's own end does that. On a job submitted `--expect-report` — parked, waiting — `finished` or `failed` in `status` is exactly what closes it.
+- **Compute nodes write here too**, since the data dir is on the shared filesystem. That is the same requirement the old `[messages] dir` had.
+
+**Your final message is still the deliverable** (see above). The job dir is for what a message cannot carry: progress while you are still working, and output that outlives your turn.
+
+## Work that outlives your turn: register a monitor
+
+**You cannot wait for a scheduler.** A turn that blocks on an eight-hour job hits the tool timeout, and a turn that ends with *"I'll report back when it finishes"* is a job the gateway records as succeeded with no deliverable.
+
+So hand the waiting to the gateway. Submit, register a monitor, report what you submitted, end the turn:
+
+```bash
+JOBID=$(sbatch --parsable run.sbatch)
+ab-monitor add --slurm "$JOBID" --label train \
+  --interval 15m --deadline 12h --result "$RUNS/RESULTS.md"
+```
+
+- **`--slurm` reads `sacct`, not `squeue`**, on purpose: `squeue` forgets a job the moment it leaves the queue, so a completed run and a lost one look identical.
+- **Anything else is `--poll`**, and you author the command: its first word of output is the status. Plain words (`running`, `finished`, `failed`) and Slurm state names are both understood; `--map 'GREEN=finished;RED=failed'` covers the rest.
+
+  ```bash
+  ab-monitor add --label server --interval 60s \
+    --poll 'curl -sf localhost:8080/health && echo running || echo failed'
+  ```
+- **`--result` names the files the caller will want** when it finishes. They are reported with the terminal event, so the caller knows what to download without asking.
+- **`ab-monitor` is a convenience, not a dependency.** It writes one key-value file; if it is not on PATH, write the file:
+
+  ```bash
+  cat > "$AB_JOB_DIR/monitors/train" <<'EOF'
+  poll = sacct -n -X -j 12345 --format=State
+  interval = 15m
+  result = /project/x/runs/RESULTS.md
+  EOF
+  ```
+
+  The file name is the watch's identity, so writing it twice registers one monitor.
+- **Say the monitor's label in your final message**, so the caller can find it: `ab monitors --job <ref>`, then `ab monitor <id> --wait`.
+- **A monitor is not your job's status.** Your job finishes with your turn; the watch resolves on its own, hours later, and its transitions land on your job's event stream as annotations.
 
 ## Submitting scheduler work
 

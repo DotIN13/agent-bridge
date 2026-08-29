@@ -276,6 +276,10 @@ def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
     """
     job_dir = str(jobdir.path_for(gw.cfg.data_dir, job_id))
     rows = gw.db.ingest_job_dir(job_id, job_dir)
+    if gw.cfg.monitors_enabled:
+        # Here rather than only in the sweeper: a read is the other moment a
+        # pending registration can be noticed, and adoption is idempotent.
+        _adopt_monitor_drops(gw, job_id)
     gw.db.ingest_messages(job_id, gw.cfg.messages_dir)
     return rows
 
@@ -321,8 +325,6 @@ async def _sweep_reports(gw: Gateway, interval: float = 5.0,
                     gw.bus.publish(row["id"], event)
                     if event.get("closing"):
                         gw.bus.close(row["id"])
-                if gw.cfg.monitors_enabled:
-                    await run_in_threadpool(_adopt_monitor_drops, gw, row["id"])
             if gw.cfg.monitors_enabled:
                 await run_in_threadpool(_poll_monitors, gw)
             since_expiry += interval

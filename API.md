@@ -338,7 +338,7 @@ right, and with repeatable `type=T`, which filters **inside** the window; a
 string in the **gateway's local** time with the UTC offset attached
 (`2026-08-11T14:52:40.572-05:00`) — no bare epoch floats reach a caller. That
 covers job `created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`,
-session `last_active`, file `mtime`, and the `ts` inside an `ab-notify` report
+session `last_active`, file `mtime`, and the `ts` inside an external report
 payload.
 
 Local rather than UTC because the reader correlating a job against an sbatch log
@@ -378,10 +378,31 @@ may arrive after the agent SSE stream has closed. Fetch them by reconnecting
 with the last cursor or polling an event page. A single already-open SSE request
 does not wait forever for future batch work.
 
-`ab-notify` posts here, then falls back to shared JSONL, then local temporary
-JSONL. Filesystem reports are ingested on job/event reads and receive the same
-monotonic sequence allocation. Use `--report-id`/`$AB_REPORT_ID` for retry
-deduplication.
+Reports also arrive without HTTP. Files a delegate writes into its job dir
+(`$AB_JOB_DIR` = `<data_dir>/reports/<job-id>`) and lines in the legacy shared
+JSONL are ingested on job/event reads and by the gateway's sweeper, and receive
+the same monotonic sequence allocation. Job-dir reports are deduplicated by
+relative path and content digest; HTTP and JSONL reports use
+`report_id`/`$AB_REPORT_ID`. A job dir may close a job that is parked in
+`awaiting_report` and may not end a turn that is still running — the turn's own
+end does that.
+
+### Monitors
+
+`POST /v1/monitors` registers a watch on work that outlives a turn: `poll` (a
+command whose first word of output is the status) or `slurm` (sugar for an
+`sacct` read), plus `job`, `label`, `map`, `interval_sec`, `deadline_sec`,
+`note`, and `result_paths`. The gateway polls on a timer, bounded by
+`[monitors]`. `GET /v1/monitors` pages with the same opaque cursor as jobs and
+filters on `job`, `status` and `active`; `GET /v1/monitors/{id}` is the detail;
+`POST /v1/monitors/{id}/cancel` stops watching and is idempotent — it says
+nothing about the work, which keeps running.
+
+Monitor statuses are `queued`, `running`, `finished`, `failed`, `expired` and
+`canceled`. `expired` means a deadline passed and the gateway stopped watching,
+which is a weaker claim than the work having failed. Only *transitions* emit
+events, on the creating job's stream, carrying both a report-shaped `status` and
+the precise `monitor_status`.
 
 ## Files
 

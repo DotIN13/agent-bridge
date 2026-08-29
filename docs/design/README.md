@@ -20,6 +20,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |
 | [10](10-untitled-sessions-and-a-slow-dirs-view.md) | Slash-command residue is not a session; the dirs view got ~65x faster | after 0.3.0 |
 | [11](11-a-turn-is-not-a-job.md) | `expect_report`: a job that hands work to a scheduler waits for it | after 0.3.0 |
+| [15](15-reporting-is-a-directory-and-watching-is-a-monitor.md) | Reporting is a directory; watching is a monitor. `ab-notify` retired | after 0.3.0 |
 
 ## The load-bearing bits
 
@@ -51,6 +52,14 @@ The rule those three converge on: **a session exists if a human spoke or the
 agent acted.** Anything touching how transcripts are filtered should run
 `tests/backend/test_session_stubs.py`, which pins each failure by name — including
 the custom-slash-command case that no session on the development store exercises.
+
+**15 closes the loop 07 and 11 opened.** 07 kept the two lifecycles apart, 11
+merged them behind `expect_report` and then defaulted it on, and 15 reverses the
+default while keeping the opt-in — the long tail is a monitor with its own row
+instead. Read 11 first: it is why the opt-in exists and why a parked job is
+deliberately not `running`. 15 also deletes the reason `ab-notify` existed, which
+was that a compute node could not be seen; it turned out the *job* could not be
+identified either, and `$AB_JOB_ID` was never set by anything.
 
 **11 partly supersedes 07**, and the pair is worth reading together. 07 decided
 a coding-agent job and external compute must not be merged into one status
