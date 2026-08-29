@@ -2,11 +2,12 @@
 
 **Severity:** medium (no data loss; every job pays for it in round trips and
 unverifiable reports)
-**Status:** open, partly shipped — the client skill's required **Verify** and
-**Finish** parts are in (with judgment latitude, the size cap, and the
-lookup-vs-investigation split, which rode along in the same bullets). Still
-open: "never delegate understanding" in the client skill, the worker-skill
-additions, and the injected preamble, which needs a decision on where it lives
+**Status:** open, partly shipped — the client skill's brief template is now six
+named sections (Goal, Task, Known, Assumed, Verification, Finishing) written to
+a file and submitted with `-F`, with **Verification** and **Finishing**
+required. Still open: "never delegate understanding" in the client skill, the
+worker-skill additions, and the injected preamble, which needs a decision on
+where it lives
 **Scope:** `skills/agent-bridge-client/SKILL.md`,
 `skills/agent-bridge-worker/SKILL.md`, `gateway/adapters/claude.py`,
 `gateway/adapters/opencode.py`, `gateway/adapters/base.py` (capabilities),
@@ -193,23 +194,40 @@ prefix on the first message otherwise (opencode's `run -`), advertised through
 is weaker than a system prompt and can be argued with by the brief itself —
 which is a reason to keep the preamble to facts and contract, not policy.
 
-**2. Client skill — four additions to "Briefing the remote agent".** Done
-except the last. The template is now six parts, with **Verify** and **Finish**
-marked required: Verify names the check that settles the work and demands its
-evidence, plus the three rules the worker will not otherwise assume (a claim of
-done rests on output it saw; a failed, skipped or substituted step goes in the
-first sentence; anything not run is `NOT-RUN`). Finish states that
-`ab-notify --status finished|failed` is what closes the row, and — because the
-job id is not knowable until `ab submit` returns and the gateway does not inject
-it (13 phase 1) — spells out the three ways to get it there: a first steer
-carrying the uuid, a distinctive `--title` the worker matches in `ab jobs`, or
-`--no-expect-report`. Judgment latitude, the report size cap, and *method for
-lookups, question for investigations* went into the Known, Deliverable and
-Unknown bullets.
+**2. Client skill — done, and it went further than four additions.** The brief
+is now a file (`-F`, always) with six named sections in a fixed order:
+
+```markdown
+# Goal          — what we are doing, and why it matters
+# Task          — the steps, specifically
+# Known         — settled facts; the delegate follows these
+# Assumed       — unverified; the delegate confirms these and reports which held
+# Verification  — the tests/benchmarks that confirm the work
+# Finishing     — commit/push or not, what the report must contain, how to close the job
+```
+
+Verification names the check and demands its evidence, plus the three rules a
+delegate will not otherwise assume (a claim of done rests on output it saw; a
+failed, skipped or substituted step goes in the first sentence; anything not run
+is `NOT-RUN`). Finishing carries three things: the git decision stated either
+way, the report's required contents, and the close — and, because the job id is
+not knowable until `ab submit` returns and the gateway does not inject it (13
+phase 1), the three ways to get the id to the delegate.
+
+**One deliberate divergence.** Their guidance is *"if you need a short response,
+say so"*; ours requires the opposite — a comprehensive report, covering each
+Task step, the decisions and methodology behind the work, verification output
+with the conditions that produced it, which assumptions held, and absolute paths
+to result and process files. Theirs optimises for a parent context window that
+the delegate's output competes with. Ours cannot: the caller is on another
+machine, cannot look at anything, and pays a whole round trip for a question the
+report could have answered. The anti-dump rule is kept as a shape rather than a
+length — comprehensive in coverage, bulk in the files the report points at,
+which is also what makes `ab download` targetable.
 
 Still to add: *never delegate understanding* — with our own example, since ours
 is the cross-machine version: "investigate and fix whatever you find" is the
-phrasing to refuse. Note that the id-delivery workaround in Finish is
+phrasing to refuse. Note also that the id-delivery workaround in Finishing is
 documentation standing in for a missing feature; 13 phase 1 deletes two thirds
 of that bullet.
 

@@ -17,7 +17,7 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 3. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
 4. **`ab sessions`** — which directories have work at all.
 5. **`ab sessions --cwd <dir>`** — the sessions in that project. Pick one to continue; a new session is a new subject.
-6. **`ab submit -F brief.md [--session <id>]`** — the brief **must** name the check that decides the work is done, and **must** tell the worker to `ab-notify` its status at milestones and on finish. The job does not close without that report, so a brief that omits it is a job that hangs; a brief that omits the check produces a report you cannot tell from a guess. Both are required parts of the template below.
+6. **`ab submit -F brief.md [--session <id>]`** — always from a file, never an inline prompt. The brief **must** carry a Verification section naming the check that settles the work, and a Finishing section saying whether to commit, what the report must contain, and that `ab-notify` closes the job. A brief without the close is a job that hangs; a brief without the check produces a report you cannot tell from a guess. Full template below.
 7. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it: use `--for turn` to collect what the agent said now, and come back for the report later.
 
 ## Starting a job
@@ -34,25 +34,41 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 | 4 | genuinely new subject | `ab submit` |
 
 - **Record full UUIDs.** A prefix can later become ambiguous.
-- Always pass prompts with `-F/--prompt-file` — avoids shell quoting and length bugs. Save prompt files in temp dirs, not the project tree, so they do not get uploaded or versioned.
+- Always pass prompts with `-F/--prompt-file`, from a temp dir — see the brief template below.
 
 ## Briefing the remote agent
 
 You cannot see the remote filesystem, versions, cluster state, or prior runs. The worker cannot see this conversation, the user's goal, or what you ruled out. Neither side can see its own blind spot, so say yours out loud.
 
-Six parts. **Verify and Finish are required** — a brief without them buys work you cannot check and a job that never closes.
+**Always write the brief to a file and submit it with `-F`.** Never inline a brief as a shell argument: quoting mangles it, length limits truncate it silently, and a file is the one artifact you can re-read, diff against the report, and resubmit after an edit. Keep it in a temp dir rather than the project tree, so it is never uploaded or committed by accident.
 
-- **Known** — the goal, constraints, what is ruled out and why. Say why the task matters, not just what to do: a worker that knows the point can make a judgment call, one holding only an instruction follows it off a cliff.
-- **Assumed** — paths, modules, versions, data shapes you have *not* verified, labelled as assumptions
-- **Unknown** — what you want discovered and reported back. Hand over the exact command for a lookup; hand over the *question* for an investigation, because prescribed steps become dead weight when the premise is wrong.
-- **Deliverable** — ask the worker to report, in plain language, what the problem or goal was, what it did, and what it found. Say so if you need it short (*"under 300 words"*).
-- **Verify — required.** Name the check that settles whether the work is done, and require its evidence in the report: the command and what a pass looks like, the file that must exist, the number that must move. *"Ran the tests"* is not evidence; the tail of the test output is. State the three rules the worker will otherwise not assume — **a claim of done rests on output it actually saw**, not on what the step should have produced; **a step that failed, was skipped or was substituted goes in the first sentence** of the report, ahead of the successes; **anything not run is named `NOT-RUN`**, never a plausible-looking value. You cannot rerun the check yourself, which is exactly why it has to be specified. Then verify what you can from here: read the report against `ab events REF --type tool_use`, or download the artifact and look at it.
-- **Finish — required.** `ab-notify --status finished` — or `failed`, with the reason — is what closes the job. By default the row parks in `awaiting_report` when the turn ends, so a brief that omits this is a job that hangs until `report_timeout`, and the caller learns only that the worker went quiet. The call needs the job id, which you do not have until `ab submit` returns it, so deliver it one of these ways:
-  1. **First steer, right after submit** — `ab steer <ref> -F id.md` carrying *"you are job `<uuid>`; close it with `ab-notify --status finished --job-id <uuid>`"*. Reaches the turn at its next tool boundary. Needs the job to be running, so retry if it is still queued.
-  2. **A distinctive `--title`**, and a brief that tells the worker to find its own row with `ab jobs`.
-  3. **`--no-expect-report`**, when the turn genuinely is the whole job — then nothing has to close it.
+Six sections, in this order:
 
-  If the work outlives the turn, the *batch script* owns the call, on every exit path; background work the worker started itself, it monitors itself and reports when done. Both are the worker skill's subject.
+```markdown
+# Goal          — what we are doing, and why it matters
+# Task          — the steps, specifically
+# Known         — settled facts; the delegate follows these
+# Assumed       — unverified; the delegate confirms these and reports which held
+# Verification  — the tests/benchmarks that confirm the work
+# Finishing     — commit/push or not, what the report must contain, how to close the job
+```
+
+**Verification and Finishing are required.** Without them you get work you cannot check and a job that never closes.
+
+- **Goal** — what the work is for, in a sentence or two, and why it matters. A delegate that knows the point can make a judgment call when it hits something you did not anticipate; one holding only an instruction follows it off a cliff.
+- **Task** — the steps, numbered, concrete enough to act on: which script, which directory, which data, in what order. Name what is *out* of scope too. For a lookup, hand over the exact command. For an investigation, hand over the **question** instead of a step list — prescribed steps become dead weight when the premise is wrong.
+- **Known** — the facts the delegate must treat as settled and work within: paths, module loads, versions, the account to charge, the partition to use, what has already been ruled out and why. Say that these are given, not up for improvement; a delegate that re-litigates them burns the turn.
+- **Assumed** — everything you believe but have *not* verified, labelled as such: paths you think exist, flags you think the script takes, the shape of the data. **Require the delegate to confirm each one and say in the report which held and which did not.** An unrefuted wrong assumption goes straight into your next brief, which is how a whole chain of jobs inherits one mistake.
+- **Verification** — the tests, benchmarks or checks that confirm the work, named concretely: the command to run and what a pass looks like, the number that must move, the file that must exist, the baseline to compare against. Require the **evidence** in the report rather than a claim about it — *"ran the tests"* is not evidence, the tail of the output is. State the three rules the delegate will not otherwise assume: **a claim of done rests on output it actually saw**, not on what the step should have produced; **a step that failed, was skipped or was substituted goes in the first sentence** of the report, ahead of the successes; **anything not run is named `NOT-RUN`**, never a plausible-looking value. You cannot rerun the check from here, which is exactly why it has to be in the brief. Then verify what you can: read the report against `ab events REF --type tool_use`, or download the artifacts and look at them.
+- **Finishing** — three things, all explicit:
+  - **Git.** Whether to commit, whether to push, and to which branch — or not to. Say it either way: *"commit to `<branch>` and push"*, or *"leave the tree dirty, do not commit"*. A delegate guessing at this is how work lands on `main` or is lost with the session.
+  - **The report, and it should be comprehensive rather than short.** It is stored whole and it is the only window you have; a report that saves you a page of reading and costs you a follow-up job is a bad trade. Comprehensive in *coverage*, not a log dump — the bulk belongs in the files it points you at. Require: **what it did for each step** in Task; **the decisions it made and the methodology behind them** — what it chose, what it rejected, and why; **the verification output and the results**, numbers with the conditions that produced them; **which assumptions held**; and **absolute paths to the result files and to the important process files** — scripts, configs, logs, the sbatch file — so you can fetch exactly those with `ab download` instead of trawling a transcript.
+  - **The close.** `ab-notify --status finished` — or `failed`, with the reason — is what closes the job. By default the row parks in `awaiting_report` when the turn ends, so a brief that omits this is a job that hangs until `report_timeout`, and you learn only that the worker went quiet. The call needs the job id, which you do not have until `ab submit` returns it, so deliver it one of these ways:
+    1. **First steer, right after submit** — `ab steer <ref> -F id.md` carrying *"you are job `<uuid>`; close it with `ab-notify --status finished --job-id <uuid>`"*. Reaches the turn at its next tool boundary. Needs the job to be running, so retry if it is still queued.
+    2. **A distinctive `--title`**, and a brief that tells the delegate to find its own row with `ab jobs`.
+    3. **`--no-expect-report`**, when the turn genuinely is the whole job — then nothing has to close it.
+
+    If the work outlives the turn, the *batch script* owns the call, on every exit path; background work the delegate started itself, it monitors itself and reports when done. Both are the worker skill's subject.
 
 ## Long and batch jobs
 
