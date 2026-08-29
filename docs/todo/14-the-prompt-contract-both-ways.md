@@ -2,8 +2,11 @@
 
 **Severity:** medium (no data loss; every job pays for it in round trips and
 unverifiable reports)
-**Status:** open — two skill edits are standalone; the injected preamble needs a
-decision on where it lives
+**Status:** open, partly shipped — the client skill's required **Verify** and
+**Finish** parts are in (with judgment latitude, the size cap, and the
+lookup-vs-investigation split, which rode along in the same bullets). Still
+open: "never delegate understanding" in the client skill, the worker-skill
+additions, and the injected preamble, which needs a decision on where it lives
 **Scope:** `skills/agent-bridge-client/SKILL.md`,
 `skills/agent-bridge-worker/SKILL.md`, `gateway/adapters/claude.py`,
 `gateway/adapters/opencode.py`, `gateway/adapters/base.py` (capabilities),
@@ -190,12 +193,25 @@ prefix on the first message otherwise (opencode's `run -`), advertised through
 is weaker than a system prompt and can be argued with by the brief itself —
 which is a reason to keep the preamble to facts and contract, not policy.
 
-**2. Client skill — four additions to "Briefing the remote agent".** Keep
-Known/Assumed/Unknown/Deliverable/Results; add: *why this matters, so the
-worker can make judgment calls*; *a size cap on the report when you want one*;
-*method for lookups, question for investigations*; and *never delegate
-understanding* — with our own example, since ours is the cross-machine version:
-"investigate and fix whatever you find" is the phrasing to refuse.
+**2. Client skill — four additions to "Briefing the remote agent".** Done
+except the last. The template is now six parts, with **Verify** and **Finish**
+marked required: Verify names the check that settles the work and demands its
+evidence, plus the three rules the worker will not otherwise assume (a claim of
+done rests on output it saw; a failed, skipped or substituted step goes in the
+first sentence; anything not run is `NOT-RUN`). Finish states that
+`ab-notify --status finished|failed` is what closes the row, and — because the
+job id is not knowable until `ab submit` returns and the gateway does not inject
+it (13 phase 1) — spells out the three ways to get it there: a first steer
+carrying the uuid, a distinctive `--title` the worker matches in `ab jobs`, or
+`--no-expect-report`. Judgment latitude, the report size cap, and *method for
+lookups, question for investigations* went into the Known, Deliverable and
+Unknown bullets.
+
+Still to add: *never delegate understanding* — with our own example, since ours
+is the cross-machine version: "investigate and fix whatever you find" is the
+phrasing to refuse. Note that the id-delivery workaround in Finish is
+documentation standing in for a missing feature; 13 phase 1 deletes two thirds
+of that bullet.
 
 **3. Worker skill — three additions to "Your report is the caller's only
 window".** Failure or skipped step in the first sentence, before the successes.

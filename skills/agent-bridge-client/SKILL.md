@@ -17,7 +17,7 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 3. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
 4. **`ab sessions`** — which directories have work at all.
 5. **`ab sessions --cwd <dir>`** — the sessions in that project. Pick one to continue; a new session is a new subject.
-6. **`ab submit -F brief.md [--session <id>]`** — the brief **must** tell the worker to `ab-notify` its status at milestones and on finish. The job does not close without that report, so a brief that omits it is a job that hangs.
+6. **`ab submit -F brief.md [--session <id>]`** — the brief **must** name the check that decides the work is done, and **must** tell the worker to `ab-notify` its status at milestones and on finish. The job does not close without that report, so a brief that omits it is a job that hangs; a brief that omits the check produces a report you cannot tell from a guess. Both are required parts of the template below.
 7. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it: use `--for turn` to collect what the agent said now, and come back for the report later.
 
 ## Starting a job
@@ -40,11 +40,19 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 
 You cannot see the remote filesystem, versions, cluster state, or prior runs. The worker cannot see this conversation, the user's goal, or what you ruled out. Neither side can see its own blind spot, so say yours out loud.
 
-- **Known** — the goal, constraints, what is ruled out and why
+Six parts. **Verify and Finish are required** — a brief without them buys work you cannot check and a job that never closes.
+
+- **Known** — the goal, constraints, what is ruled out and why. Say why the task matters, not just what to do: a worker that knows the point can make a judgment call, one holding only an instruction follows it off a cliff.
 - **Assumed** — paths, modules, versions, data shapes you have *not* verified, labelled as assumptions
-- **Unknown** — what you want discovered and reported back
-- **Deliverable** — ask the worker to report, in plain language, what the problem or goal was, what it did, and what it found
-- **Results** — the remote agent should always report the status and results using `ab-notify` (see the worker skill). If the remote agent is running background work rather than a scheduler job, it can monitor that itself and `ab-notify` when done.
+- **Unknown** — what you want discovered and reported back. Hand over the exact command for a lookup; hand over the *question* for an investigation, because prescribed steps become dead weight when the premise is wrong.
+- **Deliverable** — ask the worker to report, in plain language, what the problem or goal was, what it did, and what it found. Say so if you need it short (*"under 300 words"*).
+- **Verify — required.** Name the check that settles whether the work is done, and require its evidence in the report: the command and what a pass looks like, the file that must exist, the number that must move. *"Ran the tests"* is not evidence; the tail of the test output is. State the three rules the worker will otherwise not assume — **a claim of done rests on output it actually saw**, not on what the step should have produced; **a step that failed, was skipped or was substituted goes in the first sentence** of the report, ahead of the successes; **anything not run is named `NOT-RUN`**, never a plausible-looking value. You cannot rerun the check yourself, which is exactly why it has to be specified. Then verify what you can from here: read the report against `ab events REF --type tool_use`, or download the artifact and look at it.
+- **Finish — required.** `ab-notify --status finished` — or `failed`, with the reason — is what closes the job. By default the row parks in `awaiting_report` when the turn ends, so a brief that omits this is a job that hangs until `report_timeout`, and the caller learns only that the worker went quiet. The call needs the job id, which you do not have until `ab submit` returns it, so deliver it one of these ways:
+  1. **First steer, right after submit** — `ab steer <ref> -F id.md` carrying *"you are job `<uuid>`; close it with `ab-notify --status finished --job-id <uuid>`"*. Reaches the turn at its next tool boundary. Needs the job to be running, so retry if it is still queued.
+  2. **A distinctive `--title`**, and a brief that tells the worker to find its own row with `ab jobs`.
+  3. **`--no-expect-report`**, when the turn genuinely is the whole job — then nothing has to close it.
+
+  If the work outlives the turn, the *batch script* owns the call, on every exit path; background work the worker started itself, it monitors itself and reports when done. Both are the worker skill's subject.
 
 ## Long and batch jobs
 
