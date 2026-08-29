@@ -7,6 +7,7 @@ import hmac
 import json
 import socket
 import sys
+import time
 import uuid
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -22,13 +23,14 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from . import __version__, files as filemod, jobdir
+from . import __version__, files as filemod, jobdir, monitors as monmod
 from .adapters import build as build_adapter, known_agents
 from .adapters.base import SteerError
 from .api_models import (
     ERROR_RESPONSES, EVENT_TYPES, AgentDescription, AgentsResponse,
     CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
     JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
+    MonitorCreate, MonitorDetail, MonitorPage,
     SessionDirsResponse, SessionsResponse, SteerRequest, SteerResponse,
     UploadResponse, iso_local,
 )
@@ -149,6 +151,120 @@ class Gateway:
                     log_level="warning")
 
 
+class MonitorRefused(ValueError):
+    """A watch the gateway will not take: disabled, or over the active bound."""
+
+
+def register_monitor(gw: Gateway, spec: dict, *,
+                     monitor_id: str | None = None,
+                     job_id: str | None = None) -> dict | None:
+    """Create one monitor from a validated spec. None if it already existed.
+
+    One path for both doors -- the HTTP route and a file dropped in a job dir --
+    so the bounds, the interval floor and the deadline ceiling cannot be true of
+    one and not the other.
+    """
+    cfg = gw.cfg
+    if not cfg.monitors_enabled:
+        raise MonitorRefused("monitors are disabled on this gateway")
+    if gw.db.count_active_monitors() >= cfg.monitors_max_active:
+        raise MonitorRefused(
+            f"this gateway is already watching {cfg.monitors_max_active} things; "
+            f"cancel one before adding another")
+    poll = spec.get("poll") or monmod.slurm_poll(spec["slurm"])
+    interval = float(spec.get("interval_sec") or cfg.monitors_default_interval_sec)
+    interval = max(interval, cfg.monitors_min_interval_sec)
+    deadline = None
+    requested = spec.get("deadline_sec")
+    ceiling = cfg.monitors_max_deadline_sec
+    if requested or ceiling:
+        span = min(float(requested or ceiling), ceiling) if ceiling else float(requested)
+        deadline = time.time() + span
+    return gw.db.create_monitor(
+        monitor_id=monitor_id or str(uuid.uuid4()),
+        job_id=job_id or spec.get("job"),
+        poll_cmd=poll, interval_sec=interval, deadline=deadline,
+        label=spec.get("label") or "", map_spec=spec.get("map") or "",
+        note=spec.get("note") or "",
+        result_paths=list(spec.get("result_paths") or ()))
+
+
+def _monitor_event(gw: Gateway, row: dict) -> None:
+    """Say what a monitor did, on the stream of the job that created it.
+
+    Post-terminal annotation, exactly as design/07 allows: the job is usually
+    finished by the time its monitor resolves, and `ab events <job> --type
+    message` stays the one progress log rather than growing a second one.
+    """
+    if not row.get("job_id"):
+        return
+    data = {"source": "monitor", "monitor": row["id"],
+            "status": _MONITOR_REPORT_STATUS.get(row["status"], "running"),
+            "monitor_status": row["status"], "msg": monmod.summary(row)}
+    if row.get("result_paths"):
+        data["result_paths"] = row["result_paths"]
+    try:
+        event = gw.db.append_event(row["job_id"], "message", data)
+    except Exception as exc:                          # a deleted job, say
+        print(f"warning: monitor event failed: {exc}", file=sys.stderr)
+        return
+    gw.bus.publish(row["job_id"], event)
+
+
+#: A monitor's status as an `ab-notify`-shaped report status, so a reader that
+#: already filters on `status` sees the same words from both channels. `expired`
+#: reports as `failed` deliberately: to a caller waiting on the work, "we
+#: stopped watching" is not good news, and `monitor_status` keeps the precise
+#: word for anyone who cares.
+_MONITOR_REPORT_STATUS = {"queued": "queued", "running": "running",
+                          "finished": "finished", "failed": "failed",
+                          "expired": "failed", "canceled": "failed"}
+
+
+def _adopt_monitor_drops(gw: Gateway, job_id: str) -> None:
+    """Register monitors a delegate dropped as files in its job dir."""
+    job_dir = jobdir.path_for(gw.cfg.data_dir, job_id)
+    for name, fields in jobdir.monitor_drops(job_dir):
+        spec = {"poll": fields.get("poll"), "slurm": fields.get("slurm"),
+                "label": fields.get("label") or name,
+                "map": fields.get("map"), "note": fields.get("note"),
+                "interval_sec": _as_seconds(fields.get("interval")),
+                "deadline_sec": _as_seconds(fields.get("deadline")),
+                "result_paths": [p for p in (fields.get("result") or "").split(",")
+                                 if p.strip()]}
+        try:
+            row = register_monitor(gw, spec, monitor_id=f"{job_id}:{name}",
+                                   job_id=job_id)
+        except (MonitorRefused, ValueError, KeyError) as exc:
+            # The drop is the delegate's only feedback channel, so a refusal has
+            # to land where it will read it rather than in the gateway's log.
+            gw.db.append_event(job_id, "message", {
+                "source": "monitor", "file": f"monitors/{name}",
+                "error": f"monitor not registered: {exc}"})
+            continue
+        if row:
+            _monitor_event(gw, row)
+
+
+def _as_seconds(value: str | None) -> float | None:
+    """`300`, `90s`, `15m`, `12h`, `2d` -> seconds. Unparseable -> None.
+
+    A batch script writes durations the way a person says them; refusing `12h`
+    and demanding 43200 is the kind of friction that gets a monitor left
+    unregistered.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    scale = units.get(text[-1], 1)
+    number = text[:-1] if text[-1] in units else text
+    try:
+        return float(number) * scale
+    except ValueError:
+        return None
+
+
 def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
     """Pull in everything a job reported outside its own event stream.
 
@@ -162,6 +278,25 @@ def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
     rows = gw.db.ingest_job_dir(job_id, job_dir)
     gw.db.ingest_messages(job_id, gw.cfg.messages_dir)
     return rows
+
+
+def _poll_monitors(gw: Gateway, now: float | None = None) -> None:
+    """One round of every monitor that is due, plus deadline expiry.
+
+    Runs the delegate's command, records the outcome, and emits an event only
+    when the status actually changed -- a five-second sweep must not write an
+    event every five seconds for the eight hours a training run takes.
+
+    `now` is injectable so a test can advance past an interval without either
+    sleeping or reaching into the connection.
+    """
+    for row in gw.db.due_monitors(now):
+        status, detail = monmod.poll(row, gw.cfg.monitors_poll_timeout_sec)
+        changed = gw.db.record_poll(row["id"], status, detail, now=now)
+        if changed:
+            _monitor_event(gw, changed)
+    for expired in gw.db.expire_monitors(now):
+        _monitor_event(gw, expired)
 
 
 async def _sweep_reports(gw: Gateway, interval: float = 5.0,
@@ -186,6 +321,10 @@ async def _sweep_reports(gw: Gateway, interval: float = 5.0,
                     gw.bus.publish(row["id"], event)
                     if event.get("closing"):
                         gw.bus.close(row["id"])
+                if gw.cfg.monitors_enabled:
+                    await run_in_threadpool(_adopt_monitor_drops, gw, row["id"])
+            if gw.cfg.monitors_enabled:
+                await run_in_threadpool(_poll_monitors, gw)
             since_expiry += interval
             if since_expiry >= expire_every:
                 since_expiry = 0.0
@@ -547,6 +686,76 @@ def create_app(gw: Gateway) -> FastAPI:
             gw.bus.close(job["id"])
         return {"id": job["id"], "seq": row["seq"],
                 "duplicate": bool(row.get("duplicate"))}
+
+    # -- monitors ---------------------------------------------------------
+    @app.post("/v1/monitors", dependencies=[auth], status_code=201,
+              response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def create_monitor(spec: MonitorCreate):
+        """Watch something that outlives a turn.
+
+        The usual caller is the delegate itself, from the gateway host, right
+        before it ends its turn -- `ab-monitor add`. A client can register one
+        too, which is the path a laptop takes for work it started by hand.
+        """
+        if spec.job:
+            spec.job = resolve_job(spec.job)["id"]
+        try:
+            row = await run_in_threadpool(
+                register_monitor, gw, spec.model_dump(exclude_none=True))
+        except MonitorRefused as exc:
+            raise ApiError(409, "monitors_exhausted", str(exc)) from exc
+        if row is None:                                  # id collision only
+            raise ApiError(409, "monitor_exists", "that monitor id is taken")
+        await run_in_threadpool(_monitor_event, gw, row)
+        return row
+
+    @app.get("/v1/monitors", dependencies=[auth], response_model=MonitorPage,
+             responses=ERROR_RESPONSES)
+    async def list_monitors(job: str | None = Query(None),
+                            status: str | None = Query(None),
+                            active: bool | None = Query(None),
+                            limit: int = Query(50, ge=1, le=200),
+                            cursor: str | None = Query(None)):
+        job_id = resolve_job(job)["id"] if job else None
+        if status and status not in monmod.STATUSES:
+            raise ApiError(400, "invalid_request",
+                           f"unknown status '{status}'; expected one of "
+                           f"{', '.join(monmod.STATUSES)}")
+        try:
+            rows, next_cursor, has_more = gw.db.list_monitors(
+                job_id=job_id, status=status, active=active,
+                limit=limit, cursor=cursor)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_cursor", str(exc)) from exc
+        return {"monitors": rows, "next_cursor": next_cursor,
+                "has_more": has_more}
+
+    def resolve_monitor(monitor_id: str) -> dict:
+        row = gw.db.monitor(monitor_id)
+        if row is None:
+            raise ApiError(404, "not_found", f"no monitor '{monitor_id}'")
+        return row
+
+    @app.get("/v1/monitors/{monitor_id}", dependencies=[auth],
+             response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def get_monitor(monitor_id: str):
+        return resolve_monitor(monitor_id)
+
+    @app.post("/v1/monitors/{monitor_id}/cancel", dependencies=[auth],
+              response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def cancel_monitor(monitor_id: str):
+        """Stop watching. Idempotent: cancelling a resolved monitor returns it.
+
+        Cancelling a *watch* says nothing about the work it was watching, which
+        keeps running -- the gateway never had a handle on it to begin with.
+        """
+        row = resolve_monitor(monitor_id)
+        closed = await run_in_threadpool(
+            gw.db.close_monitor, monitor_id, "canceled", "canceled by request")
+        if closed is None:
+            return row
+        await run_in_threadpool(_monitor_event, gw, closed)
+        return closed
 
     @app.post("/v1/jobs/{job_id}/message", dependencies=[auth],
               response_model=MessageResponse, responses=ERROR_RESPONSES)

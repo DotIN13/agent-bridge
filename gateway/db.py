@@ -99,6 +99,26 @@ CREATE TABLE IF NOT EXISTS external_reports (
     PRIMARY KEY (job_id, source, report_id)
 );
 
+CREATE TABLE IF NOT EXISTS monitors (
+    id           TEXT PRIMARY KEY,
+    job_id       TEXT,
+    label        TEXT,
+    poll_cmd     TEXT NOT NULL,
+    map_spec     TEXT,
+    interval_sec REAL NOT NULL,
+    deadline     REAL,
+    status       TEXT NOT NULL,
+    detail       TEXT,
+    result_paths TEXT,
+    note         TEXT,
+    created_at   REAL NOT NULL,
+    last_poll_at REAL,
+    next_poll_at REAL,
+    finished_at  REAL
+);
+CREATE INDEX IF NOT EXISTS idx_monitors_due ON monitors(status, next_poll_at);
+CREATE INDEX IF NOT EXISTS idx_monitors_job ON monitors(job_id, created_at);
+
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     scope         TEXT NOT NULL,
     key           TEXT NOT NULL,
@@ -111,6 +131,9 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 """
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+#: Terminal for a *monitor*, which is not a job: `expired` says we stopped
+#: watching, which is a different claim from the work having failed.
+MONITOR_TERMINAL = {"finished", "failed", "expired", "canceled"}
 # Non-terminal, and deliberately not "running": the turn is over and the
 # agent process is gone, so everything that reads "running" as "an agent is
 # alive" -- steering, the session-busy gate, restart recovery -- has to be
@@ -169,6 +192,15 @@ def _decode_job(row, *, detail: bool = True) -> dict | None:
     if not detail:
         for key in ("prompt", "permission_mode", "files", "result", "error"):
             out.pop(key, None)
+    return out
+
+
+def _decode_monitor(row) -> dict | None:
+    if row is None:
+        return None
+    out = dict(row)
+    out.pop("_rowid", None)
+    out["result_paths"] = _decode_files(out.get("result_paths"))
     return out
 
 
@@ -932,6 +964,187 @@ class Database:
                 "ORDER BY created_at DESC LIMIT 200", (AWAITING_REPORT,)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # -- monitors ---------------------------------------------------------
+    def create_monitor(self, *, monitor_id: str, job_id: str | None,
+                       poll_cmd: str, interval_sec: float,
+                       deadline: float | None = None, label: str = "",
+                       map_spec: str = "", note: str = "",
+                       result_paths: list[str] | None = None,
+                       now: float | None = None) -> dict | None:
+        """Register a watch, or return None if that id already exists.
+
+        Idempotent by id, and that is load-bearing rather than defensive: a
+        monitor dropped as a file in the job dir is re-read on every sweep, so
+        "already registered" is the normal outcome of the second scan and must
+        not be an error, a duplicate row, or a reset deadline.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM monitors WHERE id=?", (monitor_id,)).fetchone()
+                if exists:
+                    self._conn.commit()
+                    return None
+                self._conn.execute(
+                    "INSERT INTO monitors(id,job_id,label,poll_cmd,map_spec,"
+                    "interval_sec,deadline,status,detail,result_paths,note,"
+                    "created_at,next_poll_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (monitor_id, job_id, label, poll_cmd, map_spec,
+                     float(interval_sec), deadline, "queued", None,
+                     json.dumps(result_paths or []), note, now, now))
+                row = self._monitor_locked(monitor_id)
+                self._conn.commit()
+                return row
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _monitor_locked(self, monitor_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM monitors WHERE id=?", (monitor_id,)).fetchone()
+        return _decode_monitor(row)
+
+    def monitor(self, monitor_id: str) -> dict | None:
+        with self._lock:
+            return self._monitor_locked(monitor_id)
+
+    def list_monitors(self, *, job_id: str | None = None,
+                      status: str | None = None, active: bool | None = None,
+                      limit: int = 50,
+                      cursor: str | None = None) -> tuple[list[dict], str | None, bool]:
+        """One page, newest first, with the same opaque cursor jobs use."""
+        if not 1 <= int(limit) <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        where, params = ["1=1"], []
+        if job_id:
+            where.append("job_id=?")
+            params.append(job_id)
+        if status:
+            where.append("status=?")
+            params.append(status)
+        if active is not None:
+            placeholders = ",".join("?" for _ in MONITOR_TERMINAL)
+            where.append(f"status {'NOT IN' if active else 'IN'} ({placeholders})")
+            params += sorted(MONITOR_TERMINAL)
+        if cursor:
+            created, rowid = _cursor_decode(cursor)
+            where.append("(created_at < ? OR (created_at = ? AND rowid < ?))")
+            params += [created, created, rowid]
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT rowid AS _rowid,* FROM monitors WHERE {' AND '.join(where)} "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (*params, limit + 1)).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = None
+        if has_more and rows:
+            last = rows[-1]
+            next_cursor = _cursor_encode(last["created_at"], last["_rowid"])
+        return [_decode_monitor(row) for row in rows], next_cursor, has_more
+
+    def count_active_monitors(self) -> int:
+        placeholders = ",".join("?" for _ in MONITOR_TERMINAL)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM monitors "
+                f"WHERE status NOT IN ({placeholders})",
+                tuple(sorted(MONITOR_TERMINAL))).fetchone()
+        return int(row["n"])
+
+    def due_monitors(self, now: float | None = None,
+                     limit: int = 50) -> list[dict]:
+        now = time.time() if now is None else now
+        placeholders = ",".join("?" for _ in MONITOR_TERMINAL)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM monitors WHERE status NOT IN ({placeholders}) "
+                f"AND (next_poll_at IS NULL OR next_poll_at <= ?) "
+                f"ORDER BY next_poll_at LIMIT ?",
+                (*sorted(MONITOR_TERMINAL), now, limit)).fetchall()
+        return [_decode_monitor(row) for row in rows]
+
+    def record_poll(self, monitor_id: str, status: str, detail: str,
+                    now: float | None = None) -> dict | None:
+        """Store one poll's outcome. Returns the row when the status *changed*.
+
+        Returning only transitions is what keeps a five-second sweep from
+        writing an event every five seconds for eight hours: a caller wants to
+        know that the run started and that it ended, not that it is still going.
+        `unknown` never transitions -- a failed poll is not news about the work.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._monitor_locked(monitor_id)
+                if row is None or row["status"] in MONITOR_TERMINAL:
+                    self._conn.commit()
+                    return None
+                changed = status != "unknown" and status != row["status"]
+                final = status if status in MONITOR_TERMINAL else None
+                self._conn.execute(
+                    "UPDATE monitors SET status=?,detail=?,last_poll_at=?,"
+                    "next_poll_at=?,finished_at=? WHERE id=?",
+                    (status if status != "unknown" else row["status"],
+                     detail, now, now + row["interval_sec"],
+                     now if final else None, monitor_id))
+                updated = self._monitor_locked(monitor_id)
+                self._conn.commit()
+                return updated if changed else None
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def close_monitor(self, monitor_id: str, status: str, detail: str = "",
+                      now: float | None = None) -> dict | None:
+        """End a monitor from outside a poll: cancel, or a passed deadline."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._monitor_locked(monitor_id)
+                if row is None or row["status"] in MONITOR_TERMINAL:
+                    self._conn.commit()
+                    return None
+                self._conn.execute(
+                    "UPDATE monitors SET status=?,detail=COALESCE(?,detail),"
+                    "finished_at=?,next_poll_at=NULL WHERE id=?",
+                    (status, detail or None, now, monitor_id))
+                updated = self._monitor_locked(monitor_id)
+                self._conn.commit()
+                return updated
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def expire_monitors(self, now: float | None = None) -> list[dict]:
+        """Stop watching past the deadline.
+
+        A monitor with no deadline watches until it resolves or is cancelled,
+        which is the right default for a job someone is waiting on -- but an
+        abandoned one would otherwise poll for the life of the gateway.
+        """
+        now = time.time() if now is None else now
+        placeholders = ",".join("?" for _ in MONITOR_TERMINAL)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id FROM monitors WHERE status NOT IN ({placeholders}) "
+                f"AND deadline IS NOT NULL AND deadline <= ?",
+                (*sorted(MONITOR_TERMINAL), now)).fetchall()
+        out = []
+        for row in rows:
+            closed = self.close_monitor(
+                row["id"], "expired",
+                "deadline passed before the work reported a terminal state",
+                now=now)
+            if closed:
+                out.append(closed)
+        return out
 
     def reconcile_startup(self) -> list[str]:
         """Fail stale running work and return persisted queued jobs to requeue.

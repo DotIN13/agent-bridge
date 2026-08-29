@@ -34,6 +34,17 @@ _DEFAULTS: dict = {
         # env vars reported presence-only (never their values) at /v1/info
         "env_presence": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
     },
+    # Watching work that outlives the turn that started it. The delegate
+    # authors the poll command, so these are the bounds on what it can ask the
+    # gateway to run on a timer -- see gateway/monitors.py.
+    "monitors": {
+        "enabled": True,
+        "max_active": 32,          # refuse a new watch beyond this
+        "default_interval_sec": 300,
+        "min_interval_sec": 30,    # floor; a delegate asking for less gets this
+        "poll_timeout_sec": 20,    # per poll; a hung command is a failed read
+        "max_deadline_sec": 604800,  # 7d ceiling on how long we keep watching
+    },
     # Operator notes: what this machine's owner knows and the probes cannot
     # discover. One markdown file, served to every client (see gateway/notes.py).
     "notes": {
@@ -110,6 +121,12 @@ class Config:
     files_max_request_mb: int = 512
     notes_path: str = ""          # absolute; the operator notes document
     notes_max_bytes: int = 65536
+    monitors_enabled: bool = True
+    monitors_max_active: int = 32
+    monitors_default_interval_sec: float = 300.0
+    monitors_min_interval_sec: float = 30.0
+    monitors_poll_timeout_sec: float = 20.0
+    monitors_max_deadline_sec: float = 604800.0
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @property
@@ -219,6 +236,7 @@ def load(path: str | os.PathLike | None) -> Config:
     cl = raw.get("cluster", {})
     fl = raw.get("files", {})
     nt = raw.get("notes", {})
+    mn = raw.get("monitors", {})
     notes_path = Path(nt.get("path", "gateway.md")).expanduser()
     if not notes_path.is_absolute():
         notes_path = data_dir / notes_path
@@ -243,6 +261,12 @@ def load(path: str | os.PathLike | None) -> Config:
         files_max_request_mb=int(fl.get("max_request_mb", 512)),
         notes_path=str(notes_path),
         notes_max_bytes=int(nt.get("max_bytes", 65536)),
+        monitors_enabled=bool(mn.get("enabled", True)),
+        monitors_max_active=int(mn.get("max_active", 32)),
+        monitors_default_interval_sec=float(mn.get("default_interval_sec", 300)),
+        monitors_min_interval_sec=float(mn.get("min_interval_sec", 30)),
+        monitors_poll_timeout_sec=float(mn.get("poll_timeout_sec", 20)),
+        monitors_max_deadline_sec=float(mn.get("max_deadline_sec", 604800)),
         agents=agents,
     )
 

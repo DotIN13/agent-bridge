@@ -456,6 +456,70 @@ def cmd_job(args):
         raise SystemExit(EXIT_REMOTE)
 
 
+def cmd_monitors(args):
+    data = _client(args).list_monitors(
+        job=args.job, status=args.status,
+        active=None if args.all else True,
+        limit=args.limit, cursor=args.cursor)
+
+    def human(value):
+        rows = value.get("monitors", [])
+        if not rows:
+            print("nothing being watched" if args.all else
+                  "nothing being watched right now (--all includes finished)")
+            return
+        print(f"{'ID':<36} {'STATUS':<9} {'EVERY':>6}  LABEL / LAST READ")
+        for row in rows:
+            label = row.get("label") or ""
+            detail = _line(row.get("detail") or "")
+            text = f"{label}  {detail}".strip()
+            if not args.full:
+                text = _clip(text, 46)
+            print(f"{row['id']:<36} {row.get('status',''):<9} "
+                  f"{int(row.get('interval_sec') or 0):>5}s  {text}")
+        if value.get("next_cursor"):
+            print(f"next_cursor: {value['next_cursor']}")
+    _emit(args, data, human)
+
+
+def cmd_monitor(args):
+    client = _client(args)
+    if args.cancel:
+        row = client.cancel_monitor(args.id)
+    elif args.wait:
+        row = client.wait_monitor(args.id, timeout=args.timeout)
+    else:
+        row = client.get_monitor(args.id)
+
+    def human(value):
+        print(f"status: {value['status']}")
+        if value.get("label"):
+            print(f"label: {value['label']}")
+        print(f"poll: {value['poll_cmd']}")
+        print(f"every: {int(value.get('interval_sec') or 0)}s")
+        if value.get("job_id"):
+            print(f"job: {value['job_id']}")
+        if value.get("last_poll_at"):
+            print(f"last read: {_ts(value['last_poll_at'])}")
+        if value.get("detail"):
+            print(f"read: {value['detail']}")
+        for path in value.get("result_paths") or ():
+            print(f"result: {path}")
+        if value.get("note"):
+            print(f"note: {value['note']}")
+        if value.get("timed_out_waiting"):
+            print(f"timeout: watch {value.get('id')} continues")
+    _emit(args, row, human,
+          kind="timeout" if row.get("timed_out_waiting") else "result")
+    if args.wait:
+        if row.get("timed_out_waiting"):
+            raise SystemExit(EXIT_TIMEOUT)
+        # `expired` is the gateway giving up on the watch rather than the work
+        # failing, but a caller who waited for an answer did not get one.
+        if row.get("status") in {"failed", "expired", "canceled"}:
+            raise SystemExit(EXIT_REMOTE)
+
+
 def cmd_wait(args):
     job = _client(args).wait(args.id, timeout=args.timeout,
                              cancel_on_timeout=args.cancel_on_timeout,
@@ -762,6 +826,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=_positive_int, default=50)
     sp.add_argument("--cursor", help="opaque next_cursor from a prior page")
     sp.set_defaults(func=cmd_jobs)
+
+    sp = command("monitors", "list watches on work that outlives a turn")
+    sp.add_argument("--job", metavar="REF", help="only watches for this job")
+    sp.add_argument("--status", help="queued|running|finished|failed|expired|canceled")
+    sp.add_argument("--all", action="store_true",
+                    help="include watches that already resolved")
+    sp.add_argument("--limit", type=_positive_int, default=50)
+    sp.add_argument("--cursor", help="opaque next_cursor from a prior page")
+    sp.set_defaults(func=cmd_monitors)
+
+    sp = command("monitor", "show one watch, or stop it")
+    sp.add_argument("id", metavar="ID", help="monitor id from `ab monitors`")
+    sp.add_argument("--cancel", action="store_true",
+                    help="stop watching; the work itself keeps running")
+    sp.add_argument("--wait", action="store_true",
+                    help="block until the watch resolves (exit 3 if it ends "
+                         "failed/expired/canceled, 4 on timeout)")
+    sp.add_argument("--timeout", type=_positive_float, default=900.0)
+    sp.set_defaults(func=cmd_monitor)
 
     reference = "full UUID, unique id prefix, or title"
     sp = command("job", "get one job status/result")

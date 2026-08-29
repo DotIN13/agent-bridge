@@ -21,6 +21,9 @@ except ImportError:  # copied client/ directory, without the repository root
     from _version import __version__ as CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+#: A *monitor* is not a job: `expired` means the gateway stopped watching, which
+#: is a weaker claim than the work having failed, and `ab monitor` says which.
+MONITOR_TERMINAL = {"finished", "failed", "expired", "canceled"}
 # Non-terminal: the turn ended but the work it started has not reported.
 AWAITING_REPORT = "awaiting_report"
 WAIT_FOR = ("both", "turn", "report")
@@ -790,6 +793,57 @@ class Client:
         accepted = self.submit(prompt, **submit_kw)
         return self.wait(accepted["id"], timeout=timeout, on_event=on_event,
                          cancel_on_timeout=cancel_on_timeout)
+
+    # -- monitors ---------------------------------------------------------
+    def list_monitors(self, *, job: str | None = None,
+                      status: str | None = None, active: bool | None = None,
+                      limit: int = 50, cursor: str | None = None) -> dict:
+        query: dict = {"limit": int(limit)}
+        for key, value in (("job", job), ("status", status), ("cursor", cursor)):
+            if value:
+                query[key] = value
+        if active is not None:
+            query["active"] = "true" if active else "false"
+        return self._get("/v1/monitors?" + urllib.parse.urlencode(query))
+
+    def get_monitor(self, monitor_id: str) -> dict:
+        return self._get(f"/v1/monitors/{urllib.parse.quote(monitor_id, safe='')}")
+
+    def create_monitor(self, body: dict) -> dict:
+        code, data = http("POST", self.base, "/v1/monitors", self.token,
+                          body=body)
+        _raise(code, data)
+        return data
+
+    def wait_monitor(self, monitor_id: str, *, timeout: float = 900.0,
+                     poll_interval: float = 5.0) -> dict:
+        """Block until a watch resolves, or the timeout passes.
+
+        Polling rather than streaming: a monitor's whole point is that it moves
+        a handful of times over hours, so there is no stream worth holding open,
+        and its transitions are already on the creating job's event stream for
+        anyone who wants them live.
+
+        A timeout is not a failure and does not stop the watch -- same contract
+        as waiting on a job.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            row = self.get_monitor(monitor_id)
+            if row.get("status") in MONITOR_TERMINAL:
+                return row
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {**row, "timed_out_waiting": True}
+            time.sleep(min(poll_interval, remaining))
+
+    def cancel_monitor(self, monitor_id: str) -> dict:
+        code, data = http(
+            "POST", self.base,
+            f"/v1/monitors/{urllib.parse.quote(monitor_id, safe='')}/cancel",
+            self.token)
+        _raise(code, data)
+        return data
 
     def cancel(self, job_id: str) -> dict:
         code, data = http("POST", self.base,

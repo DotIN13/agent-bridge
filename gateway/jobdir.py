@@ -179,6 +179,58 @@ def _status_word(text: str) -> str:
     return word if word in STATUSES else "unknown"
 
 
+def job_id_from(job_dir: str | os.PathLike[str]) -> str:
+    """The job a directory belongs to.
+
+    `$AB_JOB_DIR` ends in the job id, which is how `ab-monitor` knows which job
+    it is registering a monitor for without being told -- the same trick that
+    let the job dir replace `$AB_JOB_ID` in the first place.
+    """
+    return Path(job_dir).name
+
+
+def monitor_drops(job_dir: str | os.PathLike[str]) -> list[tuple[str, dict]]:
+    """Monitor registrations dropped into `monitors/`, as (id, fields).
+
+    Key-value text rather than JSON, for the same reason the rest of the job dir
+    is files and words -- this has to be writable from a batch script with a
+    heredoc and no quoting rules:
+
+        cat > "$AB_JOB_DIR/monitors/train" <<'EOF'
+        poll = sacct -n -X -j 12345 --format=State
+        interval = 300
+        result = /project/x/runs/RESULTS.md
+        EOF
+
+    The file name is the monitor's identity within the job, so re-writing the
+    same name updates nothing and registers nothing twice.
+    """
+    root = Path(job_dir) / MONITORS_DIR
+    if not root.is_dir():
+        return []
+    try:
+        names = sorted(p.name for p in root.iterdir()
+                       if p.is_file() and not p.name.endswith(".tmp"))
+    except OSError:
+        return []
+    out: list[tuple[str, dict]] = []
+    for name in names[:MAX_FILES]:
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fields: dict[str, str] = {}
+        for line in text.splitlines()[:50]:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            fields[key.strip().lower()] = value.strip()
+        if fields.get("poll") or fields.get("slurm"):
+            out.append((name, fields))
+    return out
+
+
 def event_data(drop: Drop) -> dict:
     """The `message` payload for one drop.
 
