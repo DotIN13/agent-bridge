@@ -26,6 +26,16 @@ cp config.example.toml config.toml   # edit allowed_dirs and agents
 agent-bridge --config config.toml
 ```
 
+On a login node, `bin/ab-serve` is the shorter path and does the setup itself —
+it seeds `config.toml`, installs the gateway's dependencies into `.venv` on the
+first run, and starts the gateway **detached**, so no tmux session has to be kept
+alive for it:
+
+```bash
+git clone https://github.com/DotIN13/agent-bridge && cd agent-bridge
+bin/ab-serve --no-park            # bootstrap, start it, exit
+```
+
 Stable console commands are installed together:
 
 - `agent-bridge` — gateway process
@@ -287,7 +297,29 @@ and gets them right in the direction that loses least:
 While it holds, it re-checks `/health` and restarts a gateway that has gone,
 giving up after `--max-restarts` (default 3): something that dies four times in
 a row wants a human, not another restart. `--no-park` does the checks and exits,
-which is the form to use from a script.
+which is the form to use from a script or by hand on the login node.
+
+### It also does the setup
+
+In a checkout — a directory with `pyproject.toml` and `requirements.txt` beside
+it — `ab-serve` does what `run.sh` used to, because the launcher is the script
+anybody reliably runs (design/24):
+
+| | |
+|---|---|
+| `config.toml` | seeded from `config.example.toml` when absent, and used even though `ssh host cmd` starts in `$HOME` |
+| `.venv` | created and `requirements.txt` installed when this interpreter cannot `import fastapi` — `uv` if there is one, `venv` + `pip` otherwise. Idempotent: one import check on every later connect |
+| `PATH` | `~/.local/bin` and `~/.opencode/bin` prepended for the gateway, overridable with `--path DIR` (repeatable) |
+
+That last row is the one that bites without it. `bin = "claude"` in `config.toml`
+is resolved from the gateway's own `PATH`, and `ssh host cmd` gets a
+non-interactive shell whose `PATH` is missing what a login shell exports — so the
+gateway starts, answers `/health`, and fails every job with a "not found" that
+looks like nothing to do with the ssh line. Any configured agent that is still
+not findable is named in one line at connect time.
+
+`--no-bootstrap` turns all three off: it then fails with a message instead of
+installing anything, which is the right behaviour for a supervised host.
 
 ## Operator notes
 

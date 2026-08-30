@@ -293,6 +293,137 @@ def test_the_gateway_command_prefers_path_and_falls_back_to_this_interpreter(tmp
         ["/opt/venv/bin/agent-bridge"]
 
 
+def test_a_clone_is_told_from_an_install(tmp_path):
+    """The bootstrap only belongs in a checkout, so this is the gate on it."""
+    assert not serve.is_checkout(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[project]\n")
+    assert not serve.is_checkout(tmp_path), "one marker is not a checkout"
+    (tmp_path / "requirements.txt").write_text("fastapi\n")
+    assert serve.is_checkout(tmp_path)
+    # And this repo, which is the case that matters, is one.
+    assert serve.checkout_root() == ROOT
+
+
+def test_the_config_is_seeded_from_the_example_and_then_left_alone(tmp_path, capsys):
+    """`run.sh` copied the example on first run; the second half is the point.
+
+    An edited config.toml must survive a reconnect, and the path is returned
+    either way because `ssh host cmd` starts in `$HOME` -- the relative
+    `config.toml` finds nothing, and the checkout's is the file somebody edited.
+    """
+    (tmp_path / "config.example.toml").write_text('[server]\nport = 8787\n')
+
+    assert serve.seed_config(tmp_path) == tmp_path / "config.toml"
+    assert "copied config.example.toml" in capsys.readouterr().out
+
+    (tmp_path / "config.toml").write_text('[server]\nport = 9999\n')
+    assert serve.seed_config(tmp_path) == tmp_path / "config.toml"
+    assert "9999" in (tmp_path / "config.toml").read_text(), "not overwritten"
+
+
+def test_a_venv_that_can_already_import_fastapi_is_not_rebuilt(tmp_path, monkeypatch):
+    """Every connect calls this, so the second one must be nearly free."""
+    python = serve.venv_python(tmp_path)
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n")   # any import "succeeds"
+    python.chmod(0o755)
+
+    calls = []
+    real = subprocess.run
+    monkeypatch.setattr(serve.subprocess, "run",
+                        lambda *a, **k: (calls.append(a[0]), real(*a, **k))[1])
+
+    assert serve.bootstrap_venv(tmp_path) == python
+    # One: the import check. Not `uv venv`, not `pip install`.
+    assert len(calls) == 1 and calls[0][1:] == ["-c", "import fastapi, uvicorn"]
+
+
+def test_a_failed_bootstrap_names_the_command_and_shows_the_tail(tmp_path, monkeypatch, capsys):
+    """A first run that cannot install is the failure this has to report well:
+    it looks like agent-bridge being broken and it is pip having no network."""
+    monkeypatch.setattr(serve.shutil, "which", lambda _name: None)   # no uv
+    monkeypatch.setattr(serve.subprocess, "run", lambda *_a, **_k:
+                        subprocess.CompletedProcess(
+                            ["python", "-m", "venv"], 1, "",
+                            "ERROR: Could not find a version that satisfies fastapi"))
+
+    assert serve.bootstrap_venv(tmp_path) is None
+    out = capsys.readouterr().out
+    assert "bootstrap failed" in out and "-m venv" in out
+    assert "Could not find a version" in out, "the reason, not just the verdict"
+
+
+def test_the_bootstrapped_interpreter_is_what_starts_the_gateway(monkeypatch):
+    monkeypatch.setattr(serve.shutil, "which", lambda _name: None)
+    assert serve.gateway_command(None, None, "/opt/ab/.venv/bin/python") == \
+        ["/opt/ab/.venv/bin/python", "-m", "gateway"]
+
+    # An `agent-bridge` on PATH brought its own dependencies, so it still wins.
+    monkeypatch.setattr(serve.shutil, "which", lambda _name: "/usr/bin/agent-bridge")
+    assert serve.gateway_command(None, None, "/opt/ab/.venv/bin/python") == \
+        ["/usr/bin/agent-bridge"]
+
+
+def test_the_agent_directories_go_on_the_path_the_gateway_inherits(tmp_path, monkeypatch):
+    """`bin = "claude"` is resolved from this, and `ssh host cmd` has a
+    non-interactive PATH without `~/.local/bin` in it."""
+    real = tmp_path / "local-bin"
+    real.mkdir()
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    path = serve.child_path([str(real), str(tmp_path / "nothing-here"), "/usr/bin"])
+    entries = path.split(os.pathsep)
+
+    assert entries[0] == str(real), "prepended, so it wins"
+    assert str(tmp_path / "nothing-here") not in entries, "a missing dir is dropped"
+    assert entries.count("/usr/bin") == 1, "and one already there is not doubled"
+
+
+def test_a_configured_agent_that_is_not_findable_is_named(tmp_path):
+    """A line at connect time, not a surprise on every job -- and not a refusal:
+    one stale entry beside a working one should still leave a gateway up."""
+    class Agent:
+        def __init__(self, binary):
+            self.bin = binary
+
+    present = tmp_path / "claude"
+    present.write_text("#!/bin/sh\n")
+    present.chmod(0o755)
+    absent_abs = tmp_path / "nope" / "opencode"
+
+    class Cfg:
+        agents = {"claude": Agent("claude"), "opencode": Agent(str(absent_abs)),
+                  "unset": Agent("")}
+
+    assert serve.missing_agents(Cfg(), str(tmp_path)) == \
+        [f"opencode ({absent_abs})"]
+
+
+def test_main_hands_the_gateway_the_path_and_the_checkout_as_its_cwd(tmp_path, monkeypatch):
+    """The wiring, which is where this could be right in pieces and wrong whole."""
+    agent_dir = tmp_path / "local-bin"
+    agent_dir.mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text('[server]\nport = 9\n')
+
+    seen = {}
+
+    def fake_ensure(port, argv, log_path, timeout, *, env=None, cwd=None):
+        seen.update(port=port, argv=argv, env=env, cwd=cwd)
+        return False           # stop there; the start itself is tested above
+
+    monkeypatch.setattr(serve, "ensure_serving", fake_ensure)
+    monkeypatch.setattr(serve.shutil, "which", lambda _name, **_kw: None)
+    monkeypatch.setattr(serve, "deps_ready", lambda *_a, **_k: True)
+
+    assert serve.main(["--config", str(config), "--path", str(agent_dir)]) == 1
+    assert seen["port"] == 9
+    assert seen["env"]["PATH"].split(os.pathsep)[0] == str(agent_dir)
+    # `-m gateway` imports from the working directory, and ssh starts in $HOME.
+    assert seen["argv"][1:3] == ["-m", "gateway"]
+    assert seen["cwd"] == str(ROOT)
+
+
 def _reads(process: subprocess.Popen, needle: str) -> bool:
     """Non-blocking-ish peek: the holder prints one line then goes quiet."""
     if process.stdout is None:

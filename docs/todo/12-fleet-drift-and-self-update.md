@@ -63,9 +63,9 @@ Agent turns here run for hours. So a restart is destructive unless the gateway
 is drained first. `awaiting_report` deliberately survives — the comment above
 that query says so — which means parked batch jobs need not block an update.
 
-**2. tmux is not supervision.** `run.sh` in a tmux window is still how a cluster
-gateway gets started; a process that exits so a new tree can take over simply
-stops. Self-update has to be *conditional on a supervisor being present* and
+**2. tmux is not supervision.** `ab-serve` (which absorbed `run.sh`, design/24)
+starts the gateway detached and restarts it a bounded number of times; a process
+that exits so a new tree can take over simply stops. Self-update has to be *conditional on a supervisor being present* and
 must refuse otherwise, rather than exiting hopefully.
 
 **3. `/project` on midway3 is ~97% full.** An in-place `git checkout` that runs

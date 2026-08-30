@@ -72,8 +72,15 @@ and a box that is empty for the default and holds your script when you have one.
 serving, starts it if not, holds the ssh open while it serves, and **exits if it
 cannot** — which drops the tunnel, so the row goes red with the reason in the
 console instead of green in front of a dead gateway. It starts the gateway in a
-session of its own, so closing a laptop costs the tunnel and not the jobs. The
-root [README](../README.md#ab-serve) has the rest.
+session of its own, so closing a laptop costs the tunnel and not the jobs.
+
+In a checkout it also does the setup: seeds `config.toml`, installs the
+dependencies into `.venv` on the first connect, and — the one that matters here —
+prepends `~/.local/bin` and `~/.opencode/bin` to the `PATH` the gateway inherits,
+because `ssh host cmd` gets a non-interactive shell without them and
+`bin = "claude"` is resolved from that `PATH`. Anything still missing is named in
+the console when you connect. The root [README](../README.md#ab-serve) has the
+rest.
 
 Three things follow from the mechanism:
 

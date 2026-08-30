@@ -28,6 +28,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [21](21-the-dashboard-is-a-supervisor-not-a-page.md) | `webui/`: the ssh forwards get a dashboard — askpass rather than a pty, and three invariants with tests on them | after 0.3.0 |
 | [22](22-connecting-is-starting-the-gateway.md) | `ab-serve`: the ssh line can end in a command, and connecting starts the gateway without owning it | after 0.3.0 |
 | [23](23-the-report-is-the-result.md) | `report.md` is the job's `result`, not one more event; progress is `ab-notify` rather than a path | after 0.3.0 |
+| [24](24-the-launcher-does-the-setup.md) | `run.sh` folded into `ab-serve`: the launcher seeds the config, installs the deps, and fixes the `PATH` the agents are found on | after 0.3.0 |
 
 **20 is missing on purpose.** It recorded the first attempt at a web UI, whose
 four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed
@@ -35,6 +36,12 @@ and why. The number is not reused — a commit message pointing at design/20 sti
 means the pty-based version, which is reachable by sha.
 
 ## The load-bearing bits
+
+**24 finishes 22 and corrects it.** 22 made connecting start the gateway and got
+the `$AB_PATH` layer right while leaving the layer below it wrong: the gateway's
+own `PATH`, which is how `bin = "claude"` is resolved. 24 folds `run.sh` in, which
+is where that fix had been living all along without anybody noticing it was load
+bearing.
 
 **23 narrows 15 and 17 rather than reversing them.** 15 made reporting a
 directory and 17 made the report half of what finishes a job; 23 keeps both and
