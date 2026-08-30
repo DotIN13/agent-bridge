@@ -426,6 +426,35 @@ def parse_sse(lines: Iterable[bytes | str], *,
                              include_comments=include_comments)
 
 
+#: Every verb `ab` accepts, in the order the workflow uses them. One list, and
+#: `tests/client/test_cli.py` holds it to the parser: two hand-kept copies had
+#: already drifted -- both missed `monitors`/`monitor` when monitors shipped, and
+#: one missed `help` -- so a caller reading the contract was told a verb it could
+#: use did not exist.
+OPERATIONS = (
+    "gateways", "health", "agents", "capabilities", "help", "info", "models",
+    "sessions", "run", "submit", "jobs", "monitors", "monitor", "job", "wait",
+    "events", "cancel", "steer", "upload", "download", "ls",
+)
+
+
+def client_capabilities() -> dict:
+    """What this client can do, without asking anything.
+
+    Shared by `ab capabilities` (which adds the gateway's half) and by
+    `ab help --output json` (which cannot reach a gateway and should not need
+    to).
+    """
+    return {
+        "version": CLIENT_VERSION,
+        "output_modes": ["human", "json", "jsonl"],
+        "exit_codes": {"success": 0, "local_error": 1, "invocation": 2,
+                       "remote_failure": 3, "wait_timeout": 4},
+        "streaming": "sse",
+        "operations": list(OPERATIONS),
+    }
+
+
 class Client:
     def __init__(self, name: str, base: str, token: str) -> None:
         self.name = name
@@ -486,17 +515,13 @@ class Client:
         return self._get("/v1/models" + query)
 
     def capabilities(self) -> dict:
+        """The whole contract: what this client does, and what that gateway does.
+
+        `client` needs nothing but this process; `server` is a live
+        `GET /v1/agents`, so this call does reach the network.
+        """
         return {
-            "client": {"version": CLIENT_VERSION,
-                       "output_modes": ["human", "json", "jsonl"],
-                       "exit_codes": {"success": 0, "local_error": 1,
-                                      "invocation": 2, "remote_failure": 3,
-                                      "wait_timeout": 4},
-                       "streaming": "sse",
-                       "operations": ["gateways", "health", "agents", "capabilities",
-                                      "info", "models", "sessions", "run", "submit",
-                                      "jobs", "job", "wait", "events", "steer",
-                                      "cancel", "upload", "download", "ls"]},
+            "client": client_capabilities(),
             "gateway": self.name,
             "server": self.agents(),
         }

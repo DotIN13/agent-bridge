@@ -17,7 +17,7 @@ sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
     AWAIT_SESSION_TIMEOUT, CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL,
-    Client, ConfigError, GatewayError, load_gateways,
+    Client, ConfigError, GatewayError, client_capabilities, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -246,7 +246,7 @@ def cmd_help(args):
         if _mode(args) == "human":
             build_parser().print_help()
         else:
-            _emit(args, _local_capabilities(), lambda _value: None)
+            _emit(args, client_capabilities(), lambda _value: None)
 
 
 def cmd_info(args):
@@ -681,17 +681,6 @@ def _positive_float(value: str) -> float:
     if not math.isfinite(number) or number <= 0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
     return number
-
-
-def _local_capabilities() -> dict:
-    return {"version": CLIENT_VERSION,
-            "output_modes": ["human", "json", "jsonl"],
-            "exit_codes": {"success": 0, "local_error": 1, "invocation": 2,
-                           "remote_failure": 3, "wait_timeout": 4},
-            "operations": ["gateways", "health", "agents", "capabilities",
-                           "help", "info", "models", "sessions", "run",
-                           "submit", "jobs", "job", "wait", "events", "cancel",
-                           "steer", "upload", "download", "ls"]}
 
 
 def _add_globals(parser, *, child=False):

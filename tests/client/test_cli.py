@@ -60,6 +60,38 @@ def test_help_and_version_are_discoverable(capsys):
         assert command in output
 
 
+def test_the_advertised_operations_are_exactly_the_parser_s_verbs():
+    """`ab capabilities` is the machine-readable contract, so a verb missing
+    from it is a verb an agent will not try. Two hand-kept copies had already
+    drifted — both lost `monitors`/`monitor` when monitors shipped — which is
+    why there is now one list and this test."""
+    import argparse
+
+    parser = ab.build_parser()
+    subparsers = [action for action in parser._actions
+                  if isinstance(action, argparse._SubParsersAction)]
+    assert len(subparsers) == 1
+    verbs = set(subparsers[0].choices)
+
+    assert set(abclient.OPERATIONS) == verbs
+    assert len(abclient.OPERATIONS) == len(set(abclient.OPERATIONS)), "no dupes"
+    assert abclient.client_capabilities()["operations"] == \
+        list(abclient.OPERATIONS)
+
+
+def test_the_client_half_of_the_contract_needs_no_gateway():
+    """`ab help --output json` runs with nothing configured and no network, so
+    the client half must not reach for either."""
+    caps = abclient.client_capabilities()
+    assert caps["version"] == ab.CLIENT_VERSION
+    assert caps["output_modes"] == ["human", "json", "jsonl"]
+    assert caps["streaming"] == "sse"
+    assert caps["exit_codes"] == {
+        "success": 0, "local_error": ab.EXIT_LOCAL,
+        "invocation": ab.EXIT_INVOCATION, "remote_failure": ab.EXIT_REMOTE,
+        "wait_timeout": ab.EXIT_TIMEOUT}
+
+
 class FakeClient:
     def __init__(self, status="succeeded", timeout=False):
         self.status = status
