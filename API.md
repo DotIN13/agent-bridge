@@ -155,28 +155,24 @@ sample.
 sequence; ordering on a timestamp alone would skip or repeat rows whenever two
 share a millisecond.
 
-### Job status and `expect_report`
+### Job status
 
-`POST /v1/jobs` takes `expect_report`, and it **defaults to false**: a job goes
-terminal when its turn does. Work that outlives the turn is a monitor with its
-own lifecycle rather than a row held open — see *Monitors* below.
+`queued` → `running` → `succeeded` | `failed` | `canceled`. **The turn is the
+job**: a row goes terminal when the agent's turn ends, `finished_at` is set then,
+and nothing a delegate writes into its job dir changes it. A caller that wants to
+end a job early uses `POST /v1/jobs/{ref}/cancel`.
 
-Send `expect_report: true` (`ab submit --expect-report`) to park instead: the job
-does **not** go terminal when its turn succeeds, it enters `awaiting_report`, a
-non-terminal status, and only a terminal report closes it (`finished` →
-`succeeded`, `failed` → `failed`). That is still the only way to make one
-`ab wait` cover both the turn and the work it started. Progress reports leave it
-parked, and a report cannot move a job that was already terminal.
+Work that outlives the turn is a **monitor** with its own row and its own
+terminal states — see *Monitors* below, and `ab monitor <id> --wait` to block on
+one.
 
-A parked job is deliberately not `running`: the agent process is gone, so its
-session claim is released, steering it is meaningless, and it survives a gateway
-restart rather than being failed as stale. `finished_at` stays null until the
-work actually finishes. If no report arrives within `worker.report_timeout_sec`
-(default 86400, 0 disables) the gateway fails it with `report_timeout`.
-
-A parked job is closed by `status` in the job dir or by an HTTP report, the
-former being the usual path from a compute node that cannot
-reach the gateway.
+`expect_report: true` is refused with a typed `400 expect_report_removed` naming
+monitors. It once parked a row in `awaiting_report` until something called in to
+close it; that made a caller's mistake — a brief that never arranged a report —
+indistinguishable from work still running, and cost a day per occurrence at the
+old deadline (design/11, /15, /16). The field stays on the DTO only so the
+refusal can explain itself; `expect_report: false` is accepted and is what every
+job does.
 
 **Both routes list a session only if a human spoke or the agent acted**, and the
 counts match the listings. Three kinds of transcript exist without anything
@@ -382,11 +378,12 @@ Reports also arrive without HTTP: files a delegate writes into its job dir
 (`$AB_JOB_DIR` = `<data_dir>/reports/<job-id>`) are ingested on job/event reads
 and by the gateway's sweeper, and receive the same monotonic sequence allocation.
 Job-dir reports are deduplicated by relative path and content digest; HTTP
-reports use `report_id`. There is no shared-filesystem JSONL channel: it existed
-for a compute node that could not reach the gateway, nothing has written it since
-`ab-notify` became a job-dir reporter, and a reader with no writer was removed. A job dir may close a job that is parked in
-`awaiting_report` and may not end a turn that is still running — the turn's own
-end does that.
+reports use `report_id`. Neither can move a job: a report is an annotation, and
+the turn's end is what ends a job.
+
+There is no shared-filesystem JSONL channel. It existed for a compute node that
+could not reach the gateway; nothing has written it since `ab-notify` became a
+job-dir reporter, and a reader with no writer was removed.
 
 ### Monitors
 

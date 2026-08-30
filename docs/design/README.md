@@ -21,6 +21,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [10](10-untitled-sessions-and-a-slow-dirs-view.md) | Slash-command residue is not a session; the dirs view got ~65x faster | after 0.3.0 |
 | [11](11-a-turn-is-not-a-job.md) | `expect_report`: a job that hands work to a scheduler waits for it | after 0.3.0 |
 | [15](15-reporting-is-a-directory-and-watching-is-a-monitor.md) | Reporting is a directory; watching is a monitor. `ab-notify` retired | after 0.3.0 |
+| [16](16-the-turn-is-the-job.md) | The turn is the job, unconditionally: `expect_report` and the `status` vocabulary removed | after 0.3.0 |
 
 ## The load-bearing bits
 
@@ -53,13 +54,20 @@ agent acted.** Anything touching how transcripts are filtered should run
 `tests/backend/test_session_stubs.py`, which pins each failure by name — including
 the custom-slash-command case that no session on the development store exercises.
 
+**16 ends a default that moved three times**, and 11 → 15 → 16 is worth reading
+in order: the turn was the job, then it wasn't and every row waited, then waiting
+was opt-in, then the long tail became a monitor and the opt-in had nothing left to
+do. 16 also records the one thing this costs — a clean turn whose *work* failed
+reads `succeeded` — so it is not rediscovered as a bug.
+
 **15 closes the loop 07 and 11 opened.** 07 kept the two lifecycles apart, 11
-merged them behind `expect_report` and then defaulted it on, and 15 reverses the
-default while keeping the opt-in — the long tail is a monitor with its own row
-instead. Read 11 first: it is why the opt-in exists and why a parked job is
-deliberately not `running`. 15 also deletes the reason `ab-notify` existed, which
-was that a compute node could not be seen; it turned out the *job* could not be
-identified either, and `$AB_JOB_ID` was never set by anything.
+merged them behind `expect_report` and then defaulted it on, and 15 reversed the
+default while keeping the opt-in — the long tail became a monitor with its own
+row instead. Read 11 for why the opt-in existed and why a parked job was
+deliberately not `running`; 16 then removed it. 15 also deletes the reason
+`ab-notify` existed, which was that a compute node could not be seen; it turned
+out the *job* could not be identified either, and `$AB_JOB_ID` was never set by
+anything.
 
 **11 partly supersedes 07**, and the pair is worth reading together. 07 decided
 a coding-agent job and external compute must not be merged into one status

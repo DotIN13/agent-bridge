@@ -353,13 +353,17 @@ REPORTING (agent-bridge)
 Your job has a directory of its own, and it is already created:
     AB_JOB_DIR = {job_dir}
 Write there to be heard. No job id, url or token is needed for any of it.
-  - a milestone:   echo "12/24 sources done" > "$AB_JOB_DIR/progress/010-sources.md"
-  - the finish:    echo finished > "$AB_JOB_DIR/status"      (or: failed)
+  - a milestone:   ab-notify --msg "12/24 sources done"
+                   (or: echo "..." > "$AB_JOB_DIR/progress/010-sources.md")
   - a long report: cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"
 Each file becomes one event on this job's stream, so the caller sees it without
 reading your transcript. Rewriting a file with new content reports again;
 rewriting it unchanged does not. Keep the whole content in the file rather than
 pointing at a path only you can open.
+
+Your job ends when this turn ends; nothing you write changes that. If you start
+work that outlives the turn, register a monitor for it (`ab-monitor add --slurm
+<id>`) and name it in your final message.
 """
 
 

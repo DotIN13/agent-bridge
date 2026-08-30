@@ -11,17 +11,17 @@ from pathlib import Path
 
 from gateway import jobdir
 from gateway.adapters.base import JobSpec, child_env, job_dir_note
-from gateway.db import AWAITING_REPORT, Database
+from gateway.db import Database
 
 
 def _db(tmp_path):
     return Database(str(tmp_path / "j.db"))
 
 
-def _job(db, *, expect_report=False):
+def _job(db):
     return db.create_job(
         agent="claude", prompt="run the sweep", cwd=None, session=None,
-        permission_mode=None, model=None, expect_report=expect_report)
+        permission_mode=None, model=None)
 
 
 def _messages(db, job):
@@ -59,86 +59,19 @@ def test_scanning_twice_does_not_report_twice(tmp_path):
 
 
 def test_rewriting_a_file_with_new_content_reports_again(tmp_path):
-    """Dedup is path *and* content, which is what makes `status` usable twice."""
+    """Dedup is path *and* content, which is what lets a retried step overwrite
+    its own milestone and still be heard."""
     db = _db(tmp_path)
     job = _job(db)
     root = jobdir.prepare(tmp_path, job)
 
-    jobdir.publish(root / "status", "running\n")
+    jobdir.publish(root / "progress" / "sources.md", "12/24 done")
     db.ingest_job_dir(job, str(root))
-    jobdir.publish(root / "status", "finished\n")
-    db.ingest_job_dir(job, str(root))
-
-    statuses = [e["data"]["status"] for e in _messages(db, job)]
-    assert statuses == ["running", "finished"]
-    db.close()
-
-
-def test_a_finished_status_closes_a_parked_job(tmp_path):
-    db = _db(tmp_path)
-    job = _job(db, expect_report=True)
-    db.finish_job_with_events(
-        job, {"status": "succeeded", "result": "submitted as 12345"},
-        [("status", {"stage": "done", "status": "succeeded"})],
-        report_timeout_sec=3600)
-    assert db.get_job(job)["status"] == AWAITING_REPORT
-
-    root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "status", "finished")
-    rows = db.ingest_job_dir(job, str(root))
-
-    assert db.get_job(job)["status"] == "succeeded"
-    assert any(row.get("closing") for row in rows), \
-        "the sweeper needs the closing row to end a live follow"
-    db.close()
-
-
-def test_a_failed_status_fails_a_parked_job(tmp_path):
-    db = _db(tmp_path)
-    job = _job(db, expect_report=True)
-    db.finish_job_with_events(
-        job, {"status": "succeeded", "result": "submitted"},
-        [("status", {"stage": "done", "status": "succeeded"})],
-        report_timeout_sec=3600)
-
-    root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "status", "failed")
+    jobdir.publish(root / "progress" / "sources.md", "24/24 done")
     db.ingest_job_dir(job, str(root))
 
-    assert db.get_job(job)["status"] == "failed"
-    db.close()
-
-
-def test_a_status_file_cannot_end_a_turn_that_is_still_running(tmp_path):
-    """A file in a directory is not the promise a call is.
-
-    The delegate may write `finished` about a step and keep working. Ending its
-    row underneath it would strand a live agent, so only the turn's own end --
-    or a report placed over HTTP, which is a deliberate act -- does that.
-    """
-    db = _db(tmp_path)
-    job = _job(db)
-    db.mark_running(job)
-    root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "status", "finished")
-
-    db.ingest_job_dir(job, str(root))
-
-    assert db.get_job(job)["status"] == "running"
-    assert _messages(db, job)[0]["data"]["status"] == "finished"
-    db.close()
-
-
-def test_an_unknown_status_word_is_kept_rather_than_dropped(tmp_path):
-    db = _db(tmp_path)
-    job = _job(db)
-    root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "status", "donezo")
-
-    db.ingest_job_dir(job, str(root))
-    data = _messages(db, job)[0]["data"]
-    assert data["status"] == "unknown"
-    assert data["raw"] == "donezo"
+    assert [e["data"]["msg"] for e in _messages(db, job)] == \
+        ["12/24 done", "24/24 done"]
     db.close()
 
 
@@ -197,7 +130,8 @@ def test_the_agent_is_told_where_to_write_and_gets_it_in_its_environment():
                    permission_mode=None, model=None, job_dir="/data/reports/j1")
     note = job_dir_note(spec)
     assert "/data/reports/j1" in note
-    assert "$AB_JOB_DIR/status" in note
+    assert "ab-notify --msg" in note
+    assert "ends when this turn ends" in note
     assert child_env(spec)["AB_JOB_DIR"] == "/data/reports/j1"
 
 
@@ -279,39 +213,21 @@ def test_a_drop_shows_up_on_the_event_stream_over_http(client, auth, gateway):
     assert [e["data"]["msg"] for e in events] == ["server up"]
 
 
-def test_a_failed_status_carries_the_report_as_its_reason(tmp_path):
-    """Without this the row reads "batch work reported failed" while the actual
-    reason sits in a different event -- true, and useless to `ab wait`, which
-    exits 3 printing `error`."""
+def test_a_status_file_is_an_ordinary_drop(tmp_path):
+    """It used to name a job's state, back when a row could park waiting to be
+    closed. The turn's end decides that now, so the word means nothing to the
+    gateway — a delegate that writes one out of habit is simply heard."""
     db = _db(tmp_path)
-    job = _job(db, expect_report=True)
-    db.finish_job_with_events(
-        job, {"status": "succeeded", "result": "submitted"},
-        [("status", {"stage": "done", "status": "succeeded"})],
-        report_timeout_sec=3600)
-
-    root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "report.md", "CUDA OOM at step 200\n")
-    jobdir.publish(root / "status", "failed")
-    db.ingest_job_dir(job, str(root))
-
-    row = db.get_job(job)
-    assert row["status"] == "failed"
-    assert "CUDA OOM at step 200" in row["error"]
-    db.close()
-
-
-def test_a_finish_without_a_report_still_closes_cleanly(tmp_path):
-    db = _db(tmp_path)
-    job = _job(db, expect_report=True)
-    db.finish_job_with_events(
-        job, {"status": "succeeded", "result": "submitted"},
-        [("status", {"stage": "done", "status": "succeeded"})],
-        report_timeout_sec=3600)
-
+    job = _job(db)
+    db.mark_running(job)
     root = jobdir.prepare(tmp_path, job)
     jobdir.publish(root / "status", "finished")
+
     db.ingest_job_dir(job, str(root))
 
-    assert db.get_job(job)["status"] == "succeeded"
+    data = _messages(db, job)[0]["data"]
+    assert data["file"] == "status"
+    assert data["msg"] == "finished"
+    assert "status" not in data, "a drop must not claim to be a state"
+    assert db.get_job(job)["status"] == "running", "and must not move the row"
     db.close()

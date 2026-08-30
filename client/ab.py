@@ -17,7 +17,7 @@ sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
     AWAIT_SESSION_TIMEOUT, CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL,
-    WAIT_FOR, Client, ConfigError, GatewayError, load_gateways,
+    Client, ConfigError, GatewayError, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -160,7 +160,6 @@ def _submission(args) -> dict:
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=uploads, title=args.title,
                 fork=args.fork, include_thinking=args.include_thinking,
-                expect_report=getattr(args, "expect_report", False),
                 idempotency_key=args.idempotency_key)
 
 
@@ -746,17 +745,6 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--permission-mode", dest="permission_mode")
         sp.add_argument("--include-thinking", action="store_true",
                         help="retain reasoning events")
-        sp.add_argument("--expect-report", dest="expect_report",
-                        action="store_true", default=False,
-                        help="park the job in awaiting_report when the turn "
-                             "ends, until a finished/failed report closes it; "
-                             "otherwise the job is its turn and long work is a "
-                             "monitor")
-        # Now the default. Kept so scripts written against the old default keep
-        # working rather than failing on an unknown flag.
-        sp.add_argument("--no-expect-report", dest="expect_report",
-                        action="store_false", default=False,
-                        help=argparse.SUPPRESS)
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="attach a local regular file (repeatable)")
         sp.add_argument("--upload-as", action="append", default=[],
@@ -799,8 +787,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_sessions)
 
     sp = command("run", "submit a prompt and wait for completion")
-    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
-                    help="what to wait for: both (default), turn, report")
     prompt_flags(sp); job_flags(sp)
     sp.add_argument("--stream", action="store_true",
                     help="stream human assistant text; JSON remains one document")
@@ -859,10 +845,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id", metavar="REF", help=reference)
     sp.add_argument("--timeout", type=_positive_float, default=900.0)
     sp.add_argument("--cancel-on-timeout", action="store_true")
-    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
-                    help="what to wait for: both (default, the job is done), "
-                         "turn (the agent stopped talking), report (an "
-                         "ab-notify finished/failed)")
     sp.set_defaults(func=cmd_wait)
 
     sp = command("events", "read or follow a job event stream")

@@ -78,15 +78,15 @@ def test_a_whole_log_is_refused_rather_than_truncated(tmp_path, capsys):
     assert not (tmp_path / "progress").exists() or not _milestones(tmp_path)
 
 
-def test_status_is_ignored_and_names_the_remedy(tmp_path, capsys):
+def test_status_is_ignored_and_says_what_replaced_it(tmp_path, capsys):
     """An sbatch file on a compute node cannot be edited in lockstep with the
     gateway, and exiting non-zero under `set -e` would cost the run rather than
-    one milestone. So it reports, and says what to do instead."""
+    one milestone. So it reports, and points at what took its place."""
     _run(tmp_path, "--status", "finished", "--msg", "24/24 done")
     assert len(_milestones(tmp_path)) == 1
     err = capsys.readouterr().err
     assert "--status finished is ignored" in err
-    assert '"$AB_JOB_DIR/status"' in err
+    assert "ab-monitor" in err
 
 
 def test_no_status_file_is_written(tmp_path):

@@ -89,11 +89,9 @@ class JobCreate(StrictModel):
     model: str | None = None
     permission_mode: str | None = None
     include_thinking: bool = False
-    # Default false: a job is its turn, and long-running external work is a
-    # monitor with its own lifecycle rather than a row held open (see
-    # docs/todo/15). Send true to park in `awaiting_report` until a terminal
-    # report closes it -- still supported, and still the only way to make one
-    # `ab wait` cover both the turn and the work it started.
+    # Removed, and kept on the DTO only so the refusal can name itself: a job
+    # ends when its turn ends, and work that outlives the turn is a monitor
+    # (design/16). `true` is a typed 400; `false` is what every job does.
     expect_report: bool = False
     files: list[FileItem] = Field(default_factory=list)
 

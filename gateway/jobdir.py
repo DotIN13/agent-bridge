@@ -9,7 +9,6 @@ could not close itself (docs/todo/13).
 So each job is handed one directory instead, in `$AB_JOB_DIR`:
 
     $AB_JOB_DIR/
-      status                  one word: running | finished | failed
       progress/001-slug.md    a milestone; any name, ingested in name order
       report.md               the deliverable, when it outgrows the turn
       monitors/<name>         key-values, written by `ab-monitor`
@@ -30,15 +29,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-STATUS_FILE = "status"
 PROGRESS_DIR = "progress"
 REPORT_FILE = "report.md"
 MONITORS_DIR = "monitors"
 
-#: Statuses a `status` file may name. Anything else is kept verbatim as
-#: `unknown` rather than dropped -- a typo should be visible to the caller, not
-#: silently equivalent to having written nothing.
-STATUSES = ("queued", "running", "finished", "failed")
+#: A `status` file is read like any other: one more milestone. It used to name
+#: a job's state, back when a row could park and wait to be closed; the turn's
+#: end decides that now (design/16), so the word means nothing to the gateway
+#: and a delegate that writes one out of habit is simply heard.
+STATUS_FILE = "status"
 
 #: One report must not be able to exhaust memory or the event row it lands in.
 #: `ab-notify` refuses a larger `--msg-file` up front for the same reason.
@@ -57,7 +56,6 @@ class Drop:
     text: str           # content, truncated to MAX_FILE_BYTES
     digest: str         # sha256 of the full bytes, so a rewrite is a new drop
     oversized: bool
-    status: str | None  # set only by the status file
 
 
 #: Beside the file store rather than under it. Not `<data_dir>/jobs/`
@@ -120,17 +118,17 @@ def scan(job_dir: str | os.PathLike[str]) -> list[Drop]:
             text=(f"job dir holds {len(candidates)} readable files; only the "
                   f"first {MAX_FILES} are ingested"),
             digest=hashlib.sha256(str(len(candidates)).encode()).hexdigest(),
-            oversized=False, status=None))
+            oversized=False))
     return drops
 
 
 def _candidates(root: Path) -> list[str]:
     """Relative paths worth reading, in ingestion order.
 
-    Deliberately narrow. `status` first so a drop written in the same instant as
-    a finish is ordered before it; then milestones in name order; then the
-    report. Anything else in the directory -- scratch files, a `.tmp` mid-rename,
-    the monitors the gateway itself reads -- is not a report and is skipped.
+    Deliberately narrow: `status` if present, then milestones in name order,
+    then the report. Anything else in the directory -- scratch files, a `.tmp`
+    mid-rename, the monitors the gateway itself reads -- is not a report and is
+    skipped.
     """
     names: list[str] = []
     if (root / STATUS_FILE).is_file():
@@ -167,16 +165,10 @@ def _read(root: Path, rel: str) -> Drop | None:
         # as "the delegate never reported".
         return Drop(rel=rel, text=f"could not be read: {exc}",
                     digest=hashlib.sha256(str(exc).encode()).hexdigest(),
-                    oversized=False, status="unknown")
+                    oversized=False)
     text = head[:MAX_FILE_BYTES].decode("utf-8", errors="replace")
-    status = _status_word(text) if rel == STATUS_FILE else None
     return Drop(rel=rel, text=text.strip() if rel == STATUS_FILE else text,
-                digest=digest.hexdigest(), oversized=oversized, status=status)
-
-
-def _status_word(text: str) -> str:
-    word = text.strip().split()[0].lower() if text.strip() else ""
-    return word if word in STATUSES else "unknown"
+                digest=digest.hexdigest(), oversized=oversized)
 
 
 def job_id_from(job_dir: str | os.PathLike[str]) -> str:
@@ -231,30 +223,13 @@ def monitor_drops(job_dir: str | os.PathLike[str]) -> list[tuple[str, dict]]:
     return out
 
 
-#: How much of `report.md` rides along on a terminal `status`, as the reason.
-REASON_CHARS = 2000
-
-
-def event_data(drop: Drop, reason: str = "") -> dict:
+def event_data(drop: Drop) -> dict:
     """The `message` payload for one drop.
 
-    Shaped like an `ab-notify` report on purpose -- same `status`/`msg` keys, so
-    `ab events --type message` reads the same whichever way the report arrived,
-    and `_close_awaiting_locked` needs no special case.
-
-    `reason` is the report's own text, passed in when a terminal `status` is
-    ingested alongside a `report.md`. Without it a failed job's row reads "batch
-    work reported failed" while the actual reason sits in a different event --
-    true, but it makes `ab wait` exit 3 with nothing to act on.
+    `file` and `msg`, and nothing that claims to be a state: a drop is something
+    the delegate said, not something the gateway acts on.
     """
     data: dict = {"source": "job_dir", "file": drop.rel}
-    if drop.status is not None:
-        data["status"] = drop.status
-        if drop.status == "unknown" and drop.text:
-            data["raw"] = drop.text[:2000]
-        if drop.status in ("finished", "failed") and reason:
-            data["msg"] = reason[:REASON_CHARS]
-        return data
     if drop.oversized:
         data["error"] = f"{drop.rel} exceeded {MAX_FILE_BYTES} bytes; truncated"
     data["msg"] = drop.text

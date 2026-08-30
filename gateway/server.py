@@ -306,36 +306,25 @@ def _poll_monitors(gw: Gateway, now: float | None = None) -> None:
         _monitor_event(gw, expired)
 
 
-async def _sweep_reports(gw: Gateway, interval: float = 5.0,
-                         expire_every: float = 60.0) -> None:
-    """Notice what a delegate wrote, and give up on reports that never came.
+async def _sweep_reports(gw: Gateway, interval: float = 5.0) -> None:
+    """Notice what a delegate wrote, and move the monitors along.
 
-    Two reasons this cannot be read-triggered only. A follower that has been
-    streaming since the turn started never issues another read, so a milestone
-    drop would sit unseen until it reconnected. And a parked job that nobody
-    polls has to still reach a terminal state, which is what the deadline is
-    for -- the row carries it, this only notices.
+    Not read-triggered only: a follower that has been streaming since the turn
+    started never issues another read, so a milestone drop would sit unseen
+    until it reconnected. The job-dir scan is a handful of stats over at most
+    200 rows, so it can run this often.
 
-    The job-dir scan is a handful of stats over at most 200 rows, so it runs
-    often; expiry is checked on the slower beat it was written for.
+    It used to carry a second, slower beat that expired report deadlines. There
+    are no deadlines now -- a job ends with its turn (design/16).
     """
-    since_expiry = 0.0
     while True:
         try:
             for row in await run_in_threadpool(gw.db.jobs_with_open_dirs):
                 for event in await run_in_threadpool(
                         _ingest_external, gw, row["id"]):
                     gw.bus.publish(row["id"], event)
-                    if event.get("closing"):
-                        gw.bus.close(row["id"])
             if gw.cfg.monitors_enabled:
                 await run_in_threadpool(_poll_monitors, gw)
-            since_expiry += interval
-            if since_expiry >= expire_every:
-                since_expiry = 0.0
-                expired = await run_in_threadpool(gw.db.expire_awaiting_reports)
-                for job_id in expired:
-                    gw.bus.close(job_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                       # never kill the loop
@@ -575,6 +564,15 @@ def create_app(gw: Gateway) -> FastAPI:
         except ValidationError as exc:
             raise ApiError(400, "validation_error", "invalid job submission",
                            {"errors": json.loads(exc.json())}) from exc
+        if spec.expect_report:
+            # Refused rather than ignored: a caller asking to be waited for and
+            # silently not being is the substitution design/03 rules out. The
+            # field is still on the DTO so this message can explain itself.
+            raise ApiError(
+                400, "expect_report_removed",
+                "expect_report is gone: a job ends when its turn ends. Watch "
+                "work that outlives the turn with a monitor (POST /v1/monitors, "
+                "or `ab-monitor add` from inside the job) and wait on that.")
         agent_name = spec.agent or cfg.default_agent
         agent_cfg = cfg.agents.get(agent_name)
         if not agent_cfg:
@@ -620,7 +618,6 @@ def create_app(gw: Gateway) -> FastAPI:
                 "id": job_id, "status": "queued", "agent": agent_name,
                 "cwd": cwd, "title": title, "fork": spec.fork,
                 "include_thinking": spec.include_thinking, "files": paths,
-                "expect_report": spec.expect_report,
                 "replayed": False,
                 "session": spec.session,
                 "session_state": "pinned" if spec.session else "pending"}
@@ -629,8 +626,7 @@ def create_app(gw: Gateway) -> FastAPI:
                 session=spec.session,
                 permission_mode=spec.permission_mode, model=spec.model,
                 title=title, fork=spec.fork,
-                include_thinking=spec.include_thinking, files=paths,
-                expect_report=spec.expect_report)
+                include_thinking=spec.include_thinking, files=paths)
             if idempotency_key:
                 try:
                     response, created = gw.db.create_job_idempotent(
@@ -683,15 +679,8 @@ def create_app(gw: Gateway) -> FastAPI:
                 gw.db.add_message, job["id"], data, message.report_id)
         except ReportConflict as exc:
             raise ApiError(409, "report_id_conflict", str(exc)) from exc
-        closing = row.pop("closing_event", None)
         if not row.get("duplicate"):
             gw.bus.publish(job["id"], row)
-        if closing:
-            # This report ended a parked job. Publish the terminal status and
-            # close the stream, so a follow that has been open since the turn
-            # ended sees the finish rather than hanging.
-            gw.bus.publish(job["id"], closing)
-            gw.bus.close(job["id"])
         return {"id": job["id"], "seq": row["seq"],
                 "duplicate": bool(row.get("duplicate"))}
 

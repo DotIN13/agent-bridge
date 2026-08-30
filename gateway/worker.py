@@ -11,7 +11,7 @@ from .adapters import build as build_adapter
 from .adapters.base import Cancellation, Event, JobSpec, Steering
 from .bus import Bus
 from .config import Config
-from .db import AWAITING_REPORT, Database
+from .db import Database
 
 
 class WorkerPool:
@@ -28,15 +28,6 @@ class WorkerPool:
         self._steers: dict[str, Steering] = {}
         self._claimed: dict[str, str] = {}
         self._started = False
-
-    @property
-    def report_timeout_sec(self) -> float:
-        return float(getattr(self.cfg, "report_timeout_sec", 0.0) or 0.0)
-
-    def _parked(self, job_id: str) -> bool:
-        """Did the turn end without ending the job? Then keep the stream open."""
-        row = self.db.get_job(job_id)
-        return bool(row and row["status"] == AWAITING_REPORT)
 
     def start(self) -> None:
         with self._lock:
@@ -279,16 +270,14 @@ class WorkerPool:
                 fields.update(status=status, error=result.error or "run failed")
             rows = self.db.finish_job_with_events(
                 job_id, fields,
-                [("status", {"stage": "done", "status": status})],
-                report_timeout_sec=self.report_timeout_sec)
-            # Releases the worker slot and the session claim either way: the
-            # agent process is gone even when the row stays open, so holding
-            # the claim would block every later resume of that session.
+                [("status", {"stage": "done", "status": status})])
+            # Releases the worker slot and the session claim: the agent process
+            # is gone, so holding the claim would block every later resume of
+            # that session.
             self._release_locked(job_id)
         for row in rows:
             self.bus.publish(job_id, row)
-        if not self._parked(job_id):
-            self.bus.close(job_id)
+        self.bus.close(job_id)
 
     def _emit(self, job_id: str, event: Event) -> None:
         row = self.db.append_event(job_id, event.type, event.data)

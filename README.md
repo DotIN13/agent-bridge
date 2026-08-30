@@ -201,10 +201,8 @@ when its turn ends and long work is a monitor.
 `POST /v1/jobs/{ref}/message` remains for anything that wants immediate delivery
 over HTTP.
 
-Opt into the old behaviour with `ab submit --expect-report` when you want one
-`ab wait` to cover both the turn and the work it started: the row parks in
-`awaiting_report` until `status` says `finished`/`failed`, and fails with
-`report_timeout` if nothing ever does.
+A job is terminal when its turn ends, always. `ab wait` has one end to wait for,
+and `ab monitor <id> --wait` is how you block on work that outlives a turn.
 
 ## Operator notes
 

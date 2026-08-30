@@ -15,10 +15,10 @@ convenience rather than a dependency -- the same milestone is
 
 What it no longer has is `--status`. Reporting a *status* used to be its point:
 it resolved a job id, a url and a token, then tried HTTP, a shared JSONL drop and
-a local one, so that `--status finished` could close a job parked in
-`awaiting_report`. A job now ends when its turn ends, and long-running work is a
-monitor with its own lifecycle (`ab-monitor`), so nothing needs to be told that
-the work is over. What remains worth saying is what happened along the way.
+a local one, so that `--status finished` could close a job that was parked
+waiting for it. A job ends when its turn ends now, and work that outlives the
+turn is a monitor with its own lifecycle (`ab-monitor`), so nothing needs telling
+that the work is over. What remains worth saying is what happened along the way.
 
 `--status` is therefore accepted and ignored rather than fatal, with a note
 naming the remedy: an sbatch file already on a compute node cannot be edited in
@@ -96,11 +96,10 @@ def main(argv=None) -> int:
             print(f"ab-notify: ignoring {flag} — a milestone needs no url or "
                   f"token now, only $AB_JOB_DIR", file=sys.stderr)
     if args.status:
-        remedy = ("write it yourself: echo %s > \"$AB_JOB_DIR/status\""
-                  % args.status) if args.status in ("finished", "failed") else \
-            "progress is what this reports"
         print(f"ab-notify: --status {args.status} is ignored; every call is a "
-              f"milestone now ({remedy})", file=sys.stderr)
+              f"milestone, and a job ends when its turn ends. Work that "
+              f"outlives the turn is a monitor: see `ab-monitor add --help`.",
+              file=sys.stderr)
 
     root = _job_dir(args.job_dir)
     if root is None:
