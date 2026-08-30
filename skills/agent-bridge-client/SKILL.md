@@ -12,15 +12,13 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 
 ## Workflow
 
-1. **`ab gateways`** — which are configured and which are actually reachable. Never assume; a down gateway is data, not an error.
-2. **`ab health`** — the one you are about to use. Exits 1 when unreachable, so branch on it before doing anything else.
-3. **`ab info`** — the host as it actually is: CPU/RAM, local GPUs, Slurm partitions and their GPU inventory, allocation balance — and then, under a rule, the **operator notes**: what a person knows and a probe cannot find, like the account to charge, the partition that has the GPUs, the filesystem that is nearly full. Read this *before* writing a plan; half of what you would otherwise guess is stated here, and it costs no agent turn.
+1. **`ab gateways`, `ab health` and `ab info`** — which are configured and which are actually reachable. `ab info` shows you the host as it actually is: CPU/RAM, local GPUs, Slurm partitions and their GPU inventory, allocation balance — and then, under a rule, the **operator notes**: what a person knows and a probe cannot find, like the account to charge, the partition that has the GPUs, the filesystem that is nearly full. Read this *before* writing a plan; half of what you would otherwise guess is stated here, and it costs no agent turn.
 4. **`ab agents --output json`** — which backend you are driving and what it actually supports: sessions, fork, in-place resume, steering, thinking, attachments. A plan that assumes steering on a backend without it is infeasible before it starts.
 5. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
 6. **`ab sessions`**, then **`ab sessions --cwd <dir>`** — which directories have work, then the sessions in that project. Pick one to continue; a new session is a new subject.
-7. **`ab run -F recon.md`** — one short alignment turn before the real brief, in the session that will do the work. Required for anything needing a full brief; skipped for a lookup. See *Align the plan before you delegate*.
+7. **`ab run -F recon.md`** — recommended alignment turns before the real brief, in the session that will do the work. Required for anything needing a full brief; skipped for a lookup. See *Align the plan before you delegate*.
 8. **`ab submit -F brief.md --session <uuid> --no-fork`** — always from a file, never an inline prompt. The brief **must** carry a Verification section naming the check that settles the work, and a Finishing section saying whether to commit, what the report must contain, and — when the work outlives the turn — that the worker registers a monitor and names it. A brief without the check produces a report you cannot tell from a guess. Full template below.
-9. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it. A job is `succeeded` once its turn has ended **and** the worker has written `$AB_JOB_DIR/report.md`; between the two it reads `waiting`. Work that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
+9. **`ab wait` asynchronously** — Use background bash jobs or Monitor tools to keep the wait in the background. A job is `succeeded` once its turn has ended **and** the worker has written `$AB_JOB_DIR/report.md`; between the two it reads `waiting`. Long running work like batch jobs that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
 
 ## Starting a job
 
@@ -38,52 +36,34 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 - **Record full UUIDs.** A prefix can later become ambiguous.
 - Always pass prompts with `-F/--prompt-file`, from a temp dir — see the brief template below.
 
-## Align the plan before you delegate
+## Align before you delegate
 
-You cannot see the remote filesystem, versions, cluster state or prior runs, so a plan written from here is a plan written from guesses. The brief template has an **Assumed** section for exactly that reason — but the worker answers those assumptions *in its report*, which is after the expensive part. So check them first, in one cheap turn, in the session that will do the work:
+Run a short recon before submitting any substantial brief. Skip recon for simple lookups.
 
 ```bash
-# one short turn; --output json so the session id is machine-readable
-ab run -F recon.md --title sweep-recon --timeout 300 --output json
+ab run -F recon.md --title <task>-recon --timeout 300 --output json
 
-# then the real brief, resumed in place so it keeps what was just verified
-ab submit -F brief.md --session <uuid> --no-fork --title sweep
+ab submit -F brief.md --session <uuid> --no-fork --title <task>
 ```
 
-- **Required for work that needs a full brief. Skipped for a lookup** — a question whose answer is one command does not need a round trip, it *is* the round trip.
-- **Ask the recon for four things and nothing else:**
-  1. **Each assumption, confirmed or denied**, naming what it found instead — the paths, the flag names, the module versions, the data shape.
-  2. **The environment facts that will shape the work**: the GPU actually available, what already exists, how big the data really is, what is already installed.
-  3. **Whether the work will outlive a turn** — queue depth, expected runtime. This is what decides whether the brief asks for a monitor.
-  4. **A feasibility verdict, with a counter-proposal if the plan is wrong.** *"This will not work because X; do Y instead"* is the most valuable thing a recon can return, and it is what you are paying for.
-- **Ask for it short.** This is the one exception to the comprehensive-report rule below: its output goes straight into your next brief, not into a record.
-- **It is a turn, not a job to babysit.** `ab run` is submit-and-wait in one call; keep `--timeout` small. Exit 4 is a timeout and the job keeps running. **Exit 3 means the recon itself failed** — fix the premise before spending the full brief on it.
-- **Same session, resumed in place** (rung 2 above). The agent already holds what it just verified, so **Assumed** carries only what is *still* unverified and **Known** can point at the recon rather than restating it. The session is idle by definition once `ab run` has returned, which is what `--no-fork` requires.
-- **`--output json` for the session id.** Human mode prints the result to stdout and `[status] id=… session=… cost=…` to *stderr*, so reading stdout alone loses the uuid.
-- **Fold the answers in; do not append them.** An assumption the recon refuted moves out of Assumed and into Known, corrected. Leaving both in is how a brief ends up contradicting itself, and the worker then has to guess which half you meant.
+Use recon to:
 
-A recon prompt is short enough to inline in the file it is written to:
+* Verify the assumptions your full brief depends on.
+* Discover environment facts that may change the plan: paths, versions, hardware, installed tools, existing outputs, and data shape.
+* Estimate whether the work will outlive a single agent turn and require a monitor.
+* Get an explicit feasibility verdict and an alternative when the proposed approach is wrong.
+* Prevent the recon from starting the actual work.
+
+Keep `recon.md` short. Use these sections:
 
 ```markdown
 # Goal
-Before I brief you properly: I want to fine-tune the 7B checkpoint on the
-new corpus, and I need to know whether my plan survives contact with the node.
-
-# Task
-1. Confirm or correct each assumption below, naming what you actually found.
-2. Report the GPU you would really get on the partition named in the notes.
-3. Say whether one run outlives a single turn, and roughly how long it takes.
-4. If this plan is wrong, say so and propose the alternative.
-
-# Assumed
-- the checkpoint is at /project/x/ckpt/7b-base
-- `train.py` takes --num-workers
-- torch 2.4 with CUDA 12 in the `finetune` env
-
-Report in under 250 words. Do not start the training.
+# Check
+# Constraints
+# Output
 ```
 
-The last line matters: a recon that starts the work has spent the budget you were trying to protect.
+After recon, fold confirmed facts into `Known`, correct or remove false assumptions, and leave only unresolved items in `Assumed`. It is recommended to resume the real work with the same session so the delegate retains the recon context.
 
 ## Briefing the remote agent
 
@@ -102,18 +82,9 @@ Six sections, in this order:
 # Finishing     — commit/push or not, what the report must contain, how to close the job
 ```
 
-**Verification and Finishing are required.** Without them you get work you cannot check and a job that never closes.
-
-- **Goal** — what the work is for, in a sentence or two, and why it matters. A delegate that knows the point can make a judgment call when it hits something you did not anticipate; one holding only an instruction follows it off a cliff.
-- **Task** — the steps, numbered, concrete enough to act on: which script, which directory, which data, in what order. Name what is *out* of scope too. For a lookup, hand over the exact command. For an investigation, hand over the **question** instead of a step list — prescribed steps become dead weight when the premise is wrong.
-- **Known** — the facts the delegate must treat as settled and work within: paths, module loads, versions, the account to charge, the partition to use, what has already been ruled out and why. Say that these are given, not up for improvement; a delegate that re-litigates them burns the turn.
-- **Assumed** — everything you believe but have *not* verified, labelled as such: paths you think exist, flags you think the script takes, the shape of the data. After an alignment turn this should be short — what it confirmed belongs in Known now, corrected. **Require the delegate to confirm whatever is left and say in the report which held and which did not.** An unrefuted wrong assumption goes straight into your next brief, which is how a whole chain of jobs inherits one mistake.
-- **Verification** — the tests, benchmarks or checks that confirm the work, named concretely: the command to run and what a pass looks like, the number that must move, the file that must exist, the baseline to compare against. Require the **evidence** in the report rather than a claim about it — *"ran the tests"* is not evidence, the tail of the output is. State the three rules the delegate will not otherwise assume: **a claim of done rests on output it actually saw**, not on what the step should have produced; **a step that failed, was skipped or was substituted goes in the first sentence** of the report, ahead of the successes; **anything not run is named `NOT-RUN`**, never a plausible-looking value. You cannot rerun the check from here, which is exactly why it has to be in the brief. Then verify what you can: read the report against `ab events REF --type tool_use`, or download the artifacts and look at them.
-- **Finishing** — three things, all explicit:
-  - **Git.** Whether to commit, whether to push, and to which branch — or not to. Say it either way: *"commit to `<branch>` and push"*, or *"leave the tree dirty, do not commit"*. A delegate guessing at this is how work lands on `main` or is lost with the session.
-  - **The report, and it should be comprehensive rather than short.** It is stored whole and it is the only window you have; a report that saves you a page of reading and costs you a follow-up job is a bad trade. Comprehensive in *coverage*, not a log dump — the bulk belongs in the files it points you at. Require: **what it did for each step** in Task; **the decisions it made and the methodology behind them** — what it chose, what it rejected, and why; **the verification output and the results**, numbers with the conditions that produced them; **which assumptions held**; and **absolute paths to the result files and to the important process files** — scripts, configs, logs, the sbatch file — so you can fetch exactly those with `ab download` instead of trawling a transcript.
-  - **The close.** A job finishes when its turn does, so nothing has to be sent for an ordinary job — this is where you say what happens to work that *outlives* the turn. Require the worker to **register a monitor before ending its turn** and to **name it in the report**: `ab-monitor add --slurm <id> --label <name> --result <path>`. Then you watch it with `ab monitors --job <ref>` and `ab monitor <id> --wait`; its transitions also land on the job's own `message` stream. Progress while the worker is still going arrives the same way, from files it writes into `$AB_JOB_DIR` — you do not have to ask for the plumbing, only for the milestones you want.
-
+* Make verification concrete: commands, expected outputs, benchmarks, files, or comparison criteria.
+* Require the report to cover completed work, decisions, verification results, assumption outcomes, and absolute paths to important artifacts.
+* If the work will be long-running (1h+), ask remote to start the background/batch job work, register `ab-monitor`s, and write a preliminary report to signal job finish before the turn ends.
 
 ## Long and batch jobs
 
