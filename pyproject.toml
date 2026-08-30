@@ -14,7 +14,6 @@ ab = "client.ab:main"
 agent-bridge = "gateway.__main__:main"
 ab-notify = "client.ab_notify:main"
 ab-monitor = "client.ab_monitor:main"
-ab-bridge = "bridge.__main__:main"
 
 [project.optional-dependencies]
 test = [
@@ -26,7 +25,7 @@ test = [
 py-modules = ["agent_bridge_version"]
 
 [tool.setuptools.packages.find]
-include = ["gateway*", "client*", "bridge*"]
+include = ["gateway*", "client*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "client._version.__version__"}
