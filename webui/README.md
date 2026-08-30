@@ -62,7 +62,7 @@ connection then lives as long as that command does. Three states, one key:
 | `exec` | What runs |
 |---|---|
 | absent | Nothing. A plain forward, and `-N` goes on the argv. |
-| `true` | `exec "${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"` — the shipped default. |
+| `true` | `PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve` — the shipped default. |
 | a string | That, verbatim, on the far side. |
 
 In the dialog it is one switch — *Start the gateway when the tunnel comes up* —
@@ -88,29 +88,47 @@ Three things follow from the mechanism:
 
 ### Why the default is written that way
 
-`$AB_BIN_PATH/ab-serve` looks like the obvious default and is a trap: unset, the
-variable expands to nothing and the command becomes `/ab-serve`, which fails as
-"not found" and names nothing useful. `${AB_BIN_PATH:+$AB_BIN_PATH/}` adds the
-slash only when there is something to put before it, so the default is
-`$AB_BIN_PATH/ab-serve` where the variable is set and a bare `ab-serve` — found
-on `PATH` — where it is not. It is quoted, so a path with a space survives, and
-prefixed with `exec` so the login shell is replaced rather than left waiting.
+`$AB_PATH` names the directory holding agent-bridge's console scripts on the
+cluster. The obvious use of it — `$AB_PATH/ab-serve` — is wrong in two of the
+three cases that occur:
 
-**Whether the variable is there at all** is the part worth checking.
-`ssh host cmd` runs a non-interactive shell. bash does read `~/.bashrc` in that
-case, but nearly every distribution's `.bashrc` opens with an early return when
-not interactive, so exports below that line never run — the variable exists in
-your login shell and not in the one ssh uses. This settles it in one command:
+| `$AB_PATH` | `$AB_PATH/ab-serve` | Prepending to `PATH` |
+|---|---|---|
+| set, holds `ab-serve` | works | works |
+| unset | runs `/ab-serve`, "not found" | falls back to `PATH` |
+| set, does not hold it | fails, with `ab-serve` on `PATH` a metre away | falls back to `PATH` |
 
-```bash
-ssh midway5 'echo "AB_BIN_PATH=$AB_BIN_PATH"; command -v ab-serve'
+So the default prepends and lets the shell's own lookup decide:
+
+```sh
+PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve
 ```
 
-If neither prints anything useful, the fixes in ascending order of assumption
-are: put the `export` *above* the interactivity guard in `~/.bashrc`; or set
-`exec` to a path — `"~/.local/bin/ab-serve"`, which the remote shell expands with
-no profile involved; or to `"bash -lc 'exec ab-serve'"` when it has to come from
-`~/.profile`.
+`${AB_PATH:+…}` contributes the entry *and* its colon only when the variable is
+set, so an unset one leaves `PATH` untouched rather than putting an empty element
+in it — an empty element means the current directory, which is not something to
+add to a `PATH` a command is about to be looked up in. Measured in sh, dash and
+bash, which agree on all three rows. It lands on `ab-serve`'s own environment
+too, so the `agent-bridge` it looks for next is found in the directory it was
+itself found in. `exec` replaces the login shell, so one process fewer waits
+around and the signal from a dropped connection reaches `ab-serve` directly.
+
+**Whether `$AB_PATH` is set at all** is the other half, and the reason the
+fallback matters. `ssh host cmd` runs a non-interactive shell: bash does read
+`~/.bashrc` there, but nearly every distribution's `.bashrc` opens with an early
+return when not interactive, so exports below that line never run — the variable
+your login shell has is not the one ssh gets. This settles it in one command:
+
+```bash
+ssh midway5 'echo "AB_PATH=$AB_PATH"; command -v ab-serve'
+```
+
+If the second line prints a path, the default already works and `$AB_PATH` is
+optional. If neither prints anything, the fixes in ascending order of assumption
+are: `export AB_PATH=~/.local/bin` *above* the interactivity guard in
+`~/.bashrc`; or set `exec` to a path — `"~/.local/bin/ab-serve"`, which the
+remote shell expands with no profile involved; or to `"bash -lc 'exec ab-serve'"`
+when it has to come from `~/.profile`.
 
 ## The security model
 

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { DEFAULT_EXEC, DEFAULT_EXEC_TARGET, loadConfig, removeEntry, renameEntry, writeEntry } from "./config.ts";
+import { DEFAULT_EXEC, loadConfig, removeEntry, renameEntry, writeEntry } from "./config.ts";
 
 /** A config file of our own, pointed at the way `ab` points at one. */
 function withConfig(contents: unknown): string {
@@ -124,25 +124,37 @@ test("exec with no ssh command carries nothing, because there is no connection t
   assert.equal(entry.spec, undefined);
 });
 
-test("the default command finds ab-serve with or without $AB_BIN_PATH", () => {
+test("the default command finds ab-serve in $AB_PATH, and on PATH when it is not there", () => {
   /*
-   * The whole point of the expansion, checked against a real shell rather than
-   * read. `$AB_BIN_PATH/ab-serve` on its own is the trap: unset, it expands to
-   * `/ab-serve` and fails as "not found", naming nothing useful.
+   * Run rather than read: the value of this form is entirely what a shell does
+   * with it, and `$AB_PATH/ab-serve` — the obvious version — is wrong in two of
+   * these three cases.
    */
-  const expand = (env: Record<string, string>) =>
-    execFileSync("/bin/sh", ["-c", `echo ${DEFAULT_EXEC_TARGET}`], {
+  const dir = mkdtempSync(path.join(tmpdir(), "ab-lookup-"));
+  const inAbPath = path.join(dir, "ab");
+  const onPath = path.join(dir, "elsewhere");
+  const empty = path.join(dir, "empty");
+  for (const [where, said] of [[inAbPath, "from-AB_PATH"], [onPath, "from-PATH"]] as const) {
+    mkdirSync(where, { recursive: true });
+    writeFileSync(path.join(where, "ab-serve"), `#!/bin/sh\necho ${said}\n`, { mode: 0o755 });
+  }
+  mkdirSync(empty, { recursive: true });
+
+  const run = (abPath?: string) =>
+    execFileSync("/bin/sh", ["-c", DEFAULT_EXEC], {
       encoding: "utf8",
-      env: { PATH: process.env.PATH ?? "", ...env },
+      env: { PATH: `${onPath}:/usr/bin:/bin`, ...(abPath === undefined ? {} : { AB_PATH: abPath }) },
     }).trim();
 
-  assert.equal(expand({}), "ab-serve");
-  assert.equal(expand({ AB_BIN_PATH: "/opt/ab/bin" }), "/opt/ab/bin/ab-serve");
-  // A path with a space survives, because the expansion is quoted.
-  assert.equal(expand({ AB_BIN_PATH: "/opt/my tools" }), "/opt/my tools/ab-serve");
+  assert.equal(run(inAbPath), "from-AB_PATH");
+  assert.equal(run(undefined), "from-PATH");
+  // The case an interpolated `$AB_PATH/ab-serve` gets wrong: the variable set,
+  // and the binary not in it. A prepended PATH keeps looking; a built path dies.
+  assert.equal(run(empty), "from-PATH");
+
   // And it replaces the shell, so the signal from a dropped connection lands on
   // ab-serve rather than on a shell waiting for it.
-  assert.ok(DEFAULT_EXEC.startsWith("exec "));
+  assert.match(DEFAULT_EXEC, /exec ab-serve$/);
 });
 
 test("a diagnostic from the ssh command is attached to the entry that carries it", () => {

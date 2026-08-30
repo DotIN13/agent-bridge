@@ -1,8 +1,13 @@
 """``ab-serve`` -- make sure the gateway is up, then hold the ssh open.
 
-The command the dashboard's `ssh` line runs on the far side::
+The command the dashboard runs on the far side once a forward is up. Its gateway
+entry asks for it with ``"exec": true``, which becomes::
 
-    ssh -L 8787:localhost:8787 midway5 '~/.local/bin/ab-serve'
+    PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve
+
+so `$AB_PATH` -- agent-bridge's script directory on this machine -- is searched
+first when it is set, and the plain `PATH` answers when it is not. The `ssh` line
+may also end in this command directly, which is the same thing said by hand.
 
 There is one shipped with agent-bridge rather than one written per gateway
 because every version of this script anybody writes has to answer the same four
@@ -105,6 +110,10 @@ def gateway_command(config_path: str | None, override: str | None) -> list[str]:
     `agent-bridge` on PATH when there is one, and this interpreter's own
     ``-m gateway`` when there is not -- which is the case in a checkout, and the
     same fallback `find_ab_notify` makes for the reporter.
+
+    The dashboard's default command prepends `$AB_PATH` to `PATH` before exec'ing
+    this script, so a gateway installed beside `ab-serve` is found here without
+    being configured twice.
     """
     if override:
         argv = [override]

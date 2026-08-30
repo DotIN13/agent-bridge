@@ -241,9 +241,11 @@ ssh -L 8787:localhost:8787 midway5 '~/.local/bin/ab-serve'
 ```
 
 The dashboard puts it there for you: `"exec": true` on a gateway entry (a switch
-in its config dialog) runs `exec "${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"` when
-the tunnel comes up, and a string in the same key runs your own script instead.
-See [webui/README.md](webui/README.md#starting-the-gateway-on-connect).
+in its config dialog) runs `PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve`
+when the tunnel comes up, and a string in the same key runs your own script
+instead. `$AB_PATH` is optional — it puts agent-bridge's script directory first,
+and without it the plain `PATH` lookup is used. See
+[webui/README.md](webui/README.md#starting-the-gateway-on-connect).
 
 It answers the four questions every hand-written version of this has to answer,
 and gets them right in the direction that loses least:

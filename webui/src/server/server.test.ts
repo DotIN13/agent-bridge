@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -333,7 +334,13 @@ test("something else answering the port does not make an unauthenticated tunnel 
   impostor.close();
 });
 
-/** An ssh that asks once, through the askpass bridge, and then stays alive. */
+/**
+ * An ssh that asks once, through the askpass bridge, and then stays alive.
+ *
+ * `node --check` on what was written, because a broken fake does not fail its
+ * test — it fails quietly and wrongly. One of these was a syntax error for a
+ * while and its test passed anyway, on the words in the traceback.
+ */
 function fakeSshThatAsks(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
   const file = path.join(dir, "ssh");
@@ -354,6 +361,7 @@ execFile(helper, ["somebody@host's password:"], (err, stdout) => {
 `,
     { encoding: "utf8", mode: 0o755 },
   );
+  execFileSync(process.execPath, ["--check", file]);
   return file;
 }
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +10,27 @@ import { classify, exitReason, Tunnel } from "./tunnel.ts";
 import { parseSshCommand } from "./ssh-command.ts";
 
 process.env.AB_WEBUI_STATE_DIR = mkdtempSync(path.join(tmpdir(), "ab-webui-state-"));
+
+/**
+ * Write a fake `ssh`, and refuse to hand back one that is not valid JavaScript.
+ *
+ * `node --check` is here because a broken fake does not fail its test — it fails
+ * *quietly and wrongly*. One of these was a syntax error for a while and its
+ * test passed anyway: Node echoes the offending source line in the traceback,
+ * that line contained the words "Permission denied", and `classify` duly
+ * reported an authentication failure. The assertion held for a reason that had
+ * nothing to do with the code under test.
+ *
+ * Called `ssh` on purpose: `parseSshCommand` reads the first word as the program,
+ * and a fake named anything else would be one too.
+ */
+function writeFakeSsh(body: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
+  const file = path.join(dir, "ssh");
+  writeFileSync(file, `#!/usr/bin/env node\n${body}`, { encoding: "utf8", mode: 0o755 });
+  execFileSync(process.execPath, ["--check", file]);
+  return file;
+}
 
 /**
  * An ssh that behaves like ssh where it matters.
@@ -23,12 +45,7 @@ process.env.AB_WEBUI_STATE_DIR = mkdtempSync(path.join(tmpdir(), "ab-webui-state
  * binary when it is named like one.
  */
 function fakeSsh(password: string): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
-  const file = path.join(dir, "ssh");
-  writeFileSync(
-    file,
-    `#!/usr/bin/env node
-import { execFile } from "node:child_process";
+  return writeFakeSsh(`import { execFile } from "node:child_process";
 
 const args = process.argv.slice(2);
 const batch = args.includes("BatchMode=yes");
@@ -54,10 +71,7 @@ execFile(helper, ["somebody@host's password:"], (err, stdout) => {
   // ssh -N says nothing more and stays alive holding the forwards.
   setInterval(() => {}, 1000);
 });
-`,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  return file;
+`);
 }
 
 /**
@@ -68,17 +82,9 @@ execFile(helper, ["somebody@host's password:"], (err, stdout) => {
  * ever asked.
  */
 function fakeSshThatIgnoresAskpass(): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
-  const file = path.join(dir, "ssh");
-  writeFileSync(
-    file,
-    `#!/usr/bin/env node
-process.stderr.write("somebody@host: Permission denied (publickey,password).\n");
+  return writeFakeSsh(`process.stderr.write("somebody@host: Permission denied (publickey,password).\\n");
 process.exit(255);
-`,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  return file;
+`);
 }
 
 interface Harness {
@@ -272,19 +278,11 @@ test("a password that was asked for and refused says nothing about askpass", asy
  * holding the connection open (`ab-serve`), and exiting 0 is one that finished.
  */
 function fakeSshEchoingArgs(hold: boolean): string {
-  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
-  const file = path.join(dir, "ssh");
-  writeFileSync(
-    file,
-    `#!/usr/bin/env node
-const args = process.argv.slice(2);
+  return writeFakeSsh(`const args = process.argv.slice(2);
 process.stderr.write("argc=" + args.length + "\\n");
 process.stderr.write("last=" + args[args.length - 1] + "\\n");
 ${hold ? "setInterval(() => {}, 1000);" : "process.exit(0);"}
-`,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  return file;
+`);
 }
 
 test("a remote command reaches ssh as one argument and holds the tunnel up", async () => {
@@ -302,6 +300,40 @@ test("a remote command reaches ssh as one argument and holds the tunnel up", asy
   assert.match(log, /last=ab-serve --interval 30/);
   assert.ok(!log.includes(" -N "));
 
+  tunnel.down();
+  await bridge.stop();
+});
+
+test("the shell in a remote command is the far side's, not ours", async () => {
+  /*
+   * Where `$AB_PATH` gets expanded, settled rather than assumed.
+   *
+   * The default on-connect command is
+   * `PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve`, and it is only correct
+   * if the *remote* shell expands it: this laptop's `$AB_PATH` says nothing
+   * about where the cluster keeps its binaries. `spawn` without `shell: true`
+   * performs no expansion, so the string reaches ssh whole and sshd hands it to
+   * the login shell on the far side.
+   *
+   * The assertion is on the argv, because that is the boundary: a refactor to
+   * `shell: true`, or building the command by interpolation here, would expand
+   * it locally and silently point every gateway at a local directory.
+   */
+  process.env.AB_PATH = "/a/local/directory/that/means/nothing/remotely";
+  const bridge = new AskpassBridge(() => {});
+  await bridge.start();
+  const command =
+    `${fakeSshEchoingArgs(true)} -L 18791:localhost:8787 host 'PATH="\${AB_PATH:+\$AB_PATH:}\$PATH"; exec ab-serve'`;
+  const tunnel = new Tunnel("gw", parseSshCommand(command), command, false, bridge, () => {});
+
+  tunnel.up(true);
+  await waitFor(() => tunnel.state([], ["gw"]).status === "up", 6000);
+
+  const log = tunnel.state([], ["gw"]).log.join("\n");
+  assert.match(log, /last=PATH="\$\{AB_PATH:\+\$AB_PATH:\}\$PATH"; exec ab-serve/);
+  assert.ok(!log.includes("/a/local/directory"), "the local shell expanded it");
+
+  delete process.env.AB_PATH;
   tunnel.down();
   await bridge.stop();
 });

@@ -6,19 +6,26 @@ import { parseSshCommand, type SshSpec } from "./ssh-command.ts";
 /**
  * Where `ab-serve` is, said in a way that survives not knowing.
  *
- * `$AB_BIN_PATH/ab-serve` is the form to reach for, and on its own it is a trap:
- * an unset variable expands to nothing and the command becomes `/ab-serve`,
- * which fails as "not found" and names nothing useful. `${VAR:+$VAR/}` adds the
- * slash only when there is something to put in front of it, so this is
- * `$AB_BIN_PATH/ab-serve` where the variable is set and a bare `ab-serve` — found
- * on `PATH` — where it is not. Quoted, so a path with a space in it survives.
+ * `$AB_PATH` names the directory holding agent-bridge's console scripts, and the
+ * obvious use of it — `$AB_PATH/ab-serve` — fails two ways. Unset, it expands to
+ * nothing and the command becomes `/ab-serve`, which fails as "not found" and
+ * names a path nobody configured. Set to the wrong directory, it fails the same
+ * way with no fallback, even when `ab-serve` is on `PATH` a metre away.
+ *
+ * Prepending instead means the shell's own lookup does the work, and the answer
+ * is right in all three cases: found in `$AB_PATH` when it is there, found on
+ * `PATH` when `$AB_PATH` is unset *or* does not contain it. Measured across sh,
+ * dash and bash, which agree.
+ *
+ * It also lands on `ab-serve`'s own environment, so the `shutil.which(
+ * "agent-bridge")` it does next looks in the same directory it was found in.
  *
  * `exec` replaces the login shell rather than leaving it waiting: one process
  * fewer on the far side, and the signal that arrives when the connection drops
  * goes straight to `ab-serve`.
  */
-export const DEFAULT_EXEC_TARGET = '"${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"';
-export const DEFAULT_EXEC = `exec ${DEFAULT_EXEC_TARGET}`;
+export const DEFAULT_PATH_PREFIX = '"${AB_PATH:+$AB_PATH:}$PATH"';
+export const DEFAULT_EXEC = `PATH=${DEFAULT_PATH_PREFIX}; exec ab-serve`;
 
 /**
  * `ab`'s own `gateways.json`, read rather than copied.

@@ -16,7 +16,7 @@ which is what `exec` is folded into and what wins when both are there.
 
 ```
 exec absent    nothing runs; a plain forward, and `-N` on the argv
-exec: true     exec "${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"
+exec: true     PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve
 exec: "…"      that string, verbatim, on the far side
 ```
 
@@ -101,21 +101,63 @@ Two details in the parse are load-bearing:
   the command opens at the first token after the destination that does *not*
   start with `-`.
 
-## The default expansion, and why it is not `$AB_BIN_PATH/ab-serve`
+## Where `$AB_PATH` is expanded, and how that is known
 
-The obvious default is `$AB_BIN_PATH/ab-serve`, and it is a trap: an unset
-variable expands to nothing, the command becomes `/ab-serve`, and it fails as
-"not found" — naming a path nobody configured. `${AB_BIN_PATH:+$AB_BIN_PATH/}`
-adds the slash only when there is something to put in front of it, so the same
-string is `$AB_BIN_PATH/ab-serve` where the variable is set and a bare
-`ab-serve` where it is not. Quoted, so a path with a space survives; prefixed
-with `exec`, so the login shell is replaced rather than left waiting on a child
-and the signal from a dropped connection lands on `ab-serve` itself. A test
-expands all three cases through `/bin/sh` rather than reading the string, because
-the whole value of the form is what a shell does with it.
+By the shell on the far side, which is the only answer that would be correct:
+this laptop's `$AB_PATH` says nothing about where a cluster keeps its binaries.
+It holds because `spawn` runs ssh with no shell of its own — the command reaches
+ssh as one argv element, literally — and sshd hands it to the remote user's login
+shell.
 
-Whether the variable is set at all is the other half, and worth stating because
-the failure is a command not found and nothing else.
+Checked rather than reasoned about, twice. A fake ssh that runs the command under
+a *different* environment shows the remote `AB_PATH` winning while a local one
+points somewhere else entirely; and a unit test asserts the argv still carries
+the unexpanded `${AB_PATH:+$AB_PATH:}$PATH`. The second is the one that will earn
+its keep: a refactor to `shell: true`, or building the command by interpolation
+in TypeScript, would expand it locally and silently point every gateway at a
+directory on the wrong machine.
+
+## A test that passed for the wrong reason
+
+Worth writing down because the failure mode is general. The fake ssh standing in
+for "a client that ignores `SSH_ASKPASS`" was, for a while, a syntax error: an
+escaping slip put a real newline inside a JavaScript string literal. Its test
+passed anyway. Node prints the offending source line in the traceback, that line
+contained the words `Permission denied`, and `classify()` duly reported an
+authentication failure — the assertion held on a string that came from the fake
+being broken rather than from the behaviour under test.
+
+Every generated fake now goes through one writer that runs `node --check` on
+what it wrote. A fake that will not parse fails its test immediately instead of
+passing for reasons nobody chose.
+
+## The default command, and why it is not `$AB_PATH/ab-serve`
+
+`$AB_PATH` names the directory holding agent-bridge's console scripts. Building
+the command out of it — `$AB_PATH/ab-serve` — is wrong in two of the three cases
+that happen:
+
+| `$AB_PATH` | `$AB_PATH/ab-serve` | `PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve` |
+|---|---|---|
+| set, holds `ab-serve` | works | works |
+| unset | runs `/ab-serve` — "not found", naming a path nobody configured | falls back to `PATH` |
+| set, wrong directory | fails, with `ab-serve` on `PATH` a metre away | falls back to `PATH` |
+
+So the default prepends and lets the shell's own lookup answer. The `:+` form
+contributes the entry *and* its colon together, so an unset variable leaves
+`PATH` alone rather than adding an empty element — which means the current
+directory, and a `PATH` that searches `.` before a command is looked up in it is
+its own small hazard. `exec` replaces the login shell, so the signal from a
+dropped connection lands on `ab-serve` rather than on a shell waiting for it.
+
+The test runs the string through `/bin/sh` against two stub `ab-serve`s and an
+empty directory rather than reading it, because the entire value of the form is
+what a shell does with it — and the third row is exactly what the earlier
+interpolated version got wrong. sh, dash and bash agree on all three.
+
+Whether the variable is set at all is the other half, and the reason the fallback
+carries the weight: the failure without one is a command not found and nothing
+else.
 
 `ssh host cmd` runs a non-interactive shell. bash *does* read `~/.bashrc` in that
 case — it detects standard input on a socket and sources it, which is the
@@ -124,9 +166,10 @@ an early return when not interactive, so exports below that line never run. So
 the variable exists in a login shell, and does not exist in the shell ssh
 actually uses.
 
-Hence the documented forms, in order of how little they assume: a path with `~`
-in it (the remote shell expands it, no profile involved), a bare `ab-serve` when
-the export sits *above* the interactivity guard, and `bash -lc "exec ab-serve"`
-when it has to come from `~/.profile`. `ssh midway5 'echo $AB_BIN_PATH; command
--v ab-serve'` settles which of the three a given machine needs, and is worth
-running once before wiring it into a gateway.
+Hence the documented forms, in order of how little they assume: the default,
+which needs nothing when `ab-serve` is on the non-interactive `PATH`;
+`export AB_PATH=…` *above* the interactivity guard; `exec` set to a path with `~`
+in it, which the remote shell expands with no profile involved; and
+`bash -lc "exec ab-serve"` when it has to come from `~/.profile`.
+`ssh midway5 'echo "AB_PATH=$AB_PATH"; command -v ab-serve'` settles which a
+given machine needs, and is worth running once before wiring it into a gateway.
