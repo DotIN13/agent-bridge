@@ -54,8 +54,7 @@ ab jobs --gateway midway5 --output json
 | `gateways [--no-probe]` | every configured gateway: token presence **and** live reachability |
 | `health` | unauthenticated liveness/version probe of one gateway |
 | `agents` | configured backends, models, and capability flags |
-| `capabilities` | structured client/server contract |
-| `help [--remote]` | local CLI help or live `/v1/help` |
+| `help [--remote]` | local CLI help; `--output json` gives the client contract (version, output modes, exit codes, verbs); `--remote` fetches `/v1/help` |
 | `info [--refresh]` | cached host/cluster capabilities |
 | `models [--agent A]` | advertised model ids |
 | `sessions [--cwd D] [--agent A]` | resumable/forkable sessions |

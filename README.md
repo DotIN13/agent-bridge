@@ -65,8 +65,9 @@ Global flags work before or after the command. `--output` modes are:
 - `jsonl` — typed streaming records (`event`, `terminal`, `timeout`,
   `complete`).
 
-New discovery/lifecycle commands include `health`, `agents`, `capabilities`,
-`help --remote`, and `wait`. Follow uses resumable SSE and honors `--after`,
+New discovery/lifecycle commands include `health`, `agents`, `monitors`,
+`help --remote`, and `wait`. `ab help --output json` is the client's own
+contract — version, output modes, exit codes, and every verb it accepts. Follow uses resumable SSE and honors `--after`,
 `--until`, and repeatable `--type` filters.
 
 | Exit | Meaning |

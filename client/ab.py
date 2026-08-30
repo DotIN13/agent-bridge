@@ -232,11 +232,6 @@ def cmd_agents(args):
     _emit(args, data, human)
 
 
-def cmd_capabilities(args):
-    _emit(args, _client(args).capabilities(),
-          lambda value: print(json.dumps(value, indent=2)))
-
-
 def cmd_help(args):
     if args.remote:
         client = load_gateways(args.config).client(args.gateway, require_token=False)
@@ -754,7 +749,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_gateways)
     command("health", "probe one gateway's liveness and version").set_defaults(func=cmd_health)
     command("agents", "list configured agent backends and capabilities").set_defaults(func=cmd_agents)
-    command("capabilities", "print the structured client/server contract").set_defaults(func=cmd_capabilities)
     sp = command("help", "show local or live gateway help")
     sp.add_argument("--remote", action="store_true", help="fetch /v1/help")
     sp.set_defaults(func=cmd_help)

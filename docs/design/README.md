@@ -24,8 +24,15 @@ decision that looks arbitrary until you know what it was chosen against.
 | [16](16-the-turn-is-the-job.md) | The turn is the job, unconditionally: `expect_report` and the `status` vocabulary removed | after 0.3.0 |
 | [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
 | [18](18-steering-opencode-is-http-not-a-pipe.md) | opencode jobs are steerable: `delivery: "steer"` on an attached server, not a pipe | after 0.3.0 |
+| [19](19-one-contract-not-three.md) | `ab capabilities` removed — it was `ab help` + `ab gateways` + `ab agents`, and its verb list had drifted | after 0.3.0 |
 
 ## The load-bearing bits
+
+**19 reverses a piece of 06**, which is worth reading as a pair: 06 added
+`ab capabilities` so an agent could learn the contract in one call, and the verb
+turned out to be three other commands stapled together with a hand-maintained
+list that then drifted. The intent survives — one machine-readable contract —
+but it lives in `ab help --output json`, with a test holding it to the parser.
 
 **18 finishes what 02 started on the other backend.** 02 built the steering
 channel around claude's streaming stdin and left opencode advertising

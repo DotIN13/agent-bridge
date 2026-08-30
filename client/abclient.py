@@ -432,18 +432,21 @@ def parse_sse(lines: Iterable[bytes | str], *,
 #: one missed `help` -- so a caller reading the contract was told a verb it could
 #: use did not exist.
 OPERATIONS = (
-    "gateways", "health", "agents", "capabilities", "help", "info", "models",
-    "sessions", "run", "submit", "jobs", "monitors", "monitor", "job", "wait",
-    "events", "cancel", "steer", "upload", "download", "ls",
+    "gateways", "health", "agents", "help", "info", "models", "sessions",
+    "run", "submit", "jobs", "monitors", "monitor", "job", "wait", "events",
+    "cancel", "steer", "upload", "download", "ls",
 )
 
 
 def client_capabilities() -> dict:
     """What this client can do, without asking anything.
 
-    Shared by `ab capabilities` (which adds the gateway's half) and by
-    `ab help --output json` (which cannot reach a gateway and should not need
-    to).
+    This is the whole of `ab help --output json`. There was a third command,
+    `ab capabilities`, that returned this plus the gateway's name plus a
+    verbatim `GET /v1/agents` -- which is to say `ab gateways` and `ab agents`,
+    both of which already existed. It is gone (docs/design/19): one contract in
+    three places is three chances to drift, and the `operations` list had
+    already done so.
     """
     return {
         "version": CLIENT_VERSION,
@@ -514,17 +517,6 @@ class Client:
         query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
         return self._get("/v1/models" + query)
 
-    def capabilities(self) -> dict:
-        """The whole contract: what this client does, and what that gateway does.
-
-        `client` needs nothing but this process; `server` is a live
-        `GET /v1/agents`, so this call does reach the network.
-        """
-        return {
-            "client": client_capabilities(),
-            "gateway": self.name,
-            "server": self.agents(),
-        }
 
     # jobs
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,

@@ -56,15 +56,15 @@ def test_help_and_version_are_discoverable(capsys):
     with pytest.raises(SystemExit):
         parser.parse_args(["--help"])
     output = capsys.readouterr().out
-    for command in ("health", "agents", "capabilities", "wait", "events"):
+    for command in ("health", "agents", "monitors", "wait", "events"):
         assert command in output
 
 
 def test_the_advertised_operations_are_exactly_the_parser_s_verbs():
-    """`ab capabilities` is the machine-readable contract, so a verb missing
-    from it is a verb an agent will not try. Two hand-kept copies had already
-    drifted — both lost `monitors`/`monitor` when monitors shipped — which is
-    why there is now one list and this test."""
+    """`ab help --output json` is the machine-readable contract, so a verb
+    missing from it is a verb an agent will not try. Two hand-kept copies had
+    already drifted — both lost `monitors`/`monitor` when monitors shipped —
+    which is why there is now one list and this test."""
     import argparse
 
     parser = ab.build_parser()
@@ -328,3 +328,14 @@ def test_follow_failure_flag_applies_when_until_is_reached(monkeypatch):
 def test_snapshot_queries_do_not_fail_by_default(monkeypatch):
     monkeypatch.setattr(ab, "_client", lambda _args: FakeClient("failed"))
     assert ab.main(["job", "job-1", "--output", "json"]) == 0
+
+
+def test_the_capabilities_verb_is_gone_and_fails_loudly():
+    """It returned this client's half plus the gateway's name plus a verbatim
+    GET /v1/agents — `ab gateways` and `ab agents`. An old script gets an
+    argparse error, which is better than a wrapper nobody maintains."""
+    assert "capabilities" not in abclient.OPERATIONS
+    assert not hasattr(abclient.Client, "capabilities")
+    with pytest.raises(SystemExit) as exc:
+        ab.build_parser().parse_args(["capabilities"])
+    assert exc.value.code == 2
