@@ -13,11 +13,15 @@ python -m pip install -e .
 ab --version                       # 0.3.0
 ```
 
-Legacy direct invocation remains supported:
+No install is needed, though — the shims in `bin/` are stdlib only, so a clone
+on `PATH` is a working client:
 
 ```bash
-python client/ab.py --version
+export PATH="/path/to/agent-bridge/bin:$PATH"
+ab --version
 ```
+
+Direct invocation also works: `python client/ab.py --version`.
 
 The copied `client/` directory remains dependency-free. TOML client config
 requires Python 3.11; JSON works on older supported Python versions.

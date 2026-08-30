@@ -34,8 +34,20 @@ Stable console commands are installed together:
 - `ab-notify` — report a milestone from inside a job
 - `ab-serve` — ensure the gateway is serving, then hold an ssh connection open
 
-Legacy invocation remains supported: `python -m gateway`,
-`python client/ab.py`, `bin/ab-monitor`, `bin/ab-notify`, and `bin/ab-serve`.
+**Or clone and put `bin/` on `PATH`** — that is the whole install for the client
+side. `ab`, `ab-notify`, `ab-monitor` and `ab-serve` import nothing outside the
+standard library, so there is no build step to fail on a node with no network:
+
+```bash
+git clone https://github.com/DotIN13/agent-bridge && cd agent-bridge
+export PATH="$PWD/bin:$PATH"
+ab jobs
+```
+
+The gateway is deliberately not shimmed there: it needs FastAPI and uvicorn, so
+it is `pip install -e .` and `agent-bridge`, or `python -m gateway` from a
+checkout — which is what `ab-serve` falls back to when nothing named
+`agent-bridge` is on `PATH`. `python client/ab.py` also still works.
 
 On a laptop, keep one tunnel alive:
 

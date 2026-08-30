@@ -72,6 +72,37 @@ def test_console_scripts_and_dynamic_version_are_declared():
         "client._version.__version__"
 
 
+def test_every_shim_in_bin_runs_from_anywhere(tmp_path):
+    """`git clone` + `PATH="$PWD/bin:$PATH"` is the install-less client, so each
+    shim has to work with the repo neither installed nor on `sys.path`.
+
+    Run from `tmp_path` on purpose: a shim that quietly depended on being
+    invoked from the repo root would pass in CI and fail on the compute node
+    this path exists for. `PYTHONPATH` is stripped for the same reason -- the
+    shim's own `sys.path.insert` is what has to do the work.
+    """
+    root = Path(__file__).parents[2]
+    shims = sorted(p for p in (root / "bin").iterdir() if p.is_file())
+
+    # The client tools, complete. `agent-bridge` is deliberately absent: it
+    # needs FastAPI and uvicorn, so a shim would promise something a bare clone
+    # cannot deliver -- and `ab-serve` already falls back to `-m gateway`.
+    assert [p.name for p in shims] == [
+        "ab", "ab-monitor", "ab-notify", "ab-serve", "install-skills"]
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    for shim in shims:
+        # Both halves of being findable on `PATH`, and the pair a new shim gets
+        # wrong: the exec bit, and a shebang to be executed with.
+        assert os.access(shim, os.X_OK), f"{shim.name} is not executable"
+        assert shim.read_text().startswith("#!/usr/bin/env python3")
+        result = subprocess.run([sys.executable, str(shim), "--help"],
+                                cwd=tmp_path, env=env, capture_output=True,
+                                text=True, timeout=30)
+        assert result.returncode == 0, (shim.name, result.stderr)
+        assert "usage" in result.stdout, (shim.name, result.stdout)
+
+
 def test_console_scripts_install_and_run_offline(tmp_path):
     root = Path(__file__).parents[2]
     source = tmp_path / "source"
