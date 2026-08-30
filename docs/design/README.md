@@ -27,6 +27,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [19](19-one-contract-not-three.md) | `ab capabilities` removed — it was `ab help` + `ab gateways` + `ab agents`, and its verb list had drifted | after 0.3.0 |
 | [21](21-the-dashboard-is-a-supervisor-not-a-page.md) | `webui/`: the ssh forwards get a dashboard — askpass rather than a pty, and three invariants with tests on them | after 0.3.0 |
 | [22](22-connecting-is-starting-the-gateway.md) | `ab-serve`: the ssh line can end in a command, and connecting starts the gateway without owning it | after 0.3.0 |
+| [23](23-the-report-is-the-result.md) | `report.md` is the job's `result`, not one more event; progress is `ab-notify` rather than a path | after 0.3.0 |
 
 **20 is missing on purpose.** It recorded the first attempt at a web UI, whose
 four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed
@@ -34,6 +35,11 @@ and why. The number is not reused — a commit message pointing at design/20 sti
 means the pty-based version, which is reachable by sha.
 
 ## The load-bearing bits
+
+**23 narrows 15 and 17 rather than reversing them.** 15 made reporting a
+directory and 17 made the report half of what finishes a job; 23 keeps both and
+removes the second place a delegate was asked to say the same thing — the closing
+message — by making the file the `result`.
 
 **19 reverses a piece of 06**, which is worth reading as a pair: 06 added
 `ab capabilities` so an agent could learn the contract in one call, and the verb

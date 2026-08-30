@@ -292,6 +292,13 @@ class WorkerPool:
                 "session": result.session,
                 "cost_usd": result.cost_usd,
             }
+            # The report is the result (design/23). Where the delegate wrote one,
+            # it is the answer `ab job` should print -- the turn's own final
+            # message is already on the event stream, and asking for the same
+            # content in both places is how the two come to disagree.
+            reported = jobdir.read_report(spec.job_dir) if spec.job_dir else None
+            if reported:
+                fields["result"] = reported
             # Written before any status decision, and whatever the outcome: on
             # the hold-open path the run returns *after* the sweeper has already
             # finished the row, so a guarded terminal update would drop the
@@ -303,7 +310,9 @@ class WorkerPool:
                 fields.update(status=status, error="canceled")
             elif result.ok:
                 status = "succeeded"
-                fields.update(status=status, result=result.result, error=None)
+                # `result` deliberately not restated here: it was decided above,
+                # and re-setting it from the turn would undo the report.
+                fields.update(status=status, error=None)
                 # A backend whose child exits with its turn (opencode, the
                 # dispatcher modes) never reaches `_on_turn_end`, so the same
                 # rule is applied here: no report yet means `waiting`, not

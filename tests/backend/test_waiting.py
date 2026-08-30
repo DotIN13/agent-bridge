@@ -339,3 +339,108 @@ def test_a_later_save_does_not_blank_what_an_earlier_one_kept(tmp_path):
     assert row["cost_usd"] == 0.2
     assert row["session"] == "ses-9"
     db.close()
+
+
+# -- the report is the result ---------------------------------------------
+
+
+def test_the_report_is_what_ab_job_prints(tmp_path, monkeypatch):
+    """The file, not the turn's final message (design/23).
+
+    Asking a delegate for its findings twice — once in the message, once in the
+    file — is how the two come to disagree, and the one a caller reads first is
+    the one that is not stored. So the file wins, and the turn's own words stay
+    where they already were: on the event stream.
+    """
+    from gateway.adapters.base import RunResult
+
+    class Adapter:
+        def run(self, spec, emit):
+            jobdir.publish(jobdir.path_for(tmp_path, spec.job_id) / "report.md",
+                           "# Findings\n\nThe loader test was ordering-dependent.\n")
+            return RunResult(ok=True, result="Done — see the report.")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter())
+    job = db.create_job(agent="claude", prompt="go", cwd=None, session=None,
+                        permission_mode=None, model=None)
+    pool._run_job(job)
+
+    row = db.get_job(job)
+    assert row["status"] == "succeeded"
+    assert "ordering-dependent" in row["result"]
+    assert "see the report" not in row["result"], "the turn's text overrode the file"
+    db.close()
+
+
+def test_a_turn_with_no_report_keeps_its_own_answer(tmp_path, monkeypatch):
+    """Nothing is lost when there is no file: a failed run, or one still on its
+    way to `waiting`, has only its message and that is what the row shows."""
+    from gateway.adapters.base import RunResult
+
+    class Adapter:
+        def run(self, spec, emit):
+            return RunResult(ok=False, result="got as far as the checkout",
+                             error="the module would not load")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter())
+    job = db.create_job(agent="claude", prompt="go", cwd=None, session=None,
+                        permission_mode=None, model=None)
+    pool._run_job(job)
+
+    row = db.get_job(job)
+    assert row["status"] == "failed"
+    assert row["result"] == "got as far as the checkout"
+    db.close()
+
+
+def test_a_report_written_while_waiting_replaces_the_interim_answer(tmp_path):
+    """The hold-open path. The turn's text is saved when the turn ends, so the
+    row says something useful during the wait — and the report replaces it when
+    it lands, rather than leaving a caller to notice which one they got."""
+    from gateway.bus import Bus
+    from gateway.server import _finish_if_reported
+
+    class _Gw:
+        """Just the three things the sweep touches: the db, the bus, and the
+        pool it asks for the agent's stdin so a finished job stops being held
+        open."""
+
+        def __init__(self, db):
+            self.db = db
+            self.bus = Bus()
+            self.cfg = type("C", (), {"data_dir": str(tmp_path)})()
+            self.pool = type("P", (), {"steering": staticmethod(lambda _id: None)})()
+
+    db = _db(tmp_path)
+    job = _running(db)
+    db.save_result_fields(job, {"result": "submitted the sweep, waiting"})
+    db.mark_waiting(job, deadline=time.time() + 1800)
+
+    gw = _Gw(db)
+    _finish_if_reported(gw, job)                    # no report yet: no change
+    assert db.get_job(job)["status"] == WAITING
+    assert db.get_job(job)["result"] == "submitted the sweep, waiting"
+
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "report.md", "all 128 tasks done, results in out/\n")
+    _finish_if_reported(gw, job)
+
+    row = db.get_job(job)
+    assert row["status"] == "succeeded"
+    assert row["result"] == "all 128 tasks done, results in out/"
+    db.close()
+
+
+def test_the_report_is_a_message_event_as_well_as_the_result(tmp_path):
+    """Both channels, because they answer different questions: the stream says
+    *when* the work reported, the row says *what the answer was*."""
+    db = _db(tmp_path)
+    job = _running(db)
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "report.md", "the deliverable")
+
+    rows = db.ingest_job_dir(job, str(root))
+
+    assert [r["data"]["file"] for r in rows] == ["report.md"]
+    assert "the deliverable" in rows[0]["data"]["msg"]
+    db.close()

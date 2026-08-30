@@ -174,19 +174,25 @@ collisions are still errors.
 ## Reporting, and work that outlives a turn
 
 Every job is handed a directory of its own in `$AB_JOB_DIR`
-(`<data_dir>/reports/<job-id>`, created before the agent starts). It reports by
-writing files there — no job id, url or token:
+(`<data_dir>/reports/<job-id>`, created before the agent starts). Two channels,
+and neither needs a job id, a url or a token:
 
 ```bash
-echo "12/24 sources done" > "$AB_JOB_DIR/progress/020-sources.md"
-cp "$RUNS/RESULTS.md"       "$AB_JOB_DIR/report.md"
-echo finished             > "$AB_JOB_DIR/status"       # or: failed
+ab-notify --msg "12/24 sources done" --report-id sources   # progress
+cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"              # the result
 ```
 
-Each readable file becomes one `message` event, deduplicated by path *and*
-content, so rewriting a file with new content reports again and rewriting it
-unchanged does not. Compute nodes write here too, which is why the data dir
-belongs on the shared filesystem.
+`ab-notify` writes the milestone into the job dir for you — naming it so it
+sorts, and refusing anything over 64 KB — and each milestone becomes one
+`message` event, deduplicated by path *and* content, so a retried step
+overwrites its own note instead of piling up duplicates.
+
+`report.md` is the **result**: its content is stored in the job row, so
+`ab job <ref>` prints it, and it lands on the event stream as well. A delegate
+therefore states its findings once, in the file, rather than in both the file and
+its closing message — where the two can disagree and only one is kept.
+Compute nodes write here too, which is why the data dir belongs on the shared
+filesystem.
 
 A job goes terminal when its turn does. Work that outlives the turn is a
 **monitor**: its own row, with a poll command the delegate authors, run by the

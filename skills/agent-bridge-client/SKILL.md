@@ -83,7 +83,7 @@ Six sections, in this order:
 ```
 
 * Make verification concrete: commands, expected outputs, benchmarks, files, or comparison criteria.
-* Require the report to cover completed work, decisions, verification results, assumption outcomes, and absolute paths to important artifacts.
+* Require the report to cover completed work, decisions, verification results, assumption outcomes, and absolute paths to important artifacts. It goes in `$AB_JOB_DIR/report.md`, which is what `ab job <ref>` prints — ask for it there and nowhere else, since a brief that also asks for findings in the closing message gets two answers that can disagree.
 * If the work will be long-running (1h+), ask remote to start the background/batch job work, register `ab-monitor`s, and write a preliminary report to signal job finish before the turn ends.
 
 ## Long and batch jobs
@@ -95,7 +95,7 @@ Six sections, in this order:
 
 ## Reading results
 
-- **`ab job REF` first.** The turn's last message is stored and printed whole — usually all you need. `report.md` arrives as a `message` event, so `ab events REF --type message` is where the artifact itself is.
+- **`ab job REF` first, and it prints the report.** `report.md` is stored as the job's result, so the deliverable is in the row — no fetch, no event paging. It also arrives as a `message` event, which is where you see *when* it landed.
 - **`waiting` means the turn ended and the report has not landed yet.** Give it a moment; it becomes `succeeded` within a sweep of the file appearing, or `failed` with `report_missing` at the deadline.
 - Then `ab events REF`, which reads from the **end** by default; `total`/`first_seq`/`last_seq` show the shape so you never page blind. `--after 0` restores top-down reading.
 - Narrow with `--type` before widening `--tail`, or a long job's tool results will flood you.

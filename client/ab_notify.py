@@ -8,10 +8,17 @@ verb: put a message where the caller will see it while the work is still going.
     ab-notify --msg-file "$RUNS/step-3.log" --report-id step-3
 
 It writes a file into `$AB_JOB_DIR/progress/`, which the gateway ingests as one
-`message` event on this job's stream. That is all it does, and it is a
-convenience rather than a dependency -- the same milestone is
+`message` event on this job's stream. That is all it does -- and it is the way to
+do it, rather than one of two: the equivalent `echo` into `progress/` works, and
+a brief that says so has to also say how to name the file so it sorts, what the
+size bound is, and which id makes a retry overwrite its own note instead of
+piling up. One tool holds all three, so `ab-notify` is what the skills name and
+the hand-written form is a fallback for a host where it is missing.
 
-    echo "server up, generating" > "$AB_JOB_DIR/progress/010-up.md"
+The *result* is not a milestone and does not come through here: it is
+`$AB_JOB_DIR/report.md`, whose content the gateway stores as the job's result
+(design/23). `--msg-file` refuses anything over 64 KB precisely so that a whole
+log is not mistaken for one.
 
 What it no longer has is `--status`. Reporting a *status* used to be its point:
 it resolved a job id, a url and a token, then tried HTTP, a shared JSONL drop and

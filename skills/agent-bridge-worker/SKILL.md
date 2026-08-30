@@ -1,6 +1,6 @@
 ---
 name: agent-bridge-worker
-description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, reporting milestones with ab-notify or a file in $AB_JOB_DIR, and registering a monitor for work that outlives your turn. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
+description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, reporting milestones with ab-notify, writing the report that finishes the job, and registering a monitor for work that outlives your turn. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
@@ -22,7 +22,7 @@ You are the **remote agent**. A local session, working with a human, wrote the b
 cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"     # or write it yourself
 ```
 
-Then end your turn. **Writing the report is what finishes the job** — your turn ending is only half of it.
+Then end your turn. **Writing the report is what finishes the job** — your turn ending is only half of it — and the file is where your findings go: it is what `ab job <ref>` prints, so your closing message says where the report is rather than repeating it.
 
 **An hour or more — hand it over and hand it back.** Submit, register a monitor, write a *preliminary* report, end your turn:
 
@@ -43,43 +43,42 @@ The preliminary report is what lets the job finish instead of holding a slot for
 
 ## Your report is the caller's only window
 
-Your last message is stored whole and returned by `ab job <ref>`.
+`$AB_JOB_DIR/report.md` is stored whole and returned by `ab job <ref>`. Write it
+as if it is the only thing they will read, because it is.
 
 - Answer in plain language, start with the problem/goal, then the steps you took, then the result. Include any numbers, paths, or identifiers that are relevant to the caller's next turn.
-- **Self-contained.** Assume they read only this message, with no transcript. Spell out identifiers in full; never "the file above".
+- **Self-contained.** Assume they read only this file, with no transcript. Spell out identifiers in full; never "the file above".
 - **Evidence inline, not by reference.** A path they cannot open is not evidence.
 - **Answer each assumption the brief flagged** — which held, which did not: *"entry point is `src/eval.py` as assumed; no `--workers` flag, it is `--num-workers`"*. Highest-value part of the report: an unrefuted wrong assumption goes straight into their next brief.
 - **Volunteer the environment facts that shaped the result** — actual GPU, actual versions, what already existed, what the data really looked like. A number without its conditions invites a wrong conclusion.
 - **Name what you could not deliver**, and why. `NOT-RUN`, not a plausible value.
 - Include what they cannot get and **would act differently for** — not everything you saw. A full log dump is the same round trip in the other direction, and it costs them context on every later turn.
 
-## Reporting through `$AB_JOB_DIR`
+## Reporting: `ab-notify` while you work, `report.md` when you are done
 
-Your job has a directory of its own, already created, in `$AB_JOB_DIR`. Writing a file there is how anything other than your final message reaches the caller. **No job id, url or token is involved** — that plumbing is gone, along with the failure where a job could not identify itself and sat until its deadline.
+Two channels and no others. Progress goes through `ab-notify`; the result goes in one file.
 
 ```bash
 ab-notify --msg "server up, generating"                       # a milestone
 ab-notify --msg "12/24 sources done" --report-id sources      # a named one
 ab-notify --msg-file "$RUNS/step-3.log" --report-id step-3    # from a file
-cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"                 # the deliverable
+cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"                 # the result
 ```
 
-`ab-notify` is a convenience over one write, and is worth using because it names the file for you in a way that sorts. Where it is not on PATH, do the write:
+**Use `ab-notify` for every milestone.** It needs `$AB_JOB_DIR` and nothing else — no job id, no url, no token — and it handles the naming, the sort order and the size bound so a brief does not have to. Do not write into `$AB_JOB_DIR/progress/` yourself: the point of the tool is that there is one thing to remember.
 
-```bash
-echo "server up, generating" > "$AB_JOB_DIR/progress/010-up.md"
-```
+- **Each milestone becomes one `message` event** on your job's stream, so the caller sees it without reading your transcript. `ab events <ref> --type message` is the progress log.
+- **The same `--report-id` twice with new content reports again**; unchanged, it reports once. So a retried step overwrites its own milestone instead of piling up duplicates.
+- **A milestone is a note, not a log.** `--msg-file` refuses anything over 64 KB rather than sending the first part of it. A whole log belongs at a path your report names.
 
-- **Each file becomes one event** on your job's stream, so the caller sees it without reading your transcript. `ab events <ref> --type message` is the progress log.
-- **Rewriting a file with new content reports again**; rewriting it unchanged does not. So a retried step can overwrite its own milestone without piling up duplicates — that is what `--report-id` is for, and why a retry with the same one reports once.
-- **Milestones are ingested in name order**, not by mtime. `ab-notify` handles that: `--report-id` gives a stable name, and without one you get a timestamp that sorts the way it happened. Writing them by hand, number them — `010-`, `020-`.
-- **A milestone is a note, not a log.** `ab-notify --msg-file` refuses anything over 64 KB rather than posting the first part of it; a whole log belongs in `report.md`, or point it at an excerpt.
-- **Put the whole content in the file.** A path only you can open is not evidence; `report.md` is uploaded whole and `ab job <ref>` prints it.
-- **`report.md` is what finishes the job**, together with your turn ending. Until both have happened the row reads `waiting`, your process stays alive, and you can still be steered — which is also your chance to write the report if you forgot. Nothing else you write ends a job; a `status` file is read as one more milestone and means nothing to the gateway.
-- **If you never write one, the job fails** with `report_missing` after the gateway's grace window (30 minutes by default). Your turn's last message is kept either way, but the row says the deliverable is absent — which is the honest reading.
-- **`ab-notify` needs `$AB_JOB_DIR` and nothing else** — no url, no token, and no discovery. A batch script on another node can still write into the directory if you export `AB_JOB_DIR` to it and the data dir is shared, but a **monitor** is the better answer for anything that outlives your turn.
+**`report.md` is the result.** Not a summary of the result, and not a copy of something you also say in your final message:
 
-**Your final message and `report.md` are both read**, and they are not the same thing. The message is what the caller sees first; the report is the artifact that finishes the job and survives being read months later. When the work is short they can say the same thing — write the report, then say it. When it is long, the report is preliminary and says what was submitted and where the results will be.
+- **It is what `ab job <ref>` prints.** The file's content is stored as the job's result and lands on the event stream, so the caller reads it without fetching anything. Your final message is on the stream too, but the row's answer comes from the file.
+- **Say it once, in the file.** Restating your findings in your closing message is how the two come to disagree, and the file is the one that is kept. End your turn with where the report is and anything the caller must act on — not with the report again.
+- **Put the whole content in it.** A path only you can open is not evidence. Absolute paths to the artifacts belong in the report; the artifacts do not.
+- **Writing it is what finishes the job**, together with your turn ending. Until both have happened the row reads `waiting`, your process stays alive, and you can still be steered — which is also your chance to write the report if you forgot.
+- **If you never write one, the job fails** with `report_missing` after the gateway's grace window (30 minutes by default). Your turn's last message is kept either way, but the row says the deliverable is absent, which is the honest reading.
+- **When the work outlives your turn, the report is preliminary**: what you submitted, the monitor's label, and where the results will appear. It still has to exist before you end your turn.
 
 ## Work that outlives your turn: register a monitor
 
@@ -112,7 +111,7 @@ ab-monitor add --slurm "$JOBID" --label train \
   ```
 
   The file name is the watch's identity, so writing it twice registers one monitor.
-- **Say the monitor's label in your final message and in `report.md`**, so the caller can find it: `ab monitors --job <ref>`, then `ab monitor <id> --wait`.
+- **Name the monitor's label in `report.md`**, and again as you close — a watch the caller has to act on is the one thing worth saying twice: `ab monitors --job <ref>`, then `ab monitor <id> --wait`.
 - **A monitor is not your job's status.** Your job finishes when your turn ends and its report is written; the watch resolves on its own, hours later. Its ending is recorded on your job's event stream — what was watched, what it last read, how long it ran, and the result paths — so the outcome is on the record even though the job closed long before.
 
 ## Submitting scheduler work

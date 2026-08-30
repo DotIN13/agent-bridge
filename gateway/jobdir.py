@@ -9,15 +9,20 @@ could not close itself (docs/todo/13).
 So each job is handed one directory instead, in `$AB_JOB_DIR`:
 
     $AB_JOB_DIR/
-      progress/001-slug.md    a milestone; any name, ingested in name order
-      report.md               the deliverable, when it outgrows the turn
+      progress/001-slug.md    a milestone, written by `ab-notify`
+      report.md               the deliverable, and the job's result
       monitors/<name>         key-values, written by `ab-monitor`
 
-Every readable file becomes one `message` event on that job's stream, so a
-delegate reports with `echo` and `cp` and nothing else. The format is
-deliberately files-and-words rather than JSON: a batch script that has to quote
-JSON in bash gets it wrong eventually, and this is the path that has to work
-when everything else about the run has already gone sideways.
+Every readable file becomes one `message` event on that job's stream. Two of the
+three names have a tool that writes them -- `ab-notify` for a milestone,
+`ab-monitor` for a watch -- and a brief should name the tool rather than the
+path: one thing to remember, and the sort order, the size bound and the naming
+are then somebody else's problem. `report.md` is the delegate's own `cp` or
+heredoc, because it is a document rather than an event.
+
+The format is deliberately files-and-words rather than JSON: a batch script that
+has to quote JSON in bash gets it wrong eventually, and this is the path that has
+to work when everything else about the run has already gone sideways.
 
 Nothing here writes into the job dir. The gateway creates it and reads it; the
 delegate owns its contents.
@@ -169,6 +174,28 @@ def _read(root: Path, rel: str) -> Drop | None:
     text = head[:MAX_FILE_BYTES].decode("utf-8", errors="replace")
     return Drop(rel=rel, text=text.strip() if rel == STATUS_FILE else text,
                 digest=digest.hexdigest(), oversized=oversized)
+
+
+def read_report(job_dir: str | os.PathLike[str]) -> str | None:
+    """The deliverable's text, or ``None`` when there is not one yet.
+
+    This is the job's *result* (design/23), not merely one more milestone: it is
+    written into the `result` column so `ab job <ref>` prints it, alongside the
+    `message` event the same file lands as. Two channels for one file, because
+    they answer different questions -- the event stream says *when* the work
+    reported, and the row says *what the answer was* without reading a stream.
+
+    Bounded by the same `MAX_FILE_BYTES` as ingestion. A report is a document,
+    not an artifact store: the paths it names are how the big things travel.
+    """
+    report = Path(job_dir) / REPORT_FILE
+    try:
+        with open(report, "rb") as stream:
+            head = stream.read(MAX_FILE_BYTES)
+    except OSError:
+        return None
+    text = head.decode("utf-8", errors="replace").strip()
+    return text or None
 
 
 def has_report(job_dir: str | os.PathLike[str]) -> bool:

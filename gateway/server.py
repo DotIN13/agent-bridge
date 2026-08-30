@@ -279,6 +279,22 @@ def _as_seconds(value: str | None) -> float | None:
         return None
 
 
+def _ingest_and_settle(gw: Gateway, job_id: str) -> list[dict]:
+    """Ingest on a read, and finish a `waiting` job whose report has landed.
+
+    The finish belongs here rather than only in the sweeper because a read is the
+    moment somebody is asking. Ingesting without settling let a `GET /v1/jobs/<id>`
+    return `waiting` in a body whose own event list already carried `report.md` --
+    the response contradicting itself, for up to one sweep interval. Idempotent:
+    the row moves once, from `waiting` only.
+    """
+    rows = _ingest_external(gw, job_id)
+    row = gw.db.get_job(job_id)
+    if row and row.get("status") == WAITING:
+        _finish_if_reported(gw, job_id)
+    return rows
+
+
 def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
     """Pull in everything a job reported outside its own event stream.
 
@@ -321,15 +337,21 @@ def _poll_monitors(gw: Gateway, now: float | None = None) -> None:
 
 
 def _finish_if_reported(gw: Gateway, job_id: str) -> None:
-    """A `waiting` job whose report has landed is finished.
+    """A `waiting` job whose report has landed is finished, and answered.
 
     Also what ends the *run*: the agent is still alive with its stdin held open
     (design/17), so closing that handle is how the worker learns to wind up. A
     backend whose child already exited has no handle, and the row is all there
     is to close.
     """
-    if not jobdir.has_report(jobdir.path_for(gw.cfg.data_dir, job_id)):
+    job_dir = jobdir.path_for(gw.cfg.data_dir, job_id)
+    if not jobdir.has_report(job_dir):
         return
+    # Into the row as well as onto the stream (design/23). Before the status
+    # change, so a reader that sees `succeeded` never sees it without the answer.
+    reported = jobdir.read_report(job_dir)
+    if reported:
+        gw.db.save_result_fields(job_id, {"result": reported})
     rows = gw.db.finish_reported(job_id)
     if not rows:
         return
@@ -850,7 +872,7 @@ def create_app(gw: Gateway) -> FastAPI:
              response_model=JobDetail, responses=ERROR_RESPONSES)
     async def get_job(job_id: str):
         job = resolve_job(job_id)
-        await run_in_threadpool(_ingest_external, gw, job["id"])
+        await run_in_threadpool(_ingest_and_settle, gw, job["id"])
         return gw.db.get_job(job["id"])
 
     @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth],
@@ -896,7 +918,10 @@ def create_app(gw: Gateway) -> FastAPI:
                          legacy: bool = True):
         job = resolve_job(job_id)
         jid = job["id"]
-        await run_in_threadpool(_ingest_external, gw, jid)
+        # Settling here too: this response carries `status` and `terminal`, so a
+        # page that lists `report.md` and calls the job `waiting` is the same
+        # self-contradiction the job read had.
+        await run_in_threadpool(_ingest_and_settle, gw, jid)
         start = _parse_after(after, request.headers.get("last-event-id"))
         if tail is not None and after:
             # Anchoring from both ends at once has no single sensible reading;

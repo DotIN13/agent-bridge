@@ -160,10 +160,13 @@ share a millisecond.
 `queued` → `running` → `waiting` → `succeeded` | `failed` | `canceled`.
 
 A job is `succeeded` when **both** halves have happened: its turn has ended and
-`$AB_JOB_DIR/report.md` has been written. Between them the row is `waiting`, which
+`$AB_JOB_DIR/report.md` has been written — and that file's content becomes the
+job's `result`. Between them the row is `waiting`, which
 is non-terminal — the agent process is still alive, can still be steered, and can
-still write the file. The gateway notices the report within a sweep (5s) and the
-row becomes `succeeded` with `reason: report_written`.
+still write the file. The gateway notices the report on the next sweep (5s) *or*
+on the next read of that job or its events, whichever comes first — a response
+that listed `report.md` while calling the job `waiting` would be contradicting
+itself. The row becomes `succeeded` with `reason: report_written`.
 
 A `waiting` job with no report by `worker.report_wait_sec` (default 1800, 0 waits
 indefinitely) fails with `report_missing`. That window is a grace period, not a
@@ -402,6 +405,13 @@ and by the gateway's sweeper, and receive the same monotonic sequence allocation
 Job-dir reports are deduplicated by relative path and content digest; HTTP
 reports use `report_id`. Neither can move a job: a report is an annotation, and
 the turn's end is what ends a job.
+
+`report.md` is the exception to "annotation", in one direction only. Its content
+is written to the job's `result` field as well as arriving as a `message` event,
+so `GET /v1/jobs/<id>` answers with the deliverable rather than with the turn's
+closing text. It still does not move the job — the turn's end does that — but it
+does decide what `result` says once it exists (design/23). A job with no report
+keeps the turn's own answer there, which is what a failed run has.
 
 There is no shared-filesystem JSONL channel. It existed for a compute node that
 could not reach the gateway; nothing has written it since `ab-notify` became a

@@ -231,3 +231,38 @@ def test_a_status_file_is_an_ordinary_drop(tmp_path):
     assert "status" not in data, "a drop must not claim to be a state"
     assert db.get_job(job)["status"] == "running", "and must not move the row"
     db.close()
+
+
+def test_the_api_answers_with_the_report_as_the_result(client, auth, gateway, tmp_path):
+    """What a caller actually reads: `GET /v1/jobs/<id>` — and so `ab job`.
+
+    Through HTTP rather than the db, because the claim being made is about the
+    answer a client gets. The row and the event stream both carry the report
+    (design/23) and this is the half that needs no event paging.
+    """
+    from gateway.db import WAITING
+
+    job = gateway.db.create_job(agent="claude", prompt="go", cwd=None,
+                                session=None, permission_mode=None, model=None)
+    gateway.db.mark_running(job)
+    # The turn ended having said something, and the row parked for its report.
+    gateway.db.save_result_fields(job, {"result": "submitted, see the report"})
+    gateway.db.mark_waiting(job, deadline=None)
+
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "report.md", "# Findings\n\n24/24 sources parsed.\n")
+
+    # A read is one of the two moments the sweep happens, so the GET that asks
+    # for the job is also what notices the report.
+    body = client.get(f"/v1/jobs/{job}", headers=auth).json()
+
+    assert body["status"] == "succeeded"
+    assert "24/24 sources parsed" in body["result"]
+    assert "see the report" not in body["result"]
+
+    events = client.get(f"/v1/jobs/{job}/events?after=0", headers=auth).json()
+    reports = [e for e in events["events"]
+               if e["type"] == "message" and e["data"].get("file") == "report.md"]
+    assert len(reports) == 1, "and it is on the stream too, exactly once"
+    assert WAITING not in [e["data"].get("status") for e in events["events"]
+                           if e["type"] == "status"][-1:]
