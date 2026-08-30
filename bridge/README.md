@@ -69,7 +69,7 @@ Three levels, one click apart, addressable by url:
 | --- | --- | --- |
 | gateways | `#/` | every gateway, its tunnel state and endpoint state, start/stop/restart, the ssh console, the auth prompt, add/edit/remove |
 | jobs | `#/g/<gateway>` | that gateway's jobs, read through the tunnel |
-| events | `#/g/<gateway>/j/<job>` | one job's detail and its event stream |
+| events | `#/g/<gateway>/j/<job>` | one job's detail and its event stream, in `+HH:MM:SS` since the run's first event |
 
 **Two lights, never merged.** "ssh pid 4098" and "endpoint up" are separate facts
 with different fixes: ssh alive with the endpoint `refused` is a forward that has

@@ -250,6 +250,19 @@ def test_the_page_is_self_contained_and_not_cacheable(app):
     assert not external, f"a tool for fixing a broken network fetched {external}"
 
 
+def test_the_event_list_reads_in_elapsed_time_not_sequence_numbers(app):
+    """"Where in the run did this happen" is the reader's question; a sequence
+    number only answers which came first. The gateway already computes both
+    `elapsed` and `elapsed_hms` (tests/backend/test_events.py), so the page
+    prefers its answer rather than deriving one."""
+    client, _sup, _path = app
+    body = client.get("/").text
+    assert "elapsed_hms" in body
+    assert "ev.elapsed" in body, "with a numeric fallback for an older gateway"
+    assert '<span class="seq">' not in body, "the seq column is gone"
+    assert 'title="' in body and "seq " in body, "the sequence number is kept"
+
+
 def test_a_token_is_always_resolved_even_if_none_was_given(monkeypatch):
     """An unauthenticated port that can rewrite and run an ssh command is not a
     convenience."""

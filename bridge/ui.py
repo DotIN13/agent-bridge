@@ -202,8 +202,10 @@ form.edit { display:none } form.edit.open { display:block }
 .ev { display:flex; gap:8px; padding:5px 9px; border-radius:6px;
   border:1px solid transparent; }
 .ev:hover { background:var(--hover); }
-.ev .seq { flex:none; width:44px; text-align:right; font:11px/1.6 var(--mono);
-  color:var(--text-faint); }
+/* "+00:04:12" is the useful reading, so the column is sized for it. The
+   sequence number is still there, in the title. */
+.ev .at { flex:none; width:66px; text-align:right; font:11px/1.6 var(--mono);
+  color:var(--text-faint); font-variant-numeric:tabular-nums; }
 .ev .kind { flex:none; width:82px; }
 .ev .text { flex:1; min-width:0; font:11.5px/1.55 var(--mono);
   white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -794,7 +796,8 @@ form.edit { display:none } form.edit.open { display:block }
       var line = document.createElement("div");
       line.className = "ev " + ev.type;
       line.innerHTML =
-        '<span class="seq">' + esc(ev.seq) + '</span>' +
+        '<span class="at" title="' + esc(seqTitle(ev)) + '">' +
+          esc(elapsedLabel(ev, events)) + '</span>' +
         '<span class="kind"><span class="tag ' + (EV_TONE[ev.type] || "") + '">' +
           esc(ev.type) + '</span></span>' +
         '<span class="text clamp">' + esc(eventText(ev)) + '</span>';
@@ -805,6 +808,33 @@ form.edit { display:none } form.edit.open { display:block }
       list.appendChild(line);
     });
     view.appendChild(list);
+  }
+
+  // Where in the run this happened, which is the question a reader actually has
+  // — a sequence number only says which came first. The gateway already
+  // computes both `elapsed` (seconds since the job's first event) and
+  // `elapsed_hms`, so prefer its answer; the fallbacks are for a page reading an
+  // older gateway, and `#seq` is the honest last resort rather than a made-up
+  // "+00:00:00".
+  function elapsedLabel(ev, events) {
+    if (ev.elapsed_hms) { return ev.elapsed_hms; }
+    if (typeof ev.elapsed === "number") { return hms(ev.elapsed); }
+    var mine = Date.parse(ev.ts), first = events.length && Date.parse(events[0].ts);
+    if (!isNaN(mine) && first && !isNaN(first)) {
+      return hms(Math.max(0, (mine - first) / 1000));
+    }
+    return "#" + ev.seq;
+  }
+
+  function hms(seconds) {
+    var t = Math.floor(seconds);
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return "+" + pad(Math.floor(t / 3600)) + ":" + pad(Math.floor(t % 3600 / 60)) +
+      ":" + pad(t % 60);
+  }
+
+  function seqTitle(ev) {
+    return "seq " + ev.seq + (ev.ts ? " · " + ev.ts : "");
   }
 
   // One line per event that says the useful thing, with the raw payload one
