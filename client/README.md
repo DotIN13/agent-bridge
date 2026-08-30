@@ -40,6 +40,11 @@ Token order: `token`, `token_env`, `token_file`. Config discovery:
 `--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
 `~/.config/agent-bridge/gateways.json`, `./gateways.json`.
 
+Two further keys are read by the dashboard in [`webui/`](../webui/README.md) and
+ignored here: `ssh`, the command that makes `base_url` reachable, and
+`autostart`. `ab` never starts a tunnel — it expects one to exist — so an entry
+carrying them works unchanged at the CLI.
+
 ## CLI
 
 Global flags work before or after the command:

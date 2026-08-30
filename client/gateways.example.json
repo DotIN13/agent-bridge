@@ -3,11 +3,14 @@
   "gateways": {
     "midway5": {
       "base_url": "http://localhost:8787",
-      "token_env": "AGENT_BRIDGE_TOKEN"
+      "token_env": "AGENT_BRIDGE_TOKEN",
+      "ssh": "ssh -N -L 8787:localhost:8787 midway5"
     },
     "midway5-alt": {
       "base_url": "http://localhost:8788",
-      "token_file": "~/.config/agent-bridge/midway5-alt.token"
+      "token_file": "~/.config/agent-bridge/midway5-alt.token",
+      "ssh": "ssh -N -L 8788:localhost:8788 -J bastion midway5",
+      "autostart": true
     },
     "other-cluster": {
       "base_url": "http://localhost:8789",

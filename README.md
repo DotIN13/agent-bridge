@@ -46,6 +46,15 @@ ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
 Configure gateways in `~/.config/agent-bridge/gateways.json`; see
 `client/gateways.example.json` and [client/README.md](client/README.md).
 
+Or let [`webui/`](webui/README.md) hold the tunnel: a local dashboard that
+supervises the forwards, relays ssh's password and two-factor prompts to a
+dialog, and shows the jobs behind each gateway. It reads the same
+`gateways.json`, so nothing is configured twice.
+
+```bash
+cd webui && npm install && npm run build && npm start
+```
+
 ## Agent-first CLI
 
 ```bash
@@ -250,7 +259,9 @@ write there too. Scope `allowed_dirs` deliberately; noninteractive
 permission modes let an agent edit and execute within those roots.
 
 A systemd user service example is in `systemd/agent-bridge.service`. Skills for
-both ends of the workflow live under `skills/`.
+both ends of the workflow live under `skills/`. The local dashboard is a separate
+npm package under `webui/` — it never runs on the cluster, only on the machine
+the tunnels start from.
 
 ## Development
 
@@ -264,3 +275,9 @@ Backend tests cover typed OpenAPI/errors, public DTOs, idempotency, monotonic
 cursors, attachment atomicity, restart recovery, bounds, and capabilities.
 Client tests cover parser/output/exit contracts, SSE, safe files, and package
 entry points.
+
+The dashboard has its own suite, which needs no ssh binary and no gateway:
+
+```bash
+cd webui && npm install && npm run typecheck && npm test
+```

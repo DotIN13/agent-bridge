@@ -25,6 +25,12 @@ decision that looks arbitrary until you know what it was chosen against.
 | [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
 | [18](18-steering-opencode-is-http-not-a-pipe.md) | opencode jobs are steerable: `delivery: "steer"` on an attached server, not a pipe | after 0.3.0 |
 | [19](19-one-contract-not-three.md) | `ab capabilities` removed — it was `ab help` + `ab gateways` + `ab agents`, and its verb list had drifted | after 0.3.0 |
+| [21](21-the-dashboard-is-a-supervisor-not-a-page.md) | `webui/`: the ssh forwards get a dashboard — askpass rather than a pty, and three invariants with tests on them | after 0.3.0 |
+
+**20 is missing on purpose.** It recorded the first attempt at a web UI, whose
+four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed
+and why. The number is not reused — a commit message pointing at design/20 still
+means the pty-based version, which is reachable by sha.
 
 ## The load-bearing bits
 

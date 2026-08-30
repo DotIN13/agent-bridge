@@ -1,0 +1,14 @@
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@import "./styles/colors.css";
+@import "./styles/theme.css";
+@import "./styles/tailwind-theme.css";
+@import "./styles/base.css";
+
+@import "./components/ui/button.css" layer(components);
+@import "./components/ui/primitives.css" layer(components);
+@import "./styles/app.css" layer(components);

@@ -1,0 +1,110 @@
+/**
+ * The base layer, from picone's — with the mobile machinery left out.
+ *
+ * picone carries an interface-zoom chain (`--ui-scale`, `--text-boost`, a
+ * measured viewport) because it is a phone app as much as a desktop one. This
+ * dashboard is a window on the machine the tunnels are running on, so the
+ * chain collapses to `--font-scale: 1` and the viewport units are the plain
+ * ones. Every rule ported from picone still writes `calc(Npx *
+ * var(--font-scale))`, which keeps the two stylesheets diffable.
+ *
+ * Inter and JetBrains Mono are named in theme.css and not shipped: they are
+ * binary assets that belong to picone's `public/`, and the stacks fall back to
+ * the platform UI and mono faces, which is what this renders with.
+ */
+@layer base {
+  * {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: geometricPrecision;
+  }
+
+  :root {
+    --font-scale: 1;
+    --vh: 1vh;
+    --vw: 1vw;
+
+    /*
+     * Stacking order in one place, because it is the kind of thing that only
+     * goes wrong across files. A floating layer — a select inside a dialog —
+     * must clear every surface, so it sits above the dialog that opened it.
+     */
+    --z-overlay: 40;
+    --z-dialog: 110;
+    --z-floating: 120;
+    --z-tooltip: 125;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--v2-background-bg-base);
+    color: var(--v2-text-text-base);
+    font-family: var(--v2-font-family-sans);
+    font-size: calc(13px * var(--font-scale));
+    font-weight: 440;
+    line-height: 1.45;
+    letter-spacing: -0.04px;
+    font-variant-numeric: tabular-nums;
+    font-optical-sizing: auto;
+    overflow: hidden;
+  }
+
+  /*
+   * The UI runs at weight 440, which CSS font-matching rounds *up* to the 500
+   * face for a family that ships 400/500/700. Monospace text should be
+   * Regular, so pin it back wherever the mono family is used.
+   */
+  code,
+  pre,
+  kbd,
+  samp {
+    font-weight: 400;
+  }
+
+  button {
+    font-family: inherit;
+    letter-spacing: inherit;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--v2-background-bg-accent) 28%, transparent);
+  }
+
+  /* Thin, unobtrusive scrollbars everywhere — matches opencode's chrome. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--v2-border-border-strong) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background-color: var(--v2-border-border-strong);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

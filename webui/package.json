@@ -1,0 +1,38 @@
+{
+  "name": "agent-bridge-webui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local dashboard for agent-bridge: the ssh forwards, the gateways behind them, and their jobs",
+  "scripts": {
+    "dev": "concurrently --raw --kill-others-on-fail \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "AB_WEBUI_DEV=1 tsx watch src/server/index.ts",
+    "dev:web": "vite",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json",
+    "test": "node --import tsx --test \"src/server/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@kobalte/core": "0.13.11",
+    "express": "^5.1.0",
+    "lucide-solid": "^1.30.0",
+    "solid-js": "^1.9.14",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.1.11",
+    "@types/express": "^5.0.1",
+    "@types/node": "^24.12.4",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.1.2",
+    "tailwindcss": "4.1.11",
+    "tsx": "^4.20.7",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.9",
+    "vite-plugin-solid": "2.11.10"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}
