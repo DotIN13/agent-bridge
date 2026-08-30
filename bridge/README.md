@@ -108,6 +108,14 @@ dropped. The pty's echo is turned off so it cannot come back into the console
 either — `ssh` does that itself for passwords, but a wrapper may not, and this is
 not a thing to leave to the child.
 
+**Neither input is a password field.** `type="password"` hands the box to the
+browser's password manager, which then offers to save an ssh passphrase it has no
+business keeping and autofills over what you are typing. The answer box and the
+token box are ordinary text inputs masked with `-webkit-text-security`, with
+`type="password"` only as a fallback where that is unsupported. What you type also
+survives the page's own polling: the draft is held outside the DOM and the caret
+is put back, so a refresh mid-passcode costs nothing.
+
 Reads of the gateway go through four named read-only endpoints
 (`jobs`, one job, its events, monitors), not a path proxy: an open proxy on
 loopback would let any page in the browser submit or cancel jobs. The gateway's

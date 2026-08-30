@@ -332,3 +332,51 @@ def test_a_prompt_is_not_shown_twice(fake):
             assert texts.count(prompt) == 1, texts
     finally:
         tunnel.request_down()
+
+
+def test_a_tunnel_waiting_on_a_password_is_not_promoted_by_something_else(fake):
+    """Found by accident, with two daemons sharing a port: the endpoint answered
+    because *another* tunnel was carrying it, and this one went `up` while still
+    sitting at its password prompt — clearing the prompt and stranding the
+    login. While ssh is asking a question its forward is not carrying anything,
+    so whatever answers is not us."""
+    serving = {"state": "up", "reachable": True, "version": "0.3.0"}
+    tunnel = Tunnel("midway5", fake.argv, probe=lambda: serving)
+    tunnel.request_up()
+    tunnel.start()
+    try:
+        _wait(lambda: tunnel.state == "authenticating", what="the prompt")
+        tunnel.check()
+        assert tunnel.state == "authenticating", "the question is still open"
+        assert tunnel.snapshot().prompt, "and it is still being asked"
+
+        tunnel.answer("pw")
+        _wait(lambda: "option" in tunnel.snapshot().prompt.lower())
+        tunnel.answer("1")
+        _wait(lambda: fake.connected)
+        tunnel.check()
+        assert tunnel.state == "up", "answered, so now the probe may promote it"
+    finally:
+        tunnel.request_down()
+
+
+def test_an_answered_prompt_does_not_ask_itself_again(fake):
+    """The terminated copy of a question used to re-raise it, so a tunnel that
+    had just been answered fell back into `authenticating` with nothing waiting
+    on the other end — and an endpoint probe then could not promote it."""
+    tunnel = Tunnel("midway5", fake.argv, probe=lambda: {"state": "up",
+                                                        "reachable": True})
+    tunnel.request_up()
+    tunnel.start()
+    try:
+        _wait(lambda: tunnel.state == "authenticating")
+        tunnel.answer("pw")
+        _wait(lambda: "option" in tunnel.snapshot().prompt.lower())
+        tunnel.answer("1")
+        _wait(lambda: fake.connected)
+        time.sleep(0.3)
+        assert tunnel.state != "authenticating", tunnel.snapshot().prompt
+        tunnel.check()
+        assert tunnel.state == "up"
+    finally:
+        tunnel.request_down()

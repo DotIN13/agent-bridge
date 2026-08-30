@@ -211,6 +211,13 @@ pre.console .note { color:var(--text-faint); font-style:italic }
   background:var(--bg-warning); border-radius:8px; }
 .ask p { margin:0 0 7px; font:11.5px/1.5 var(--mono); color:var(--fg-warning); }
 .ask .row { display:flex; gap:6px; }
+/* A masked field that is not a password field. `type="password"` hands the box
+   to the browser's password manager, which then offers to save an ssh
+   passphrase it has no business keeping and autofills over what you are typing.
+   `-webkit-text-security` masks the characters with none of that; where it is
+   unsupported (Firefox) the JS falls back to `type="password"`, because being
+   masked matters more. */
+input.secret { -webkit-text-security: disc; text-security: disc; }
 input, select { font:inherit; font-size:12px; padding:5px 8px; border-radius:6px;
   border:1px solid var(--border-base); background:var(--bg-base);
   color:inherit; width:100%; }
@@ -245,7 +252,10 @@ form.edit { display:none } form.edit.open { display:block }
   <h1>Token needed</h1>
   <p class="sub">Open the url <span class="mono">ab-bridge</span> printed, or
     paste its token. It stays in this tab.</p>
-  <input id="gate-token" type="password" placeholder="bearer token" autofocus>
+  <input id="gate-token" type="text" class="secret" name="ab-token"
+         autocomplete="off" spellcheck="false" autocapitalize="off"
+         data-1p-ignore data-lpignore="true" data-bwignore="true"
+         placeholder="bearer token" autofocus>
   <p><button class="btn primary" id="gate-go">Connect</button></p>
   <p class="err" id="gate-err"></p>
 </div>
@@ -265,6 +275,13 @@ form.edit { display:none } form.edit.open { display:block }
   var token = "";
   var st = { local: null, jobs: null, job: null, events: null, error: "" };
   var open = { add: false };
+  //: What is typed into an auth box but not yet sent, by gateway. Held here so a
+  //: re-render cannot discard it; never persisted, never sent anywhere but the
+  //: answer endpoint.
+  var drafts = {};
+  //: The prompt each gateway was last seen asking, so focus is taken once per
+  //: question rather than on every render.
+  var asked = {};
   var route = { level: "gateways", gateway: "", job: "", tab: "jobs" };
   var timer = null;
 
@@ -388,10 +405,35 @@ form.edit { display:none } form.edit.open { display:block }
   function render() {
     crumbs();
     var view = $("view");
+    // Rebuilding wholesale is what keeps this page simple, and it is also what
+    // pulled the cursor out of an auth box mid-passcode. The draft survives in
+    // `drafts`; this puts the caret back where it was.
+    var was = focusedAsk();
     view.innerHTML = "";
     if (route.level === "gateways") { gatewaysView(view); }
     else if (route.level === "gateway") { gatewayView(view); }
     else { eventsView(view); }
+    if (was) { restoreAsk(was); }
+  }
+
+  function focusedAsk() {
+    var node = document.activeElement;
+    if (!node || !node.dataset || !node.dataset.ask) { return null; }
+    return { name: node.dataset.ask, start: node.selectionStart,
+             end: node.selectionEnd };
+  }
+
+  function restoreAsk(was) {
+    var node = document.querySelector('[data-ask="' +
+      was.name.replace(/"/g, '\\"') + '"]');
+    if (!node) { return; }
+    node.focus();
+    try {
+      node.setSelectionRange(was.start, was.end);
+    } catch (e) {
+      // A masked field may refuse a selection range in some engines; having the
+      // focus and the text back is the part that matters.
+    }
   }
 
   function crumbs() {
@@ -715,6 +757,12 @@ form.edit { display:none } form.edit.open { display:block }
   }
 
   // ── shared pieces ────────────────────────────────────────────────────
+  // Chrome can mask a field without owning it, and that is what we want: a
+  // password field triggers "save this password?" over an ssh passphrase the
+  // browser should never keep, and its autofill overwrites what you are typing.
+  var CAN_MASK = window.CSS && CSS.supports &&
+    CSS.supports("-webkit-text-security", "disc");
+
   function ask(name, t) {
     var box = document.createElement("div");
     box.className = "ask";
@@ -722,14 +770,41 @@ form.edit { display:none } form.edit.open { display:block }
     box.innerHTML = '<p>' + esc(t.prompt) + '</p>';
     var line = document.createElement("div");
     line.className = "row";
+
     var input = document.createElement("input");
-    input.type = t.prompt_secret ? "password" : "text";
+    if (t.prompt_secret && CAN_MASK) {
+      input.type = "text";
+      input.className = "secret";
+    } else {
+      // Firefox has no text-security, so fall back to a real password field:
+      // being masked matters more than keeping the manager out.
+      input.type = t.prompt_secret ? "password" : "text";
+    }
+    input.dataset.ask = name;
+    // `off` alone is ignored for password fields, so these are belt and braces
+    // for the fallback path and for the managers that read their own hints.
     input.autocomplete = "off";
+    input.name = "ab-answer";
+    input.spellcheck = false;
+    input.setAttribute("autocapitalize", "off");
+    input.setAttribute("autocorrect", "off");
+    input.setAttribute("data-1p-ignore", "");
+    input.setAttribute("data-lpignore", "true");
+    input.setAttribute("data-bwignore", "true");
     input.placeholder = t.prompt_secret
       ? "sent straight to ssh; not stored" : "answer";
+
+    // The page rebuilds itself on every poll, which used to throw away whatever
+    // was half-typed. The draft lives here instead of in the DOM, so a render
+    // in the middle of typing a passcode costs nothing. It is dropped the moment
+    // it is sent, and never leaves the tab.
+    input.value = drafts[name] || "";
+    input.addEventListener("input", function () { drafts[name] = input.value; });
+
     var send = btn("send", "primary", function () {
       var text = input.value;
       input.value = "";
+      delete drafts[name];
       return api("POST", "/v1/tunnels/" + encodeURIComponent(name) + "/answer",
                  { text: text }).then(load);
     });
@@ -739,7 +814,13 @@ form.edit { display:none } form.edit.open { display:block }
     line.appendChild(input);
     line.appendChild(send);
     box.appendChild(line);
-    setTimeout(function () { input.focus(); }, 0);
+    // Focus only when the question is new. Doing it on every render fought the
+    // operator for the cursor, and fought it hardest on the ssh log tab, where
+    // a render happens every 1.2 seconds.
+    if (asked[name] !== t.prompt) {
+      asked[name] = t.prompt;
+      setTimeout(function () { input.focus(); }, 0);
+    }
     return box;
   }
 
@@ -1039,6 +1120,11 @@ form.edit { display:none } form.edit.open { display:block }
   $("gate-token").addEventListener("keydown", function (ev) {
     if (ev.key === "Enter") { $("gate-go").click(); }
   });
+
+  // Same reasoning as the auth box: a masked field rather than a password
+  // field, so the browser does not offer to remember a bearer token. Where
+  // text-security is unsupported, fall back to masking properly.
+  if (!CAN_MASK) { $("gate-token").type = "password"; }
 
   if (token) { boot(); } else { $("gate").hidden = false; }
 }());

@@ -160,6 +160,26 @@ about both timing and hit area (they hung off `.item` and `.card`, with a
 transition on only one); and a `.section` header is uppercased, so a path or a
 command must not be put in one.
 
+**An auth box must not be a password field.** `type="password"` recruits the
+browser's password manager: Chrome offers to save an ssh passphrase, and its
+autofill overwrites the field while you are typing. Both boxes here — the answer
+and the daemon's own token — are text inputs masked with
+`-webkit-text-security`, with `type="password"` kept only as a fallback for an
+engine without it, since being masked beats being tidy. The manager's popup was
+only half the report, though: the other half was ours. The page rebuilds itself
+on every poll, so a tick arriving mid-passcode threw the input away. The draft
+lives outside the DOM now and the caret is restored after each render, and focus
+is taken once per *question* rather than once per render — on the ssh log tab
+that was every 1.2 seconds, fighting the operator for the cursor.
+
+That fix then exposed a third bug in the state machine, found only because two
+daemons briefly shared a port: an answered prompt's *terminated* copy re-raised
+the question, so a tunnel fell back to `authenticating` with nothing waiting on
+it, and an endpoint probe could not promote it. Only lines that survive the
+duplicate filter may raise a prompt now. Relatedly, `check()` no longer promotes
+out of `authenticating` at all: while ssh is asking a question its forward is
+not carrying anything, so whatever answers on that port is not us.
+
 ## Verified
 
 `tests/bridge/` (56 tests) plus a live run against a fake far side that prompts

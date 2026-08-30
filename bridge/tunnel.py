@@ -352,6 +352,7 @@ class Tunnel:
             self._tail += text.replace("\r\n", "\n").replace("\r", "\n")
             parts = self._tail.split("\n")
             self._tail = parts.pop()
+            kept: list[str] = []
             for part in parts:
                 line = part.rstrip()
                 if not line.strip():
@@ -359,16 +360,25 @@ class Tunnel:
                 # A prompt reaches the buffer the moment it appears, as an
                 # unterminated tail. When the newline finally arrives the same
                 # text comes round again -- so drop it rather than showing every
-                # question twice.
+                # question twice. `kept` then carries only the lines that were
+                # genuinely new, which is also what may raise a prompt: without
+                # that, the terminated copy of a question just answered re-asked
+                # it, putting the tunnel back into `authenticating` for a prompt
+                # nothing was waiting on.
+                #
+                # A real second ask survives this: ssh prints "Permission
+                # denied, please try again." in between, so the repeat is no
+                # longer among the recent lines.
                 if any(seen.text == line and seen.kind == "prompt"
                        for seen in list(self._lines)[-4:]):
                     continue
                 self._seq += 1
                 self._lines.append(Line(seq=self._seq, at=time.time(),
                                         text=line))
+                kept.append(line)
             tail = self._tail
         changed = False
-        for part in parts:
+        for part in kept:
             if self._looks_like_prompt(part):
                 self._raise_prompt(part)
                 changed = True
@@ -452,8 +462,13 @@ class Tunnel:
             self._endpoint = result
             state = self._state
             alive = self._proc is not None and self._proc.poll() is None
-        if serving and alive and state in ("starting", "retrying",
-                                          "authenticating", "up"):
+        # Deliberately not `authenticating`: while ssh is asking a question the
+        # forward is not carrying anything yet, so whatever is answering on that
+        # port is something else -- another tunnel, a stale process, a service
+        # that happens to live there. Promoting on it would clear the prompt and
+        # leave the login unanswered, which is the exact failure this module is
+        # built to avoid.
+        if serving and alive and state in ("starting", "retrying", "up"):
             self._set_state("up")
         elif state == "up" and not serving:
             self._set_state("starting",

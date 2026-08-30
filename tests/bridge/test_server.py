@@ -294,3 +294,36 @@ def test_hover_reveals_the_row_actions_from_the_same_selector(app):
     assert ".item:hover .actions.onrow" in body
     assert ".item.click:hover, .item.click:focus-within" in body
     assert "transition:opacity" not in body, "instant, so they cannot disagree"
+
+
+def test_no_field_on_the_page_is_a_password_field(app):
+    """Chrome offers to save anything typed into `type="password"` and autofills
+    over it. An ssh passphrase and a bearer token are both things the browser
+    should never keep, so neither box is a password field: they are masked with
+    `-webkit-text-security`, with a scripted fallback for engines that lack it."""
+    import re
+
+    client, _sup, _path = app
+    body = client.get("/").text
+    tags = re.findall(r"<input[^>]*>", body)
+    assert tags, "there are input elements to check"
+    assert not [tag for tag in tags if 'type="password"' in tag], tags
+    assert "input.secret { -webkit-text-security: disc" in body
+    # The only `type = "password"` left is the scripted fallback for an engine
+    # without text-security, which is the lesser evil against not masking.
+    assert "CAN_MASK" in body
+    assert 'if (!CAN_MASK) { $("gate-token").type = "password"; }' in body
+
+
+def test_a_half_typed_answer_survives_a_re_render(app):
+    """The page rebuilds on every poll. The draft has to live outside the DOM or
+    a tick lands mid-passcode and throws it away."""
+    client, _sup, _path = app
+    body = client.get("/").text
+    assert "var drafts = {}" in body
+    assert "drafts[name] = input.value" in body
+    assert "input.value = drafts[name]" in body
+    # …and the caret goes back where it was.
+    assert "focusedAsk" in body and "restoreAsk" in body
+    # …and focus is taken once per question, not once per render.
+    assert "asked[name] !== t.prompt" in body
