@@ -143,11 +143,22 @@ because a tool whose job is to fix a broken network connection must not need the
 network to render, which is also what makes the
 `default-src 'none'; connect-src 'self'` policy it sends honest.
 
-Three levels, addressable by url so the back button works: gateways (`#/`), a
-gateway's jobs (`#/g/<name>`), a job's events (`#/g/<name>/j/<id>`). An auth
-prompt is never behind a disclosure — ssh is waiting, and a login that times out
-because the question was one click away is the failure this whole thing exists to
-prevent.
+Three levels, addressable by url — tabs included — so the back button works and
+a reload lands where you were: the list (`#/`), a gateway
+(`#/g/<name>`, `/log`, `/config`), a job's events (`#/g/<name>/j/<id>`).
+
+Everything you do *to* a gateway is on the gateway's own page: connect,
+disconnect, restart, the ssh log, and its entry in `gateways.json`. The list is
+then only a list — one row, one action, no disclosure triangles. The connect
+button and any auth prompt are pinned above the tabs rather than inside one,
+because ssh waiting for an answer behind a tab is the login that times out; the
+prompt also appears on the list, for the same reason.
+
+Two details that are easy to get wrong and were: hover has to reveal the row's
+actions from the *same* selector that highlights the row, or the two disagree
+about both timing and hit area (they hung off `.item` and `.card`, with a
+transition on only one); and a `.section` header is uppercased, so a path or a
+command must not be put in one.
 
 ## Verified
 

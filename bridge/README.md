@@ -63,13 +63,21 @@ written `0600` because it can hold a token.
 
 ## The page
 
-Three levels, one click apart, addressable by url:
+Three levels, one click apart, addressable by url — tabs included, so a reload
+lands where you were and the back button walks out:
 
-| Level | Url | What is there |
-| --- | --- | --- |
-| gateways | `#/` | every gateway, its tunnel state and endpoint state, start/stop/restart, the ssh console, the auth prompt, add/edit/remove |
-| jobs | `#/g/<gateway>` | that gateway's jobs, read through the tunnel |
-| events | `#/g/<gateway>/j/<job>` | one job's detail and its event stream, in `+HH:MM:SS` since the run's first event |
+| Url | What is there |
+| --- | --- |
+| `#/` | the list: every gateway, its tunnel and endpoint state, connect/disconnect, the auth prompt, add |
+| `#/g/<gateway>` | that gateway's **jobs**, read through the tunnel |
+| `#/g/<gateway>/log` | its **ssh log** — the console, live while a login is happening |
+| `#/g/<gateway>/config` | its **entry in gateways.json**: base_url, ssh command, autostart, make default, remove |
+| `#/g/<gateway>/j/<job>` | one job's detail and its events, in `+HH:MM:SS` since the run's first event |
+
+Connecting and configuring live on the gateway's own page; the list is a list.
+The connect button and the auth prompt are pinned above the tabs, so they are on
+screen whichever tab is open — ssh waiting for an answer behind a tab is the
+login that times out.
 
 **Two lights, never merged.** "ssh pid 4098" and "endpoint up" are separate facts
 with different fixes: ssh alive with the endpoint `refused` is a forward that has

@@ -17,15 +17,24 @@ typeface.
 
 **Three levels, each one click in:**
 
-    gateways   the tunnels: state, ssh output, the auth prompt, add/edit
-      jobs     that gateway's jobs, read through the tunnel
-        events one job's event stream
+    gateways      the list: state, the auth prompt, add
+      gateway     connect/restart, and tabs: jobs · ssh log · config
+        events    one job's event stream
 
-Routing is the url fragment (`#/g/<gateway>`, `#/g/<gateway>/j/<job>`), so the
-back button works and a page can be reloaded where it was. The token also
-arrives in the fragment (`#token=...`) but is taken out of it once, on boot: a
-fragment never reaches the server, so it stays out of access logs and caches on
-the way in.
+A gateway's own page carries everything you do *to* a gateway -- connect,
+disconnect, restart, read the ssh log, edit its entry in `gateways.json` -- with
+its jobs as the first of three tabs. The list is then just a list: one row per
+gateway, one action on it, and no disclosure triangles.
+
+Routing is the url fragment, tabs included, so the back button works and a
+reload lands where you were:
+
+    #/                    #/g/<gateway>        #/g/<gateway>/log
+    #/g/<gateway>/config  #/g/<gateway>/j/<job>
+
+The token also arrives in the fragment (`#token=...`) but is taken out of it
+once, on boot: a fragment never reaches the server, so it stays out of access
+logs and caches on the way in.
 """
 from __future__ import annotations
 
@@ -130,12 +139,16 @@ main { padding:14px 16px 40px; max-width:940px; margin:0 auto; }
 .item { display:flex; align-items:center; gap:9px; border-radius:6px;
   padding:8px 10px; }
 .item.click { cursor:pointer; }
-.item.click:hover { background:var(--hover); }
-/* Actions sit on the row and stay out of the way until wanted -- picone
-   reveals them on hover, which is the same move. */
-.card .actions.onrow { opacity:0; transition:opacity .1s; }
-.card:hover .actions.onrow, .card:focus-within .actions.onrow { opacity:1; }
-@media (hover: none) { .card .actions.onrow { opacity:1; } }
+/* Highlight and reveal are one gesture, so they hang off one selector and one
+   element. They used to disagree twice over: the background came from `.item`
+   and the buttons from `.card` -- different hit areas, so the detail panel
+   revealed buttons without highlighting anything -- and only the buttons had a
+   transition, so even on the row they arrived a beat late. */
+.item.click:hover, .item.click:focus-within { background:var(--hover); }
+.actions.onrow { opacity:0; }
+.item:hover .actions.onrow, .item:focus-within .actions.onrow { opacity:1; }
+/* Nothing to hover with, so nothing to reveal on. */
+@media (hover: none) { .actions.onrow { opacity:1; } }
 .item .body { flex:1; min-width:0; display:flex; flex-direction:column; gap:1px; }
 .head { display:flex; align-items:center; gap:6px; min-width:0; }
 .title { font-size:12.5px; font-weight:500; overflow:hidden;
@@ -176,6 +189,17 @@ button.btn:disabled { opacity:.45; cursor:default; box-shadow:none; }
   font-size:11.5px; }
 .kv dt { color:var(--text-faint); }
 .kv dd { margin:0; overflow-wrap:anywhere; }
+/* Tabs live on the gateway header's bottom edge, so the card and the pane below
+   read as one surface. */
+.tabs { display:flex; gap:2px; padding:0 8px; border-top:1px solid var(--border-muted);
+  background:var(--bg-deep); }
+.tab { font:inherit; font-size:12px; padding:7px 10px 6px; background:none;
+  border:none; border-bottom:2px solid transparent; color:var(--text-muted);
+  cursor:pointer; }
+.tab:hover { color:var(--text-base); }
+.tab.on { color:var(--text-base); border-bottom-color:var(--text-accent);
+  font-weight:500; }
+pre.console.tall { max-height:none; min-height:220px; }
 pre.console { margin:8px 0 0; padding:9px 10px; background:var(--bg-deep);
   border:1px solid var(--border-muted); border-radius:6px;
   font:11.5px/1.55 var(--mono); max-height:260px; overflow:auto;
@@ -240,8 +264,8 @@ form.edit { display:none } form.edit.open { display:block }
   var KEY = "agent-bridge-ui-token";
   var token = "";
   var st = { local: null, jobs: null, job: null, events: null, error: "" };
-  var open = { out: {}, edit: {}, add: false };
-  var route = { level: "gateways", gateway: "", job: "" };
+  var open = { add: false };
+  var route = { level: "gateways", gateway: "", job: "", tab: "jobs" };
   var timer = null;
 
   var dark = window.matchMedia("(prefers-color-scheme: dark)");
@@ -293,30 +317,48 @@ form.edit { display:none } form.edit.open { display:block }
   }
 
   // ── routing ──────────────────────────────────────────────────────────
+  //
+  //   #/                      the gateway list
+  //   #/g/<name>              that gateway: jobs
+  //   #/g/<name>/log          that gateway: the ssh console
+  //   #/g/<name>/config       that gateway: its entry in gateways.json
+  //   #/g/<name>/j/<job>      one job's events
+  //
+  // Tabs are in the url rather than in a variable so a reload lands where you
+  // were and the back button walks out of them.
+  var TABS = ["jobs", "log", "config"];
+
   function readRoute() {
     var parts = (location.hash || "").replace(/^#\/?/, "").split("/");
-    if (parts[0] === "g" && parts[1]) {
-      route = { level: parts[2] === "j" && parts[3] ? "events" : "jobs",
-                gateway: decodeURIComponent(parts[1]),
-                job: parts[3] ? decodeURIComponent(parts[3]) : "" };
-    } else {
-      route = { level: "gateways", gateway: "", job: "" };
+    if (parts[0] !== "g" || !parts[1]) {
+      route = { level: "gateways", gateway: "", job: "", tab: "jobs" };
+      return;
     }
+    var name = decodeURIComponent(parts[1]);
+    if (parts[2] === "j" && parts[3]) {
+      route = { level: "events", gateway: name,
+                job: decodeURIComponent(parts[3]), tab: "jobs" };
+      return;
+    }
+    var tab = TABS.indexOf(parts[2]) >= 0 ? parts[2] : "jobs";
+    route = { level: "gateway", gateway: name, job: "", tab: tab };
   }
   function go(hash) { location.hash = hash; }
+  function gatewayHash(name, tab) {
+    return "#/g/" + encodeURIComponent(name) + (tab && tab !== "jobs" ? "/" + tab : "");
+  }
 
   // ── data ─────────────────────────────────────────────────────────────
   function load() {
     st.error = "";
-    if (route.level === "gateways") {
-      return api("GET", "/v1/state").then(function (d) { st.local = d; render(); });
-    }
-    var g = encodeURIComponent(route.gateway);
-    // The local state comes along on every level: a job list that cannot load
+    // The local state comes along on every level: a job list that will not load
     // is nearly always a tunnel that is down, and the answer to that belongs on
     // the same screen as the question.
     var local = api("GET", "/v1/state").then(function (d) { st.local = d; });
-    if (route.level === "jobs") {
+    if (route.level === "gateways") { return local.then(render); }
+    var g = encodeURIComponent(route.gateway);
+    if (route.level === "gateway") {
+      if (route.tab !== "jobs") { return local.then(render); }
       return Promise.all([local,
         api("GET", "/v1/gateways/" + g + "/jobs?limit=50")
           .then(function (d) { st.jobs = d; })
@@ -348,7 +390,7 @@ form.edit { display:none } form.edit.open { display:block }
     var view = $("view");
     view.innerHTML = "";
     if (route.level === "gateways") { gatewaysView(view); }
-    else if (route.level === "jobs") { jobsView(view); }
+    else if (route.level === "gateway") { gatewayView(view); }
     else { eventsView(view); }
   }
 
@@ -357,30 +399,24 @@ form.edit { display:none } form.edit.open { display:block }
     host.innerHTML = "";
     function crumb(label, hash, here) {
       if (here) {
-        var span = document.createElement("span");
-        span.className = "here";
-        span.textContent = label;
-        host.appendChild(span);
+        host.appendChild(el("span", "here", label));
         return;
       }
       var b = document.createElement("button");
       b.textContent = label;
       b.addEventListener("click", function () { go(hash); });
       host.appendChild(b);
-      var sep = document.createElement("span");
-      sep.className = "sep";
-      sep.textContent = "/";
-      host.appendChild(sep);
+      host.appendChild(el("span", "sep", "/"));
     }
     crumb("gateways", "#/", route.level === "gateways");
     if (route.gateway) {
-      crumb(route.gateway, "#/g/" + encodeURIComponent(route.gateway),
-            route.level === "jobs");
+      crumb(route.gateway, gatewayHash(route.gateway),
+            route.level === "gateway");
     }
     if (route.job) { crumb(route.job.slice(0, 8), "", true); }
   }
 
-  // ── level 1: gateways and their tunnels ──────────────────────────────
+  // ── state words, shared by every level ───────────────────────────────
   function tunnelTone(row) {
     var t = row.tunnel;
     if (!t) { return (row.endpoint || {}).state === "up" ? "success" : ""; }
@@ -402,17 +438,35 @@ form.edit { display:none } form.edit.open { display:block }
     return t.state;
   }
 
+  // Two facts, never merged into one light: ssh can be alive while the port
+  // answers nothing, and the fix for each is a different thing to go and do.
+  function endpointLine(row) {
+    var e = (row.tunnel ? row.tunnel.endpoint : row.endpoint) || {};
+    var bits = [];
+    if (row.tunnel && row.tunnel.pid) { bits.push("ssh pid " + row.tunnel.pid); }
+    if (e.state) { bits.push("endpoint " + e.state); }
+    if (e.version) { bits.push("agent-bridge " + e.version); }
+    if (e.latency_ms != null) { bits.push(e.latency_ms + " ms"); }
+    var g = row.gateway;
+    bits.push(g.has_token ? "token from " + g.token_source : "no token");
+    if (e.detail) { bits.push(e.detail); }
+    return bits.join(" · ");
+  }
+
+  function trouble(row) {
+    var t = row.tunnel;
+    return row.problem || row.gateway.warning ||
+      (t && t.state !== "up" ? t.last_error : "") || "";
+  }
+
+  // ── level 1: the gateway list ────────────────────────────────────────
   function gatewaysView(view) {
     var d = st.local;
     if (!d) { return; }
-    var head = document.createElement("p");
-    head.className = "section";
-    head.title = d.config_path;
-    // The path is long and the same every time: name the file, keep the
-    // directory in the tooltip rather than across the top of every screen.
-    head.textContent = d.gateways.length + " gateways · " +
+    var head = el("p", "section", d.gateways.length + " gateways · " +
       d.config_path.split("/").pop() +
-      (d.writable ? "" : " (read-only: TOML)");
+      (d.writable ? "" : " (read-only: TOML)"));
+    head.title = d.config_path;
     view.appendChild(head);
 
     var list = document.createElement("div");
@@ -422,6 +476,9 @@ form.edit { display:none } form.edit.open { display:block }
     view.appendChild(addPanel());
   }
 
+  // A row, and nothing behind a disclosure. Connecting and configuring live on
+  // the gateway's own page now; what stays here is the one action you want from
+  // a list — and the auth prompt, which is never hidden anywhere.
   function gatewayCard(row) {
     var g = row.gateway, t = row.tunnel;
     var card = document.createElement("div");
@@ -441,247 +498,124 @@ form.edit { display:none } form.edit.open { display:block }
         '<span class="meta">' + esc(endpointLine(row)) + '</span>' +
       '</span>';
 
-    // The one-click action, on the row: whichever of start/stop is not the
-    // current state. Everything else lives behind "details", so a list of six
-    // gateways is six rows rather than six panels.
     var bar = document.createElement("span");
     bar.className = "actions onrow";
-    if (g.tunnelled) {
-      bar.appendChild(btn(t && t.wanted ? "stop" : "start",
-        t && t.wanted ? "" : "primary", function () {
-          return api("POST", "/v1/tunnels/" + encodeURIComponent(g.name) +
-                     (t && t.wanted ? "/down" : "/up")).then(load);
-        }));
-    }
-    bar.appendChild(btn(open.edit[g.name] ? "hide" : "details", "", function () {
-      open.edit[g.name] = !open.edit[g.name];
-      render();
-      return Promise.resolve();
-    }));
+    if (g.tunnelled) { bar.appendChild(connectButton(row)); }
     item.appendChild(bar);
-    item.appendChild(el("span", "chev", "\u203a"));
+    item.appendChild(el("span", "chev", "›"));
     item.addEventListener("click", function (ev) {
       if (ev.target.closest("button")) { return; }
-      go("#/g/" + encodeURIComponent(g.name));
+      go(gatewayHash(g.name));
     });
     card.appendChild(item);
 
-    // A prompt is never hidden behind a disclosure: ssh is waiting on an
-    // answer, and a login that times out because the question was one click
-    // away is the failure this whole thing exists to prevent.
     if (t && t.prompt) { card.appendChild(ask(g.name, t)); }
-
-    var trouble = row.problem || g.warning ||
-      (t && t.state !== "up" ? t.last_error : "");
-    if (trouble && !open.edit[g.name]) {
-      card.appendChild(el("div", "detail", '<div class="err">' + esc(trouble) +
+    var why = trouble(row);
+    if (why) {
+      card.appendChild(el("div", "detail", '<div class="err">' + esc(why) +
                           '</div>', true));
     }
-    if (!open.edit[g.name]) { return card; }
-
-    var detail = document.createElement("div");
-    detail.className = "detail";
-    detail.innerHTML =
-      // Not repeated when the console is open: the console's first line is this
-      // same command, and printing it twice reads like two of them.
-      (g.ssh_display
-        ? (open.out[g.name] ? ''
-           : '<div class="sub mono">$ ' + esc(g.ssh_display) + '</div>')
-        : '<div class="meta">no ssh command — add one and this becomes a tunnel</div>') +
-      (row.problem ? '<div class="err">' + esc(row.problem) + '</div>' : '') +
-      (g.warning ? '<div class="err">' + esc(g.warning) + '</div>' : '') +
-      (t && t.last_error && t.state !== "up"
-        ? '<div class="err">' + esc(t.last_error) + '</div>' : '');
-
-    var more = document.createElement("div");
-    more.className = "actions";
-    more.style.marginTop = "9px";
-    if (g.tunnelled) {
-      more.appendChild(btn("restart", "", function () {
-        return api("POST", "/v1/tunnels/" + encodeURIComponent(g.name) +
-                   "/restart").then(load);
-      }));
-      more.appendChild(btn(open.out[g.name] ? "hide ssh output" : "ssh output",
-        "", function () {
-          open.out[g.name] = !open.out[g.name];
-          render();
-          return Promise.resolve();
-        }));
-    }
-    more.appendChild(btn("remove", "danger", function () {
-      if (!confirm("Remove " + g.name + " from gateways.json?")) {
-        return Promise.resolve();
-      }
-      return api("DELETE", "/v1/gateways/" + encodeURIComponent(g.name))
-        .then(load);
-    }));
-    detail.appendChild(more);
-
-    if (open.out[g.name]) {
-      var pre = document.createElement("pre");
-      pre.className = "console";
-      pre.id = "out-" + g.name;
-      pre.textContent = "…";
-      detail.appendChild(pre);
-      pullOutput(g.name);
-    }
-    detail.appendChild(editForm(g));
-    card.appendChild(detail);
     return card;
   }
 
-  // Two facts, never merged into one light: ssh can be alive while the port
-  // answers nothing, and the fix for each is a different thing to go and do.
-  function endpointLine(row) {
-    var e = (row.tunnel ? row.tunnel.endpoint : row.endpoint) || {};
-    var bits = [];
-    if (row.tunnel && row.tunnel.pid) { bits.push("ssh pid " + row.tunnel.pid); }
-    if (e.state) { bits.push("endpoint " + e.state); }
-    if (e.version) { bits.push("agent-bridge " + e.version); }
-    if (e.latency_ms != null) { bits.push(e.latency_ms + " ms"); }
-    var g = row.gateway;
-    bits.push(g.has_token ? "token from " + g.token_source : "no token");
-    if (e.detail) { bits.push(e.detail); }
-    return bits.join(" · ");
+  // ── level 2: one gateway — connect, log, config, jobs ────────────────
+  function gatewayView(view) {
+    var row = rowFor(route.gateway);
+    if (!row) {
+      view.appendChild(el("div", "empty",
+        "No gateway called " + route.gateway + " in this config."));
+      return;
+    }
+    view.appendChild(gatewayHeader(row, true));
+    if (route.tab === "jobs") { jobsPane(view, row); }
+    else if (route.tab === "log") { logPane(view, row); }
+    else { configPane(view, row); }
   }
 
-  function ask(name, t) {
-    var box = document.createElement("div");
-    box.className = "ask";
-    box.style.margin = "0 10px 10px";
-    box.innerHTML = '<p>' + esc(t.prompt) + '</p>';
-    var line = document.createElement("div");
-    line.className = "row";
-    var input = document.createElement("input");
-    input.type = t.prompt_secret ? "password" : "text";
-    input.autocomplete = "off";
-    input.placeholder = t.prompt_secret
-      ? "sent straight to ssh; not stored" : "answer";
-    var send = btn("send", "primary", function () {
-      var text = input.value;
-      input.value = "";
-      return api("POST", "/v1/tunnels/" + encodeURIComponent(name) + "/answer",
-                 { text: text }).then(load);
-    });
-    input.addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter") { ev.preventDefault(); send.click(); }
-    });
-    line.appendChild(input);
-    line.appendChild(send);
-    box.appendChild(line);
-    setTimeout(function () { input.focus(); }, 0);
-    return box;
+  // Pinned above the tabs, so the connect button and an auth prompt are on the
+  // screen whichever tab is open: ssh waiting on an answer behind a tab is the
+  // login that times out.
+  function gatewayHeader(row, withTabs) {
+    var g = row.gateway, t = row.tunnel;
+    var card = document.createElement("div");
+    card.className = "card";
+    card.style.marginBottom = "12px";
+
+    var item = document.createElement("div");
+    item.className = "item";
+    item.innerHTML =
+      '<span class="dot ' + tunnelTone(row) + '"></span>' +
+      '<span class="body">' +
+        '<span class="head"><span class="title">' + esc(g.name) + '</span>' +
+          (row.default ? '<span class="tag">default</span>' : '') +
+          '<span class="tag ' + tunnelTone(row) + '">' + esc(tunnelWord(row)) + '</span>' +
+          (g.autostart ? '<span class="tag magic">autostart</span>' : '') +
+        '</span>' +
+        '<span class="sub mono">' + esc(g.base_url) + '</span>' +
+        '<span class="meta">' + esc(endpointLine(row)) + '</span>' +
+      '</span>';
+    var bar = document.createElement("span");
+    bar.className = "actions";
+    if (g.tunnelled) {
+      bar.appendChild(connectButton(row));
+      bar.appendChild(btn("restart", "", function () {
+        return api("POST", "/v1/tunnels/" + encodeURIComponent(g.name) +
+                   "/restart").then(load);
+      }));
+    }
+    item.appendChild(bar);
+    card.appendChild(item);
+
+    if (t && t.prompt) { card.appendChild(ask(g.name, t)); }
+    var why = trouble(row);
+    if (why) {
+      card.appendChild(el("div", "detail", '<div class="err">' + esc(why) +
+                          '</div>', true));
+    }
+    if (withTabs) { card.appendChild(tabBar(g.name)); }
+    return card;
   }
 
-  function editForm(g) {
-    var form = document.createElement("form");
-    form.className = "edit open";
-    form.innerHTML =
-      '<label>base_url — the local port the CLI connects to</label>' +
-      '<input name="base_url" class="mono" value="' + esc(g.base_url) + '">' +
-      '<label>ssh command — argv, no shell</label>' +
-      '<input name="ssh" class="mono" value="' + esc(g.ssh_display) + '">' +
-      '<label><input type="checkbox" name="autostart" style="width:auto"' +
-        (g.autostart ? " checked" : "") + '> start with the daemon</label>' +
-      '<p class="hint">Saved to gateways.json; the old file is kept as .bak.</p>' +
-      '<div class="actions" style="margin-top:6px">' +
-        '<button class="btn primary" type="submit">save</button>' +
-        '<button class="btn" type="button" data-act="default">make default</button>' +
-      '</div><p class="err"></p>';
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      form.querySelector(".err").textContent = "";
-      api("PUT", "/v1/gateways/" + encodeURIComponent(g.name), {
-        base_url: form.base_url.value.trim(),
-        ssh: form.ssh.value.trim(),
-        autostart: form.autostart.checked
-      }).then(function () {
-        open.edit[g.name] = false;
-        return load();
-      }).catch(function (e) { form.querySelector(".err").textContent = e.message; });
-    });
-    form.querySelector('[data-act="default"]').addEventListener("click", function () {
-      api("POST", "/v1/gateways/" + encodeURIComponent(g.name) + "/default")
-        .then(load)
-        .catch(function (e) { form.querySelector(".err").textContent = e.message; });
-    });
-    return form;
+  function connectButton(row) {
+    var g = row.gateway, t = row.tunnel;
+    var wanted = t && t.wanted;
+    return btn(wanted ? "disconnect" : "connect", wanted ? "" : "primary",
+      function () {
+        return api("POST", "/v1/tunnels/" + encodeURIComponent(g.name) +
+                   (wanted ? "/down" : "/up")).then(load);
+      });
   }
 
-  function addPanel() {
-    var panel = document.createElement("div");
-    panel.className = "panel";
-    panel.innerHTML = '<div class="head"><span class="title" style="flex:1">' +
-      'Add a gateway</span></div>';
-    var toggle = btn(open.add ? "cancel" : "new", "", function () {
-      open.add = !open.add;
-      render();
-      return Promise.resolve();
+  var TAB_LABEL = { jobs: "jobs", log: "ssh log", config: "config" };
+
+  function tabBar(name) {
+    var bar = document.createElement("nav");
+    bar.className = "tabs";
+    TABS.forEach(function (tab) {
+      var b = document.createElement("button");
+      b.className = "tab" + (route.tab === tab ? " on" : "");
+      b.textContent = TAB_LABEL[tab];
+      b.addEventListener("click", function () { go(gatewayHash(name, tab)); });
+      bar.appendChild(b);
     });
-    panel.querySelector(".head").appendChild(toggle);
-    if (!open.add) { return panel; }
-    var form = document.createElement("form");
-    form.className = "edit open";
-    form.innerHTML =
-      '<label>name</label><input name="name" placeholder="midway5" required>' +
-      '<label>base_url</label><input name="base_url" class="mono" ' +
-        'placeholder="http://localhost:8787" required>' +
-      '<label>ssh command</label><input name="ssh" class="mono" ' +
-        'placeholder="ssh -N -o ServerAliveInterval=60 -L 8787:localhost:8787 midway5">' +
-      '<label>token_env</label><input name="token_env" ' +
-        'placeholder="AGENT_BRIDGE_TOKEN">' +
-      '<div class="actions" style="margin-top:8px">' +
-        '<button class="btn primary" type="submit">save</button></div>' +
-      '<p class="err"></p>';
-    form.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      form.querySelector(".err").textContent = "";
-      api("PUT", "/v1/gateways/" +
-          encodeURIComponent(form.name.value.trim()), {
-        base_url: form.base_url.value.trim(),
-        ssh: form.ssh.value.trim(),
-        token_env: form.token_env.value.trim() || undefined
-      }).then(function () { open.add = false; return load(); })
-        .catch(function (e) { form.querySelector(".err").textContent = e.message; });
-    });
-    panel.appendChild(form);
-    return panel;
+    return bar;
   }
 
-  function pullOutput(name) {
-    api("GET", "/v1/tunnels/" + encodeURIComponent(name) + "/output?after=0")
-      .then(function (d) {
-        var pre = $("out-" + name);
-        if (!pre) { return; }
-        pre.innerHTML = d.lines.map(function (l) {
-          return '<span class="' + esc(l.kind) + '">' + esc(l.text) + '</span>';
-        }).join("\n") || "(nothing yet)";
-        pre.scrollTop = pre.scrollHeight;
-      }).catch(function () {});
-  }
-
-  // ── level 2: jobs ────────────────────────────────────────────────────
+  // ── the jobs tab ─────────────────────────────────────────────────────
   var JOB_TONE = { succeeded: "success", failed: "danger", canceled: "danger",
                    running: "info", waiting: "warning", queued: "" };
 
-  function jobsView(view) {
-    var row = rowFor(route.gateway);
-    if (row) { view.appendChild(gatewayStrip(row)); }
+  function jobsPane(view, row) {
     if (st.error) {
-      var err = document.createElement("div");
-      err.className = "panel";
-      err.innerHTML = '<div class="err">' + esc(st.error) + '</div>' +
-        '<p class="hint">If the tunnel is down, start it from the gateway ' +
-        'list — the base_url is a local port that only answers while ssh is up.</p>';
-      view.appendChild(err);
+      view.appendChild(el("div", "panel",
+        '<div class="err">' + esc(st.error) + '</div>' +
+        '<p class="hint">A base_url is a local port that answers only while ' +
+        'the forward is up. Connect above, or check the ssh log.</p>', true));
       return;
     }
     var jobs = (st.jobs && st.jobs.jobs) || [];
-    var head = document.createElement("p");
-    head.className = "section";
-    head.textContent = "jobs · " + jobs.length +
-      (st.jobs && st.jobs.total ? " of " + st.jobs.total : "");
-    view.appendChild(head);
+    view.appendChild(el("p", "section", "jobs · " + jobs.length +
+      (st.jobs && st.jobs.total ? " of " + st.jobs.total : "")));
     if (!jobs.length) {
       view.appendChild(el("div", "empty", "No jobs on this gateway yet."));
       return;
@@ -725,24 +659,170 @@ form.edit { display:none } form.edit.open { display:block }
     return bits.join(" · ");
   }
 
-  function gatewayStrip(row) {
+  // ── the ssh log tab ──────────────────────────────────────────────────
+  function logPane(view, row) {
     var g = row.gateway;
-    var strip = document.createElement("div");
-    strip.className = "card";
-    strip.style.marginBottom = "10px";
-    var inner = document.createElement("div");
-    inner.className = "item";
-    inner.innerHTML =
-      '<span class="dot ' + tunnelTone(row) + '"></span>' +
-      '<span class="body"><span class="head">' +
-        '<span class="title">' + esc(g.name) + '</span>' +
-        '<span class="tag ' + tunnelTone(row) + '">' + esc(tunnelWord(row)) + '</span>' +
-      '</span><span class="meta">' + esc(endpointLine(row)) + '</span></span>';
-    strip.appendChild(inner);
-    if (row.tunnel && row.tunnel.prompt) {
-      strip.appendChild(ask(g.name, row.tunnel));
+    if (!g.tunnelled) {
+      view.appendChild(el("div", "empty",
+        "No ssh command, so there is no log. Add one under config."));
+      return;
     }
-    return strip;
+    // The command is not repeated in the header: `.section` is uppercased, which
+    // mangles a path, and the console's own first line already carries it.
+    view.appendChild(el("p", "section", "ssh log"));
+    var pre = document.createElement("pre");
+    pre.className = "console tall";
+    pre.id = "out-" + g.name;
+    pre.textContent = "…";
+    view.appendChild(pre);
+    pullOutput(g.name);
+  }
+
+  // ── the config tab ───────────────────────────────────────────────────
+  function configPane(view, row) {
+    var g = row.gateway, d = st.local;
+    view.appendChild(el("p", "section", "config · " +
+      (d.writable ? d.config_path.split("/").pop()
+                  : d.config_path.split("/").pop() + " (read-only: TOML)")));
+    var panel = document.createElement("div");
+    panel.className = "panel";
+    panel.appendChild(editForm(g));
+    view.appendChild(panel);
+
+    var danger = document.createElement("div");
+    danger.className = "panel";
+    danger.innerHTML =
+      '<div class="sub">Removing this only edits gateways.json; the previous ' +
+      'file is kept as <span class="mono">.bak</span>.</div>';
+    var bar = document.createElement("div");
+    bar.className = "actions";
+    bar.style.marginTop = "9px";
+    if (!row.default) {
+      bar.appendChild(btn("make default", "", function () {
+        return api("POST", "/v1/gateways/" + encodeURIComponent(g.name) +
+                   "/default").then(load);
+      }));
+    }
+    bar.appendChild(btn("remove", "danger", function () {
+      if (!confirm("Remove " + g.name + " from gateways.json?")) {
+        return Promise.resolve();
+      }
+      return api("DELETE", "/v1/gateways/" + encodeURIComponent(g.name))
+        .then(function () { go("#/"); });
+    }));
+    danger.appendChild(bar);
+    view.appendChild(danger);
+  }
+
+  // ── shared pieces ────────────────────────────────────────────────────
+  function ask(name, t) {
+    var box = document.createElement("div");
+    box.className = "ask";
+    box.style.margin = "0 10px 10px";
+    box.innerHTML = '<p>' + esc(t.prompt) + '</p>';
+    var line = document.createElement("div");
+    line.className = "row";
+    var input = document.createElement("input");
+    input.type = t.prompt_secret ? "password" : "text";
+    input.autocomplete = "off";
+    input.placeholder = t.prompt_secret
+      ? "sent straight to ssh; not stored" : "answer";
+    var send = btn("send", "primary", function () {
+      var text = input.value;
+      input.value = "";
+      return api("POST", "/v1/tunnels/" + encodeURIComponent(name) + "/answer",
+                 { text: text }).then(load);
+    });
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") { ev.preventDefault(); send.click(); }
+    });
+    line.appendChild(input);
+    line.appendChild(send);
+    box.appendChild(line);
+    setTimeout(function () { input.focus(); }, 0);
+    return box;
+  }
+
+  function editForm(g) {
+    var form = document.createElement("form");
+    form.className = "edit open";
+    form.innerHTML =
+      '<label>base_url — the local port the CLI connects to</label>' +
+      '<input name="base_url" class="mono" value="' + esc(g.base_url) + '">' +
+      '<label>ssh command — argv, no shell</label>' +
+      '<input name="ssh" class="mono" value="' + esc(g.ssh_display) + '">' +
+      '<label><input type="checkbox" name="autostart" style="width:auto"' +
+        (g.autostart ? " checked" : "") + '> connect when the daemon starts</label>' +
+      '<p class="hint">' +
+        (g.has_token ? 'Token from ' + esc(g.token_source) + '. '
+                     : 'No token configured. ') +
+        'Saved to gateways.json; the old file is kept as .bak.</p>' +
+      '<div class="actions" style="margin-top:6px">' +
+        '<button class="btn primary" type="submit">save</button>' +
+      '</div><p class="err"></p>';
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      form.querySelector(".err").textContent = "";
+      api("PUT", "/v1/gateways/" + encodeURIComponent(g.name), {
+        base_url: form.base_url.value.trim(),
+        ssh: form.ssh.value.trim(),
+        autostart: form.autostart.checked
+      }).then(load)
+        .catch(function (e) { form.querySelector(".err").textContent = e.message; });
+    });
+    return form;
+  }
+
+  function addPanel() {
+    var panel = document.createElement("div");
+    panel.className = "panel";
+    panel.innerHTML = '<div class="head"><span class="title" style="flex:1">' +
+      'Add a gateway</span></div>';
+    panel.querySelector(".head").appendChild(
+      btn(open.add ? "cancel" : "new", "", function () {
+        open.add = !open.add;
+        render();
+        return Promise.resolve();
+      }));
+    if (!open.add) { return panel; }
+    var form = document.createElement("form");
+    form.className = "edit open";
+    form.innerHTML =
+      '<label>name</label><input name="name" placeholder="midway5" required>' +
+      '<label>base_url</label><input name="base_url" class="mono" ' +
+        'placeholder="http://localhost:8787" required>' +
+      '<label>ssh command</label><input name="ssh" class="mono" ' +
+        'placeholder="ssh -N -o ServerAliveInterval=60 -L 8787:localhost:8787 midway5">' +
+      '<label>token_env</label><input name="token_env" ' +
+        'placeholder="AGENT_BRIDGE_TOKEN">' +
+      '<div class="actions" style="margin-top:8px">' +
+        '<button class="btn primary" type="submit">save</button></div>' +
+      '<p class="err"></p>';
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      form.querySelector(".err").textContent = "";
+      api("PUT", "/v1/gateways/" +
+          encodeURIComponent(form.name.value.trim()), {
+        base_url: form.base_url.value.trim(),
+        ssh: form.ssh.value.trim(),
+        token_env: form.token_env.value.trim() || undefined
+      }).then(function () { open.add = false; return load(); })
+        .catch(function (e) { form.querySelector(".err").textContent = e.message; });
+    });
+    panel.appendChild(form);
+    return panel;
+  }
+
+  function pullOutput(name) {
+    api("GET", "/v1/tunnels/" + encodeURIComponent(name) + "/output?after=0")
+      .then(function (d) {
+        var pre = $("out-" + name);
+        if (!pre) { return; }
+        pre.innerHTML = d.lines.map(function (l) {
+          return '<span class="' + esc(l.kind) + '">' + esc(l.text) + '</span>';
+        }).join("\n") || "(nothing yet)";
+        pre.scrollTop = pre.scrollHeight;
+      }).catch(function () {});
   }
 
   // ── level 3: one job's events ────────────────────────────────────────
@@ -751,7 +831,7 @@ form.edit { display:none } form.edit.open { display:block }
 
   function eventsView(view) {
     var row = rowFor(route.gateway);
-    if (row) { view.appendChild(gatewayStrip(row)); }
+    if (row) { view.appendChild(gatewayHeader(row, false)); }
     if (st.error || !st.job) {
       view.appendChild(el("div", "panel",
         '<div class="err">' + esc(st.error || "job not found") + '</div>', true));
@@ -887,7 +967,11 @@ form.edit { display:none } form.edit.open { display:block }
       var es = new EventSource("/v1/events?after=0&ticket=" +
                                encodeURIComponent(d.ticket));
       es.onopen = function () { mark("live", "success"); };
-      es.onmessage = function () { if (route.level === "gateways") { load(); } };
+      es.onmessage = function () {
+        // A state change is about a tunnel, so it matters on the list and on a
+        // gateway's own page; a job's event stream is polled instead.
+        if (route.level !== "events") { load(); }
+      };
       es.onerror = function () {
         es.close();
         mark("reconnecting", "warning");
@@ -905,8 +989,12 @@ form.edit { display:none } form.edit.open { display:block }
     // and polls slowly behind it. A finished job stops costing anything.
     clearTimeout(timer);
     var every = route.level === "gateways" ? 5000
-      : (st.job && ["succeeded", "failed", "canceled"].indexOf(st.job.status) >= 0
-         ? 15000 : 2500);
+      : route.level === "gateway"
+        // The ssh log is the one that has to feel live: it is what you watch
+        // while a login is happening.
+        ? (route.tab === "log" ? 1200 : 4000)
+        : (st.job && ["succeeded", "failed", "canceled"].indexOf(st.job.status) >= 0
+           ? 15000 : 2500);
     timer = setTimeout(function () { load().then(tick); }, every);
   }
 

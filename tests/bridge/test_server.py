@@ -272,3 +272,25 @@ def test_a_token_is_always_resolved_even_if_none_was_given(monkeypatch):
     assert resolve_token("explicit") == "explicit"
     monkeypatch.setenv("AGENT_BRIDGE_UI_TOKEN", "from-env")
     assert resolve_token(None) == "from-env"
+
+
+def test_the_page_puts_connecting_and_configuring_on_the_gateway(app):
+    """The list is a list; what you do *to* a gateway lives on its own page,
+    behind tabs that are in the url so a reload lands where you were."""
+    client, _sup, _path = app
+    body = client.get("/").text
+    for marker in ('"#/g/"', "gatewayView", "logPane", "configPane", "tabBar",
+                   "connectButton"):
+        assert marker in body, marker
+    assert '"log"' in body and '"config"' in body, "tabs are named in the route"
+
+
+def test_hover_reveals_the_row_actions_from_the_same_selector(app):
+    """The highlight and the buttons are one gesture. They used to hang off two
+    different elements (`.item` and `.card`) with a transition on only one, so
+    they arrived at different moments and on different hit areas."""
+    client, _sup, _path = app
+    body = client.get("/").text
+    assert ".item:hover .actions.onrow" in body
+    assert ".item.click:hover, .item.click:focus-within" in body
+    assert "transition:opacity" not in body, "instant, so they cannot disagree"
