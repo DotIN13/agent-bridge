@@ -1,9 +1,12 @@
 {
+  "_note": "`ssh` and `autostart` are read by ab-bridge and ignored by ab. The ssh command runs without a shell: argv only, and the program must be ssh, autossh or sshpass. `autostart` brings the tunnel up when the daemon starts; a tunnel you started yourself is restarted automatically either way.",
   "default": "midway5",
   "gateways": {
     "midway5": {
       "base_url": "http://localhost:8787",
-      "token_env": "AGENT_BRIDGE_TOKEN"
+      "token_env": "AGENT_BRIDGE_TOKEN",
+      "ssh": "ssh -N -o ServerAliveInterval=60 -o ServerAliveCountMax=3 -L 8787:localhost:8787 midway5",
+      "autostart": false
     },
     "midway5-alt": {
       "base_url": "http://localhost:8788",

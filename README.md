@@ -36,15 +36,29 @@ Stable console commands are installed together:
 Legacy invocation remains supported: `python -m gateway`,
 `python client/ab.py`, `bin/ab-monitor`, and `bin/ab-notify`.
 
-On a laptop, keep one tunnel alive:
+On a laptop the gateway is reached through an ssh forward, which something has
+to keep alive. By hand:
 
 ```bash
 ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
   -L 8787:localhost:8787 midway5
 ```
 
+Or let the daemon do it, and drive it from a browser:
+
+```bash
+ab-bridge --open
+```
+
+`ab-bridge` supervises one ssh child per gateway on a pty — so a password or a
+Duo passcode is asked in the UI and answered there — restarts a forward that
+drops, and drills down from gateways to jobs to a job's events. See
+[bridge/README.md](bridge/README.md) and
+[docs/design/20](docs/design/20-a-tunnel-is-a-supervised-child-with-a-pty.md).
+
 Configure gateways in `~/.config/agent-bridge/gateways.json`; see
-`client/gateways.example.json` and [client/README.md](client/README.md).
+`client/gateways.example.json` and [client/README.md](client/README.md). The
+`ssh` and `autostart` keys `ab-bridge` reads are optional and ignored by `ab`.
 
 ## Agent-first CLI
 

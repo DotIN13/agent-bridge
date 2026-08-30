@@ -66,6 +66,7 @@ def test_console_scripts_and_dynamic_version_are_declared():
         "agent-bridge": "gateway.__main__:main",
         "ab-notify": "client.ab_notify:main",
         "ab-monitor": "client.ab_monitor:main",
+        "ab-bridge": "bridge.__main__:main",
     }
     assert config["tool"]["setuptools"]["dynamic"]["version"]["attr"] == \
         "client._version.__version__"

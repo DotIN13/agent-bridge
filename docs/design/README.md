@@ -25,8 +25,18 @@ decision that looks arbitrary until you know what it was chosen against.
 | [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
 | [18](18-steering-opencode-is-http-not-a-pipe.md) | opencode jobs are steerable: `delivery: "steer"` on an attached server, not a pipe | after 0.3.0 |
 | [19](19-one-contract-not-three.md) | `ab capabilities` removed — it was `ab help` + `ab gateways` + `ab agents`, and its verb list had drifted | after 0.3.0 |
+| [20](20-a-tunnel-is-a-supervised-child-with-a-pty.md) | `ab-bridge`: the ssh forward becomes a supervised child on a pty, with a web UI that can answer its prompts | after 0.3.0 |
 
 ## The load-bearing bits
+
+**20 is the first thing here that runs on the operator's own machine**, and the
+reason it is not a twenty-line supervisor is `/dev/tty`: `ssh` asks for a password
+there, not on stdin, so a child spawned with pipes hangs looking healthy. Read 20
+before touching `bridge/tunnel.py` — the controlling-terminal ioctl and the pty's
+echo being off are both load-bearing, both were found by tests rather than by
+reading, and both guard a failure that is invisible (a hung login; a password in a
+web page). Its other half is that the UI can rewrite the command the daemon
+executes, which is what the program allowlist is for.
 
 **19 reverses a piece of 06**, which is worth reading as a pair: 06 added
 `ab capabilities` so an agent could learn the contract in one call, and the verb
