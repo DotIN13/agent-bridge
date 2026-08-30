@@ -75,16 +75,53 @@ def test_rewriting_a_file_with_new_content_reports_again(tmp_path):
     db.close()
 
 
-def test_an_oversized_file_is_truncated_and_says_so(tmp_path):
+def test_an_oversized_milestone_is_truncated_and_says_so(tmp_path):
     db = _db(tmp_path)
     job = _job(db)
     root = jobdir.prepare(tmp_path, job)
-    jobdir.publish(root / "report.md", "x" * (jobdir.MAX_FILE_BYTES + 500))
+    jobdir.publish(root / "progress" / "010-log.md",
+                   "x" * (jobdir.MAX_FILE_BYTES + 500))
 
     db.ingest_job_dir(job, str(root))
     data = _messages(db, job)[0]["data"]
     assert len(data["msg"]) == jobdir.MAX_FILE_BYTES
     assert "exceeded" in data["error"]
+    db.close()
+
+
+def test_a_report_is_kept_whole_well_past_a_milestones_bound(tmp_path):
+    """The report is the caller's context, so it does not share the note bound.
+
+    Both copies of it, since a truncated `result` beside a whole event would be
+    the "two answers to one question" that design/23 exists to remove.
+    """
+    db = _db(tmp_path)
+    job = _job(db)
+    root = jobdir.prepare(tmp_path, job)
+    body = "y" * (jobdir.MAX_FILE_BYTES * 8)
+    jobdir.publish(root / "report.md", body)
+
+    db.ingest_job_dir(job, str(root))
+    data = _messages(db, job)[0]["data"]
+    assert data["msg"] == body
+    assert "error" not in data
+    assert jobdir.read_report(root) == body
+    db.close()
+
+
+def test_a_report_past_its_own_bound_is_truncated_and_says_so(tmp_path):
+    """A ceiling somewhere: `report.md` fed from a training log is a mistake,
+    not a document, and the note is what tells its author which one happened."""
+    db = _db(tmp_path)
+    job = _job(db)
+    root = jobdir.prepare(tmp_path, job)
+    jobdir.publish(root / "report.md", "z" * (jobdir.MAX_REPORT_BYTES + 500))
+
+    db.ingest_job_dir(job, str(root))
+    data = _messages(db, job)[0]["data"]
+    assert len(data["msg"]) == jobdir.MAX_REPORT_BYTES
+    assert str(jobdir.MAX_REPORT_BYTES) in data["error"]
+    assert len(jobdir.read_report(root)) == jobdir.MAX_REPORT_BYTES
     db.close()
 
 

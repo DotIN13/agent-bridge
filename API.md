@@ -411,7 +411,10 @@ is written to the job's `result` field as well as arriving as a `message` event,
 so `GET /v1/jobs/<id>` answers with the deliverable rather than with the turn's
 closing text. It still does not move the job — the turn's end does that — but it
 does decide what `result` says once it exists (design/23). A job with no report
-keeps the turn's own answer there, which is what a failed run has.
+keeps the turn's own answer there, which is what a failed run has. `report.md` is
+read to 2 MiB where every other job-dir file is read to 64 KiB, and the row and
+the event carry the same text; a longer report is truncated with the limit named
+in the event's `error`.
 
 There is no shared-filesystem JSONL channel. It existed for a compute node that
 could not reach the gateway; nothing has written it since `ab-notify` became a

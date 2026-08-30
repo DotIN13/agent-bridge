@@ -261,7 +261,21 @@ function EventContent(props: {
         <Tag tone={reportTone(String(props.data().status ?? ""))}>{String(props.data().status ?? "report")}</Tag>
         <Show when={props.data().slurm_job_id}>{(id) => <code>slurm {String(id())}</code>}</Show>
         <Show when={props.data().host}>{(host) => <code>{String(host())}</code>}</Show>
-        <Show when={props.text("msg")}>{(msg) => <span>{msg()}</span>}</Show>
+        <Show when={props.text("msg")}>
+          {(msg) => (
+            <Show when={msg().length > DOC_CHARS} fallback={<span>{msg()}</span>}>
+              {/* `report.md` arrives here and is allowed 2 MiB (design/23). The
+                  log is where you see that it landed, not where you read it, so
+                  a long one collapses and its size becomes the summary. */}
+              <details data-slot="event-doc">
+                <summary>
+                  {props.text("file") || "report"} · {kib(msg().length)}
+                </summary>
+                <p>{msg()}</p>
+              </details>
+            </Show>
+          )}
+        </Show>
       </span>
     </Show>
   );
@@ -337,6 +351,14 @@ function reportTone(status: string): "neutral" | "success" | "warning" | "danger
   if (status === "failed" || status === "error") return "danger";
   if (status === "running" || status === "started") return "info";
   return "warning";
+}
+
+/** Longer than this and a message is a document, so it gets a disclosure. */
+const DOC_CHARS = 1200;
+
+/** Roughly, and in the unit the bound is written in. Characters, not bytes. */
+function kib(chars: number): string {
+  return chars < 1024 ? `${chars} chars` : `${Math.round(chars / 1024)} KiB`;
 }
 
 /** The gateway stores tool results whole; a log line is not where to read one. */

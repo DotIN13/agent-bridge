@@ -44,9 +44,18 @@ MONITORS_DIR = "monitors"
 #: and a delegate that writes one out of habit is simply heard.
 STATUS_FILE = "status"
 
-#: One report must not be able to exhaust memory or the event row it lands in.
-#: `ab-notify` refuses a larger `--msg-file` up front for the same reason.
+#: One milestone must not be able to exhaust memory or the event row it lands
+#: in. `ab-notify` refuses a larger `--msg-file` up front for the same reason.
 MAX_FILE_BYTES = 64 * 1024
+
+#: `report.md` gets its own, larger bound, because it is the *deliverable* and
+#: not a note about one: it is what `ab job <ref>` prints, which is to say what
+#: a caller reads back into its own context. Truncating a milestone costs the
+#: tail of a progress line; truncating a report costs the answer. Big enough for
+#: a real document with its tables, diffs and log excerpts quoted in full, and
+#: still a bound, because a delegate that pipes a training log in here should
+#: meet a ceiling before the database does.
+MAX_REPORT_BYTES = 2 * 1024 * 1024
 
 #: A job dir with more files than this is a loop, not a report. The excess is
 #: ignored, and the overflow itself is reported as one event.
@@ -58,7 +67,7 @@ class Drop:
     """One file found in a job dir, ready to become a `message` event."""
 
     rel: str            # path relative to the job dir, POSIX separators
-    text: str           # content, truncated to MAX_FILE_BYTES
+    text: str           # content, truncated to this file's own bound
     digest: str         # sha256 of the full bytes, so a rewrite is a new drop
     oversized: bool
 
@@ -151,16 +160,30 @@ def _candidates(root: Path) -> list[str]:
     return names
 
 
+#: Read size for the digest pass over the tail. A buffer, not a bound.
+_DIGEST_CHUNK = 64 * 1024
+
+
+def _limit_for(rel: str) -> int:
+    """How much of one file is kept: the report's bound, or a milestone's.
+
+    A function of the path rather than a field on the `Drop`, so the truncation
+    and the "exceeded N bytes" note describing it cannot come to disagree.
+    """
+    return MAX_REPORT_BYTES if rel == REPORT_FILE else MAX_FILE_BYTES
+
+
 def _read(root: Path, rel: str) -> Drop | None:
     path = root / rel
+    limit = _limit_for(rel)
     try:
         with open(path, "rb") as stream:
-            head = stream.read(MAX_FILE_BYTES + 1)
+            head = stream.read(limit + 1)
             digest = hashlib.sha256()
             digest.update(head)
-            oversized = len(head) > MAX_FILE_BYTES
+            oversized = len(head) > limit
             while True:
-                chunk = stream.read(MAX_FILE_BYTES)
+                chunk = stream.read(_DIGEST_CHUNK)
                 if not chunk:
                     break
                 digest.update(chunk)
@@ -171,7 +194,7 @@ def _read(root: Path, rel: str) -> Drop | None:
         return Drop(rel=rel, text=f"could not be read: {exc}",
                     digest=hashlib.sha256(str(exc).encode()).hexdigest(),
                     oversized=False)
-    text = head[:MAX_FILE_BYTES].decode("utf-8", errors="replace")
+    text = head[:limit].decode("utf-8", errors="replace")
     return Drop(rel=rel, text=text.strip() if rel == STATUS_FILE else text,
                 digest=digest.hexdigest(), oversized=oversized)
 
@@ -185,13 +208,15 @@ def read_report(job_dir: str | os.PathLike[str]) -> str | None:
     they answer different questions -- the event stream says *when* the work
     reported, and the row says *what the answer was* without reading a stream.
 
-    Bounded by the same `MAX_FILE_BYTES` as ingestion. A report is a document,
-    not an artifact store: the paths it names are how the big things travel.
+    Bounded by `MAX_REPORT_BYTES`, the same bound ingestion applies to this one
+    file, so the row and the event carry the same text. A report is still a
+    document rather than an artifact store: the paths it names are how the big
+    things travel.
     """
     report = Path(job_dir) / REPORT_FILE
     try:
         with open(report, "rb") as stream:
-            head = stream.read(MAX_FILE_BYTES)
+            head = stream.read(MAX_REPORT_BYTES)
     except OSError:
         return None
     text = head.decode("utf-8", errors="replace").strip()
@@ -273,6 +298,7 @@ def event_data(drop: Drop) -> dict:
     """
     data: dict = {"source": "job_dir", "file": drop.rel}
     if drop.oversized:
-        data["error"] = f"{drop.rel} exceeded {MAX_FILE_BYTES} bytes; truncated"
+        data["error"] = (f"{drop.rel} exceeded {_limit_for(drop.rel)} bytes; "
+                         "truncated")
     data["msg"] = drop.text
     return data

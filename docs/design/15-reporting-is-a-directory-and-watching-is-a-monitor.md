@@ -114,7 +114,8 @@ watching. `ab monitor` shows that word; the event's report-shaped `status` reads
   follower streaming since the turn started sees a milestone without
   reconnecting.
 - **Nothing reaps `reports/`.** One directory per job, holding text. Bounded per
-  job (`MAX_FILES`, `MAX_FILE_BYTES`) and not bounded across jobs.
+  job (`MAX_FILES`, `MAX_FILE_BYTES`, and `MAX_REPORT_BYTES` for `report.md`
+  alone — design/23) and not bounded across jobs.
 - **`ab-notify` is a milestone reporter now.** It shipped in this change as a
   shim translating its old flags into job-dir writes, and was rewritten a commit
   later to do one thing: put a note in `progress/`. Dropping `--status` is what

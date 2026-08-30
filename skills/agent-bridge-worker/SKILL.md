@@ -43,8 +43,9 @@ The preliminary report is what lets the job finish instead of holding a slot for
 
 ## Your report is the caller's only window
 
-`$AB_JOB_DIR/report.md` is stored whole and returned by `ab job <ref>`. Write it
-as if it is the only thing they will read, because it is.
+`$AB_JOB_DIR/report.md` is stored whole — up to 2 MiB, so quote your evidence
+rather than rationing it — and returned by `ab job <ref>`. Write it as if it is
+the only thing they will read, because it is.
 
 - Answer in plain language, start with the problem/goal, then the steps you took, then the result. Include any numbers, paths, or identifiers that are relevant to the caller's next turn.
 - **Self-contained.** Assume they read only this file, with no transcript. Spell out identifiers in full; never "the file above".
@@ -75,7 +76,7 @@ cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"                 # the result
 
 - **It is what `ab job <ref>` prints.** The file's content is stored as the job's result and lands on the event stream, so the caller reads it without fetching anything. Your final message is on the stream too, but the row's answer comes from the file.
 - **Say it once, in the file.** Restating your findings in your closing message is how the two come to disagree, and the file is the one that is kept. End your turn with where the report is and anything the caller must act on — not with the report again.
-- **Put the whole content in it.** A path only you can open is not evidence. Absolute paths to the artifacts belong in the report; the artifacts do not.
+- **Put the whole content in it.** A path only you can open is not evidence. Absolute paths to the artifacts belong in the report; the artifacts do not — 2 MiB is room for tables, diffs and log excerpts, not for a log.
 - **Writing it is what finishes the job**, together with your turn ending. Until both have happened the row reads `waiting`, your process stays alive, and you can still be steered — which is also your chance to write the report if you forgot.
 - **If you never write one, the job fails** with `report_missing` after the gateway's grace window (30 minutes by default). Your turn's last message is kept either way, but the row says the deliverable is absent, which is the honest reading.
 - **When the work outlives your turn, the report is preliminary**: what you submitted, the monitor's label, and where the results will appear. It still has to exist before you end your turn.

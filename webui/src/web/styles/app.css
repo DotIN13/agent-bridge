@@ -670,6 +670,26 @@
   overflow-wrap: anywhere;
 }
 
+/* A message long enough to be a document: collapsed, and bounded when open. */
+[data-slot="event-doc"] {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: calc(12px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+}
+[data-slot="event-doc"] summary {
+  cursor: pointer;
+  color: var(--v2-text-text-faint);
+  font-size: calc(11px * var(--font-scale));
+}
+[data-slot="event-doc"] p {
+  margin-top: 6px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 [data-slot="steer"] {
   display: flex;
   align-items: center;

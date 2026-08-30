@@ -190,7 +190,9 @@ overwrites its own note instead of piling up duplicates.
 `report.md` is the **result**: its content is stored in the job row, so
 `ab job <ref>` prints it, and it lands on the event stream as well. A delegate
 therefore states its findings once, in the file, rather than in both the file and
-its closing message — where the two can disagree and only one is kept.
+its closing message — where the two can disagree and only one is kept. It is kept
+whole up to 2 MiB — a document's bound, not a milestone's, because this is the
+text a caller reads back into its own context.
 Compute nodes write here too, which is why the data dir belongs on the shared
 filesystem.
 

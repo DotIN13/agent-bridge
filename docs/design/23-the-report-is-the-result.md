@@ -59,8 +59,26 @@ from the report and then overwritten a few lines later by
 `result` key is no longer restated there, and a comment says why — it is exactly
 the kind of line somebody re-adds for symmetry.
 
-Bounded by ingestion's own `MAX_FILE_BYTES` (64 KiB). A report is a document; the
-paths it names are how the big things travel.
+### Two bounds, because the report is not a note
+
+`report.md` is read to `MAX_REPORT_BYTES` (2 MiB) and everything else in the job
+dir to `MAX_FILE_BYTES` (64 KiB). It shared the smaller one at first, which was
+the wrong bound for what the file had just become: a milestone is a line in a
+log, and losing its tail costs a sentence, but the report is what the caller
+reads back into its own context, and losing its tail costs the answer — silently,
+in the one place a reader has no way to notice, since a truncated document ends
+looking like a document.
+
+Both copies get the same limit, deliberately: the `result` column and the
+`message` event carry identical text, and a bounded row beside a whole event
+would reintroduce the two-answers problem this whole change exists to remove.
+
+Still bounded, at a number chosen for a real document with its tables, diffs and
+log excerpts quoted in full. `report.md` fed from a training log is a mistake
+rather than a large report, and it should meet a ceiling before the database
+does; the truncation note on the event says which happened. Beyond that, a report
+is a document and not an artifact store — the paths it names are how the big
+things travel.
 
 Writing the API-level test found a third thing, which is why it was worth writing
 one: reads already ingested the job dir but did not settle the row, so
@@ -81,7 +99,8 @@ that the `echo` form has three requirements the shell does not enforce:
 - the name has to **sort** in the order things happened (ingestion is by name,
   not mtime, because mtime on a shared filesystem is the less trustworthy of the
   two);
-- the content has to stay under **64 KiB**, or the gateway truncates it;
+- the content has to stay under **64 KiB**, or the gateway truncates it — a
+  milestone's bound, not the report's;
 - a retried step wants the **same id** so its second note overwrites the first
   instead of piling up — dedup is by path *and* digest.
 
@@ -106,7 +125,13 @@ happy path. In `test_waiting.py`:
 - a report landing during `waiting` replaces the interim answer the turn saved;
 - the report is a `message` event *as well as* the result.
 
-And in `test_job_dir.py`, one through HTTP rather than the db, because the claim
-is about the answer a caller gets: `GET /v1/jobs/<id>` returns `succeeded` with
+Two more in `test_job_dir.py` for the bounds, since a bound nobody measures is a
+comment: a report eight times a milestone's limit comes back whole from *both*
+the event and `read_report`, and one past 2 MiB is truncated to exactly that with
+the limit named in the note. The milestone truncation test moved to a
+`progress/` file, which is what it was always about.
+
+And one through HTTP rather than the db, because the claim is about the answer a
+caller gets: `GET /v1/jobs/<id>` returns `succeeded` with
 the report as `result`, and the same report appears exactly once on the event
 page. That is the test that found the read-path gap above.
