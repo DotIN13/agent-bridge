@@ -301,9 +301,18 @@ does not claim that a vanished process is still live.
 ### `POST /v1/jobs/{ref}/steer`
 
 Body: `{"prompt":"new guidance"}` (legacy `text` is accepted). Returns `202`
-when the live input channel accepts it. Delivery is observed at the next tool
-boundary and later appears as a `steer` event. A `202` is not exactly-once model
-execution. Unsupported adapters/modes and terminal jobs return a typed `409`.
+when the live input channel accepts it, with a `note` describing what that
+backend does with it — the two are not the same mechanism:
+
+| Backend | Channel | Delivery |
+| --- | --- | --- |
+| claude, `direct` | the child's stdin, `--input-format stream-json` | taken at the next tool boundary; the `steer` event is the agent's own echo |
+| opencode, `direct` + `steering` | `POST /api/session/<id>/prompt` on the server the run is attached to, `delivery: "steer"` | admitted synchronously, then promoted into the running turn; the `steer` event carries the receipt (`admitted_seq`, `promoted_seq`) |
+
+A `202` is not exactly-once model execution. Unsupported adapters/modes and
+terminal jobs return a typed `409` whose message says what is missing — an
+opencode job that ran unattached (see `[agents.*] steering` in
+`config.example.toml`) names the reason it did.
 
 ### `POST /v1/jobs/{ref}/cancel`
 

@@ -93,8 +93,10 @@ ab submit -F new.md                              # genuinely fresh subject
 
 `--no-fork` requires an idle session. The gateway refuses a busy target with a
 typed `session_busy` error containing the holding job and steer reference.
-`steer` reaches a running turn at its next tool boundary; accepted delivery is
-not a strict exactly-once model-action guarantee.
+`steer` reaches a running turn — through the child's stdin on claude, and
+through `delivery: "steer"` on the attached server's API on opencode — and the
+`202` carries a `note` saying which. Accepted delivery is not a strict
+exactly-once model-action guarantee.
 
 Use `ab agents --output json` to discover which adapter/mode supports sessions,
 forking, in-place resume, steering, thinking, and attachments. `/v1/models` and

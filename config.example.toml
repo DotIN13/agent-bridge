@@ -125,6 +125,32 @@ allowed_dirs = [
 timeout_sec = 0            # 0 (or negative) = no wall-clock limit; jobs run unbounded
 max_sessions_in_index = 40 # how many recent sessions to show in /v1/sessions
 
+# Make opencode jobs reachable mid-turn, so `ab steer` works against them.
+#
+# claude is steerable for free: it reads JSON lines from the stdin the adapter
+# already opens. `opencode run` reads its whole prompt from stdin and closes it
+# before the turn starts, and the server it talks to is in-process with no
+# listener — so the only way in is opencode's own steering verb,
+# POST /api/session/<id>/prompt {"delivery": "steer"}, and that needs a port.
+#
+# With this on, each opencode job gets a private `opencode serve` on 127.0.0.1
+# and runs with --attach. What that costs:
+#   * one extra process per job, and a second or two of startup;
+#   * opencode's --attach attachment limits — a directory attachment is refused
+#     and a file over 10 MiB is refused, because --attach cannot assume the
+#     server shares a filesystem and inlines file content instead. A job whose
+#     attachments would trip that runs unattached (and unsteerable) rather than
+#     failing, and says so on its own event stream.
+# Turn it off and opencode jobs behave exactly as they did before: one process,
+# no limits, `ab steer` answers 409 with the reason.
+steering = true
+# Or attach to a server you already run, instead of one per job:
+#   server_url = "http://127.0.0.1:4096"
+# Its password is read from the *gateway's* environment as
+# OPENCODE_SERVER_PASSWORD — never from this file, same rule as the auth token.
+# `opencode serve` with no password serves unauthenticated; on a shared host
+# that is a shell for anyone who can reach the port.
+
 # opencode/deepseek auth lives in opencode's own store (~/.local/share/opencode),
 # not an env var, so nothing extra is needed here. Models opencode advertises;
 # deepseek-chat and deepseek-reasoner are sunset. See `opencode models deepseek`

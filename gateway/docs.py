@@ -97,9 +97,11 @@ under the same key is idempotency_conflict.
 3. Need its history but work branches -> POST /v1/jobs with session (forks).
 4. Genuinely new subject -> omit session.
 
-Steer 202 means the live input channel accepted the message; the model sees it
-at its next tool boundary. Strict exactly-once steering is not promised. Watch
-for the `steer` event to see where it landed.
+Steer 202 means the live input channel accepted the message; the response's
+`note` says what that backend then does with it (claude takes it at its next
+tool boundary; opencode admits it and promotes it into the running turn).
+Strict exactly-once steering is not promised. Watch for the `steer` event to see
+where it landed.
 
 POST /v1/jobs/{{ref}}/cancel interrupts first (SIGINT/ESC semantics), then
 escalates after the grace period. Repeating an already-achieved cancellation is

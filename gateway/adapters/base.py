@@ -110,19 +110,41 @@ class SteerError(RuntimeError):
     """A steering message could not be delivered to a running agent."""
 
 
+#: What a caller is told when a job never had a channel at all. Both backends
+#: named, because "no input channel" on its own reads like a bug rather than a
+#: configuration the operator chose.
+NO_CHANNEL = ("this job has no input channel — steering needs claude in "
+              "'direct' dispatch mode, or opencode with an attachable server "
+              "([agents.<name>] steering = true)")
+
+#: When a steer lands, on a pipe. Verified on the CLI: a turn ten `sleep 6`
+#: calls deep took the message when the in-flight call returned (docs/design/02).
+TOOL_BOUNDARY = "the agent picks this up at its next tool boundary"
+
+
 class Steering:
     """A live input channel into a turn that is already running.
 
-    `--input-format stream-json` is the only mechanism that reaches a turn in
-    progress: the agent reads JSON lines from its stdin and picks them up at
-    the next tool boundary. `--resume` cannot do this — it starts a *second*
-    agent on a stale copy of the transcript, and one of the two branches is
-    then discarded (docs/todo/01).
+    Two backends reach a running turn, and they do not reach it the same way.
 
-    The adapter binds the child's stdin here and the worker publishes the
-    handle, so an HTTP steer can find the right process. A handle that was
-    never bound means the backend has no such channel — the caller is told
-    that rather than having the message silently dropped.
+    **A pipe (claude).** `--input-format stream-json` keeps the child reading
+    JSON lines for the life of the turn, and it picks a message up at the next
+    tool boundary. `--resume` cannot do this — it starts a *second* agent on a
+    stale copy of the transcript, and one of the two branches is then discarded
+    (docs/design/01). The adapter binds the child's stdin with `bind`.
+
+    **HTTP (opencode).** `opencode run` reads its whole prompt from stdin and
+    closes it before the turn starts, so there is no pipe to write to. The turn
+    is reachable only through the server the run is attached to, as
+    `POST /api/session/<id>/prompt` with `delivery: "steer"` — opencode's own
+    word for the same idea, and its API distinguishes `steer` (into the running
+    turn) from `queue` (after it). Such an adapter binds two callables with
+    `bind_remote` instead of a pipe (docs/design/18).
+
+    Either way the worker publishes this handle by job id, so an HTTP steer can
+    find the right run. A handle that was never bound means the backend has no
+    such channel — the caller is told why, rather than having the message
+    silently dropped.
     """
 
     _ids = itertools.count(1)
@@ -130,6 +152,10 @@ class Steering:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stdin = None
+        self._send = None            # remote delivery, when there is no pipe
+        self._interrupt = None
+        self._need = NO_CHANNEL
+        self._note = TOOL_BOUNDARY
         self._open = False
         self._bound = False
 
@@ -139,23 +165,61 @@ class Steering:
             self._open = stdin is not None
             self._bound = self._bound or self._open
 
+    def bind_remote(self, send, interrupt=None, note: str = "") -> None:
+        """Bind a channel that is not a pipe.
+
+        `send(text)` delivers one message into the running turn and raises
+        `SteerError` if it cannot; `interrupt()` stops the turn. Both are the
+        adapter's, because only the adapter knows the url, the credential and
+        the session id — the last of which it usually learns *during* the run,
+        which is why this takes callables rather than an address.
+        """
+        with self._lock:
+            self._send, self._interrupt = send, interrupt
+            self._open = send is not None
+            self._bound = self._bound or self._open
+            if note:
+                self._note = note
+
+    def unavailable(self, reason: str) -> None:
+        """Record why this job has no channel, when the adapter knows.
+
+        Better than the generic answer: "this job ran without an opencode
+        server because one of its attachments is a directory" tells the caller
+        what to change, where "no input channel" only tells them to give up.
+        """
+        with self._lock:
+            self._need = reason
+
     def close(self) -> None:
-        """Stop accepting input, which is also what ends the run.
+        """Stop accepting input, which on a pipe is also what ends the run.
 
         In streaming-input mode the agent stays alive waiting for more work
         after it answers, so closing stdin is the signal that the job is over.
         Idempotent — the adapter closes on the result record and again in its
         `finally`, because a child still holding an open stdin never exits and
         `proc.wait()` would block forever.
+
+        A remote channel has nothing to close: the run ends when the process
+        ends. This only stops accepting steers for it.
         """
         with self._lock:
             self._open = False
             stdin, self._stdin = self._stdin, None
+            self._send = self._interrupt = None
         if stdin is not None:
             try:
                 stdin.close()
             except (OSError, ValueError):
                 pass
+
+    @property
+    def note(self) -> str:
+        """What a caller should expect of a delivered steer, in this backend's
+        terms. The two are close but not identical, and a response that says
+        "at its next tool boundary" about opencode is describing claude."""
+        with self._lock:
+            return self._note
 
     @property
     def available(self) -> bool:
@@ -167,56 +231,70 @@ class Steering:
         with self._lock:
             if self._open:
                 return ""
-            if self._bound:
-                return ("the agent's turn has already ended, so there is "
-                        "nothing left to steer")
-            return ("this job has no input channel — steering needs the claude "
-                    "adapter in 'direct' dispatch mode")
+            return self._unavailable_reason_locked()
 
     def send(self, text: str) -> None:
-        """Queue a user message into the running turn."""
-        self._write({
-            "type": "user",
-            "message": {"role": "user",
-                        "content": [{"type": "text", "text": text}]},
-            "parent_tool_use_id": None,
-        })
+        """Deliver a user message into the running turn."""
+        # The lock is held across a remote delivery on purpose: it serialises
+        # two concurrent steers into the order they were accepted, and the
+        # alternative -- releasing it around the call -- lets `close()` land
+        # mid-flight and report a channel that is still being written to.
+        with self._lock:
+            if not self._open:
+                raise SteerError(self._unavailable_reason_locked())
+            if self._send is not None:
+                self._send(text)
+                return
+            self._write_locked({
+                "type": "user",
+                "message": {"role": "user",
+                            "content": [{"type": "text", "text": text}]},
+                "parent_tool_use_id": None,
+            })
 
     def interrupt(self) -> None:
         """Stop the current turn in-band.
 
-        The agent acknowledges this on stdout within milliseconds and reports
-        what was still queued, which the signal ladder in `interrupt_group`
-        cannot do. Kept separate from `Cancellation` for now: cancel still goes
-        through signals, which also work on a child that has stopped reading.
+        On a pipe the agent acknowledges this on stdout within milliseconds and
+        reports what was still queued, which the signal ladder in
+        `interrupt_group` cannot do. Kept separate from `Cancellation` for now:
+        cancel still goes through signals, which also work on a child that has
+        stopped reading.
         """
-        self._write({
-            "type": "control_request",
-            "request_id": f"ab-{next(self._ids)}",
-            "request": {"subtype": "interrupt"},
-        })
-
-    def _write(self, obj: dict) -> None:
         with self._lock:
-            if not self._open or self._stdin is None:
+            if not self._open:
                 raise SteerError(self._unavailable_reason_locked())
-            try:
-                self._stdin.write(json.dumps(obj) + "\n")
-                self._stdin.flush()
-            except (OSError, ValueError) as e:
-                # A broken or closed pipe means the child stopped reading. That
-                # is the most reliable liveness signal available — better than
-                # the job row, which can sit at `running` after the agent died.
-                self._open = False
-                raise SteerError(
-                    f"the agent is no longer accepting input ({e}); its job row "
-                    f"may be stale") from e
+            if self._send is not None:
+                if self._interrupt is None:
+                    raise SteerError("this backend's steering channel cannot "
+                                     "interrupt a turn")
+                self._interrupt()
+                return
+            self._write_locked({
+                "type": "control_request",
+                "request_id": f"ab-{next(self._ids)}",
+                "request": {"subtype": "interrupt"},
+            })
+
+    def _write_locked(self, obj: dict) -> None:
+        if self._stdin is None:
+            raise SteerError(self._unavailable_reason_locked())
+        try:
+            self._stdin.write(json.dumps(obj) + "\n")
+            self._stdin.flush()
+        except (OSError, ValueError) as e:
+            # A broken or closed pipe means the child stopped reading. That
+            # is the most reliable liveness signal available — better than
+            # the job row, which can sit at `running` after the agent died.
+            self._open = False
+            raise SteerError(
+                f"the agent is no longer accepting input ({e}); its job row "
+                f"may be stale") from e
 
     def _unavailable_reason_locked(self) -> str:
         if self._bound:
             return "the agent's turn has already ended, so there is nothing left to steer"
-        return ("this job has no input channel — steering needs the claude "
-                "adapter in 'direct' dispatch mode")
+        return self._need
 
 
 def interrupt_group(proc, grace_sec: float = INTERRUPT_GRACE_SEC) -> None:

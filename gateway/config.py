@@ -87,6 +87,19 @@ class AgentConfig:
     max_sessions_in_index: int
     models: tuple[str, ...] = ()
 
+    #: Make this backend's jobs reachable mid-turn. Only the opencode adapter
+    #: reads it: claude is steerable through the stdin it already opens, where
+    #: opencode needs its job attached to a real HTTP server, which costs a
+    #: second process per job and opencode's own attachment limits (a directory
+    #: is refused, a file over 10 MiB is refused). See docs/design/18.
+    steering: bool = True
+
+    #: Attach to an opencode server the operator already runs, instead of
+    #: starting one per job. Its password is read from the *gateway's*
+    #: environment (`OPENCODE_SERVER_PASSWORD`), never from this file, for the
+    #: same reason the auth token is not in it.
+    server_url: str = ""
+
     def resolve_cwd(self, requested: str | None) -> str:
         """Return an allowed absolute cwd, or raise ValueError."""
         target = Path(requested).expanduser() if requested else Path(self.default_cwd)
@@ -222,6 +235,8 @@ def load(path: str | os.PathLike | None) -> Config:
             timeout_sec=int(a.get("timeout_sec", 0)),
             max_sessions_in_index=int(a.get("max_sessions_in_index", 40)),
             models=_load_models(a.get("models", []), name),
+            steering=bool(a.get("steering", True)),
+            server_url=str(a.get("server_url", "")).rstrip("/"),
         )
 
     cl = raw.get("cluster", {})

@@ -13,22 +13,50 @@ like Claude's ~/.claude/projects/*/*.jsonl.
 Supported surface: dispatch_mode = "direct" only. The dispatcher modes
 (agent_exec / select_then_exec) depend on Claude-only flags (--tools,
 --json-schema, structured output) and are rejected rather than half-supported.
+
+**Steering** works differently here than for claude, because opencode's own
+mechanism is different. claude reads stdin for the life of the turn, so a steer
+is a JSON line into a live pipe. `opencode run` reads its whole prompt from
+stdin and closes it *before* the turn starts, and the server it talks to is
+in-process on a fetch shim (`baseUrl: "http://opencode.internal"`) with no
+listener -- so there is nothing to write to and nothing to connect to. What
+opencode has instead is a first-class steering verb on its HTTP API:
+
+    POST /api/session/<id>/prompt  {"prompt": {"text": ...},
+                                    "delivery": "steer" | "queue"}
+
+`steer` goes into the turn that is already running; `queue` waits for it to go
+idle. `POST /api/session/<id>/interrupt` stops the turn, and the response to a
+prompt is a real receipt (`admittedSeq`, and `promotedSeq` once it is taken)
+rather than an echo we have to wait for.
+
+Reaching that API means the run has to be attached to a server with a port. So
+a steerable job gets a private `opencode serve` on loopback, and runs with
+`--attach`. See docs/design/18 for the alternatives and what attaching costs.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import re
+import secrets
 import sqlite3
 import subprocess
 import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
 from ..config import AgentConfig
 from ..sessions import (DirInfo, SessionInfo, SessionPage, _cursor_decode,
                         _cursor_encode, _norm)
-from .base import (Event, JobSpec, RunResult, child_env, interrupt_group,
-                   job_dir_note, resume_cwd)
+from .base import (Event, JobSpec, RunResult, SteerError, Steering,
+                   child_env, interrupt_group, job_dir_note, resume_cwd)
 
 _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
 
@@ -42,17 +70,117 @@ _AUTO_PERMISSIONS = (None, "", "auto", "bypassPermissions", "acceptEdits")
 # 1522 sessions rather than 3. Check before changing this predicate.
 _NON_EMPTY = "EXISTS (SELECT 1 FROM message m WHERE m.session_id = session.id)"
 
+#: `--attach` cannot assume the server shares a filesystem with the client, so
+#: `opencode run` inlines each attached file as a data: url, caps it at 10 MiB,
+#: and refuses a directory outright. Here the two *are* the same host, but the
+#: check is opencode's and it exits non-zero before the turn starts -- so a job
+#: whose attachments would trip it runs unattached, and unsteerable, rather
+#: than failing.
+ATTACH_MAX_BYTES = 10 * 1024 * 1024
+
+#: `opencode serve` announces itself on stdout: "opencode server listening on
+#: http://127.0.0.1:41234". Parsed rather than assumed, because `--port 0` means
+#: the port is the kernel's choice -- and asking for a fixed one would collide
+#: with the operator's own server, or with the next job.
+_LISTENING = re.compile(r"listening on\s+(https?://[^\s]+)")
+
+#: A server that has not announced a port by now is not going to. Generous
+#: because the first `opencode serve` on a cold node loads providers and config;
+#: a job that waits this long and gets nothing simply runs unattached.
+SERVE_WAIT_SEC = 30.0
+
+#: The username opencode's basic auth defaults to when only a password is set
+#: (OPENCODE_SERVER_USERNAME, `server/auth.ts`).
+_SERVE_USER = "opencode"
+
+
+class _Server:
+    """An `opencode serve` this job can reach, and the credential for it.
+
+    Either one the adapter started for this job (`proc` set, stopped when the
+    run ends) or the operator's own, named in `[agents.<name>] server_url`.
+    """
+
+    def __init__(self, base: str, password: str,
+                 proc: subprocess.Popen | None = None) -> None:
+        self.base = base.rstrip("/")
+        self.password = password
+        self.proc = proc
+
+    def headers(self, cwd: str = "") -> dict[str, str]:
+        out = {"Content-Type": "application/json"}
+        if self.password:
+            raw = f"{_SERVE_USER}:{self.password}".encode()
+            out["Authorization"] = f"Basic {base64.b64encode(raw).decode()}"
+        if cwd:
+            # The server loads one instance per request from this header, and
+            # expects it percent-encoded (`sdk/v2/client.js`).
+            out["x-opencode-directory"] = urllib.parse.quote(cwd, safe="")
+        return out
+
+    def stop(self) -> None:
+        """Wind the server down, if it is ours to wind down."""
+        if self.proc is None:
+            return
+        interrupt_group(self.proc)
+
+
+def _request(server: _Server, method: str, path: str, *, body=None,
+             cwd: str = "", timeout: float = 15.0) -> dict:
+    """One call to an opencode server, decoded.
+
+    Proxies are explicitly disabled: this is a loopback address, and an ambient
+    `HTTPS_PROXY` in the gateway's environment -- normal on a managed host --
+    would otherwise swallow every steer.
+    """
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(server.base + path, data=data, method=method,
+                                 headers=server.headers(cwd))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else {}
+
+
+def _http_reason(exc: urllib.error.HTTPError) -> str:
+    """What the server said, in the words it used.
+
+    opencode answers with a tagged error (`_tag`, `message`) -- a 409
+    `ConflictError` on a session that cannot take the message, a 404
+    `SessionNotFoundError` on one that has gone. Passing that through beats
+    "steering failed", which tells the caller nothing about which it was.
+    """
+    try:
+        payload = json.loads(exc.read().decode("utf-8", errors="replace"))
+    except Exception:
+        payload = {}
+    tag = payload.get("_tag") or ""
+    message = payload.get("message") or ""
+    if tag or message:
+        return f"opencode refused the steer: {tag or exc.code} {message}".strip()
+    return f"opencode refused the steer with HTTP {exc.code}"
+
 
 class OpenCodeAdapter:
     def __init__(self, cfg: AgentConfig) -> None:
         self.cfg = cfg
+
+    @property
+    def steerable(self) -> bool:
+        """Is this backend configured to make its jobs reachable mid-turn?
+
+        A claim about the configuration, not about any one job: a job whose
+        server fails to start, or whose attachments `--attach` would refuse,
+        runs unsteerable and says so on its own stream.
+        """
+        return bool(self.cfg.steering)
 
     def capabilities(self) -> dict:
         return {
             "sessions": True,
             "fork": True,
             "in_place_resume": True,
-            "steering": False,
+            "steering": self.cfg.dispatch_mode == "direct" and self.steerable,
             "thinking_events": True,
             "file_attachments": True,
             "permission_modes": ["auto", "acceptEdits"],
@@ -216,12 +344,168 @@ class OpenCodeAdapter:
                           self._session_cwd(spec.requested_session),
                           spec.cwd, emit)
 
+    # -- the steering channel ---------------------------------------------
+    def _server_for(self, spec: JobSpec, cwd: str,
+                    emit) -> tuple[_Server | None, str]:
+        """The server this job will attach to, or `None` and why not.
+
+        Every "no" here is a job that still runs -- unattached, unsteerable,
+        and with a reason on its own event stream. Steering is worth a second
+        process; it is not worth failing work over.
+        """
+        if not self.steerable:
+            return None, (f"steering is off for this backend: set "
+                          f"[agents.{self.cfg.name}] steering = true")
+        blocked = _unattachable(spec.files)
+        if blocked:
+            return None, (f"this job runs unattached because {blocked}, and an "
+                          f"unattached `opencode run` has no port to reach")
+        if self.cfg.server_url:
+            # The operator's own server. Its password comes from the gateway's
+            # environment, never from the config file -- same rule the auth
+            # token follows.
+            server = _Server(self.cfg.server_url,
+                             os.environ.get("OPENCODE_SERVER_PASSWORD", ""))
+            if not _healthy(server):
+                return None, (f"the configured opencode server at "
+                              f"{server.base} did not answer /api/health, so "
+                              f"this job ran on its own in-process one")
+            return server, ""
+        server = self._spawn_server(emit)
+        if server is None:
+            return None, ("no opencode server could be started for this job, "
+                          "so there is nothing to steer through; see the log "
+                          "events for what it said")
+        return server, ""
+
+    def _spawn_server(self, emit) -> _Server | None:
+        """Start a private `opencode serve` on loopback for one job.
+
+        Private rather than shared: its lifetime is the job's, so a crash or a
+        stuck turn cannot take the next job's steering with it, and there is no
+        long-lived listener to secure between runs. The password is generated
+        per job and passed in the environment -- `opencode serve` prints a
+        warning and serves *unauthenticated* if it finds none.
+        """
+        password = secrets.token_urlsafe(24)
+        args = [self.cfg.bin, "serve", "--hostname", "127.0.0.1", "--port", "0"]
+        env = dict(os.environ, OPENCODE_SERVER_PASSWORD=password)
+        kw: dict = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, bufsize=1, env=env)
+        if os.name == "nt":
+            kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kw["shell"] = True
+        else:
+            kw["start_new_session"] = True
+        try:
+            proc = subprocess.Popen(args, **kw)
+        except OSError as exc:
+            emit(Event("log", {"opencode_server": "could not start",
+                               "reason": str(exc)}))
+            return None
+        url, tail = _await_listening(proc, SERVE_WAIT_SEC)
+        if not url:
+            emit(Event("log", {"opencode_server": "never announced a port",
+                               "waited_sec": SERVE_WAIT_SEC,
+                               "output": tail[-2000:]}))
+            interrupt_group(proc)
+            return None
+        server = _Server(url, password, proc)
+        if not _healthy(server):
+            # `--attach` would still work against a server without the v2 API,
+            # but steering would not -- and attaching costs the attachment
+            # limits above. An unattached run is the better trade.
+            emit(Event("log", {
+                "opencode_server": "no /api/health; too old for steering",
+                "server": server.base}))
+            server.stop()
+            return None
+        return server
+
+    def _bind_steering(self, steer: Steering, server: _Server, cwd: str,
+                       res: RunResult, emit) -> None:
+        """Wire `POST /v1/jobs/<id>/steer` to this run's opencode session.
+
+        The session id is read at send time, not now: on a fresh session
+        opencode only reveals it in the first records it streams back, so a
+        steer that arrives in the first second has to say "not yet" rather than
+        address the wrong session.
+        """
+        def session() -> str:
+            sid = res.session
+            if not sid:
+                raise SteerError(
+                    "opencode has not reported its session id yet — the turn "
+                    "is seconds old; try again")
+            return urllib.parse.quote(sid, safe="")
+
+        def send(text: str) -> None:
+            try:
+                out = _request(server, "POST",
+                               f"/api/session/{session()}/prompt",
+                               body={"prompt": {"text": text},
+                                     "delivery": "steer"}, cwd=cwd)
+            except urllib.error.HTTPError as exc:
+                raise SteerError(_http_reason(exc)) from exc
+            except (OSError, urllib.error.URLError) as exc:
+                raise SteerError(
+                    f"opencode's server is not answering ({exc}); this job's "
+                    f"row may be stale") from exc
+            # The receipt is the response, not an echo. claude logs a steer when
+            # the agent replays it on stdout, which is the moment it was taken;
+            # opencode admits the input synchronously and promotes it into the
+            # running turn afterwards, so `admitted_seq` is "we have it" and
+            # `promoted_seq` is "the turn has it".
+            admitted = (out or {}).get("data") or {}
+            emit(Event("steer", {
+                "text": text,
+                "source": "opencode",
+                "delivery": admitted.get("delivery") or "steer",
+                "message_id": admitted.get("id") or "",
+                "admitted_seq": admitted.get("admittedSeq"),
+                "promoted_seq": admitted.get("promotedSeq")}))
+
+        def interrupt() -> None:
+            try:
+                _request(server, "POST", f"/api/session/{session()}/interrupt",
+                         cwd=cwd)
+            except urllib.error.HTTPError as exc:
+                raise SteerError(_http_reason(exc)) from exc
+            except (OSError, urllib.error.URLError) as exc:
+                raise SteerError(f"opencode's server is not answering ({exc})") \
+                    from exc
+
+        steer.bind_remote(
+            send=send, interrupt=interrupt,
+            note=("opencode admits this into the session and promotes it into "
+                  "the running turn (delivery=steer)"))
+
     def _run_direct(self, spec: JobSpec, emit) -> RunResult:
         perm = spec.permission_mode or self.cfg.permission_mode
+        # Refused before anything is started: a bad request must not leave a
+        # server process behind it.
+        if not spec.requested_session and not spec.fork:
+            res = RunResult(ok=False)
+            res.error = "fork=false requires a session to resume"
+            emit(Event("error", {"message": res.error}))
+            return res
         # A named session runs in its own directory: `--dir` and the process cwd
         # must agree, or the agent's history and its filesystem disagree.
         cwd = self._cwd_for(spec, emit)
+        # Decided before the command line is built, because attaching changes
+        # it -- and a job that cannot attach must still get a working one.
+        server, no_steering = self._server_for(spec, cwd, emit)
+        try:
+            return self._launch(spec, emit, perm, cwd, server, no_steering)
+        finally:
+            if server is not None:
+                server.stop()
+
+    def _launch(self, spec: JobSpec, emit, perm: str, cwd: str,
+                server: _Server | None, no_steering: str) -> RunResult:
         args = [self.cfg.bin, "run", "-", "--format", "json", "--dir", cwd]
+        if server is not None:
+            args += ["--attach", server.base]
         # Non-interactive: without pre-approval opencode denies every tool it
         # hasn't been told to allow, which reads as a failed run. `--auto` is
         # the opencode spelling of the gateway's default bypassPermissions.
@@ -236,11 +520,6 @@ class OpenCodeAdapter:
             args += ["-s", spec.requested_session]
             if spec.fork:
                 args += ["--fork"]
-        elif not spec.fork:
-            res = RunResult(ok=False)
-            res.error = "fork=false requires a session to resume"
-            emit(Event("error", {"message": res.error}))
-            return res
         if spec.model or self.cfg.model:
             args += ["-m", spec.model or self.cfg.model]
         if spec.title:
@@ -250,9 +529,26 @@ class OpenCodeAdapter:
 
         emit(Event("status", {"stage": "direct", "agent": "opencode",
                               "session": spec.requested_session or "NEW",
-                              "fork": spec.fork}))
+                              "fork": spec.fork,
+                              "steerable": server is not None}))
         text: list[str] = []
         res = RunResult(ok=False, session=spec.requested_session)
+        # A spec without a handle is a caller that is not offering steering
+        # (some tests, and any future non-worker path); it must not be a crash.
+        steer = spec.steer if spec.steer is not None else Steering()
+        if server is not None:
+            # Bound before the child starts, so a steer that arrives in the
+            # first second is told "the session id is not known yet" rather
+            # than "this job has no channel" -- one is a retry, the other is
+            # not. The url is loopback and worth having on the stream; the
+            # password never is.
+            self._bind_steering(steer, server, cwd, res, emit)
+            emit(Event("log", {"opencode_server": server.base,
+                               "own_server": server.proc is not None}))
+        else:
+            steer.unavailable(no_steering)
+            emit(Event("log", {"steering": "unavailable",
+                               "reason": no_steering}))
         # `opencode run` has no system-prompt flag, so the reporting preamble
         # rides in front of the prompt on stdin. Weaker than a system prompt --
         # it is visible to the model as something the caller said, and a caller
@@ -261,7 +557,7 @@ class OpenCodeAdapter:
         note = job_dir_note(spec)
         prompt = f"{note}\n{spec.prompt}" if note else spec.prompt
         self._stream(args, cwd, prompt, emit, res, text,
-                     cancel=spec.cancel, env=child_env(spec))
+                     cancel=spec.cancel, env=_run_env(spec, server))
         return res
 
     # -- shared streaming -------------------------------------------------
@@ -402,6 +698,100 @@ def _session_details(con, session_id: str) -> tuple[str, str, int]:
             elif role == "assistant" and not summary:
                 summary = text[:400]
     return title, summary, len(seen)
+
+
+def _run_env(spec: JobSpec, server: _Server | None) -> dict[str, str] | None:
+    """The environment for `opencode run`, including the server credential.
+
+    The password goes here and not on the command line: argv is world-readable
+    through /proc on a shared host, which is the same reason the gateway's own
+    token is kept out of a job's environment. `opencode run --attach` reads
+    `OPENCODE_SERVER_PASSWORD` when `--password` is absent (`server/auth.ts`),
+    so nothing is lost by the move.
+    """
+    env = child_env(spec)
+    if server is None or not server.password:
+        return env
+    base = dict(env) if env is not None else dict(os.environ)
+    base["OPENCODE_SERVER_PASSWORD"] = server.password
+    base["OPENCODE_SERVER_USERNAME"] = _SERVE_USER
+    return base
+
+
+def _unattachable(files: tuple[str, ...]) -> str:
+    """Why `--attach` would refuse this job's attachments, or "".
+
+    Checked here rather than discovered from a non-zero exit: opencode fails
+    the whole run on either of these, and a job losing its work to gain
+    steering is the wrong trade.
+    """
+    for path in files:
+        try:
+            if os.path.isdir(path):
+                return f"{Path(path).name} is a directory"
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        if size > ATTACH_MAX_BYTES:
+            return (f"{Path(path).name} is larger than "
+                    f"{ATTACH_MAX_BYTES // (1024 * 1024)} MiB")
+    return ""
+
+
+def _healthy(server: _Server) -> bool:
+    """Does this server answer the v2 API?
+
+    `/api/health` is the cheapest thing only a v2 server has, and steering is a
+    v2 verb -- an older opencode accepts `--attach` and would then refuse every
+    steer, which is worse than not attaching at all.
+    """
+    try:
+        _request(server, "GET", "/api/health", timeout=5.0)
+    except Exception:
+        return False
+    return True
+
+
+def _await_listening(proc: subprocess.Popen,
+                     timeout: float) -> tuple[str, str]:
+    """Wait for `opencode serve` to announce its port; return (url, output).
+
+    Both pipes are drained for the life of the process, not just until the url
+    appears: a server whose stdout fills its pipe buffer stops serving, and a
+    64 KB buffer is a few hundred log lines. The tail is kept for the event that
+    explains a server which never came up.
+    """
+    found: list[str] = []
+    ready = threading.Event()
+    tail: deque[str] = deque(maxlen=40)
+
+    def drain(stream, watch: bool) -> None:
+        try:
+            for line in stream:
+                tail.append(line.rstrip())
+                if watch and not found:
+                    match = _LISTENING.search(line)
+                    if match:
+                        found.append(match.group(1))
+                        ready.set()
+        except (OSError, ValueError):
+            pass
+        finally:
+            if watch:
+                # stdout at EOF means the process is gone. Unblock now rather
+                # than sitting out the full timeout on a corpse.
+                ready.set()
+
+    for stream, watch in ((proc.stdout, True), (proc.stderr, False)):
+        if stream is not None:
+            threading.Thread(target=drain, args=(stream, watch),
+                             daemon=True).start()
+    ready.wait(timeout)
+    # One more beat: the url and EOF race when the server dies right after
+    # printing, and the line is the more useful of the two.
+    if not found:
+        time.sleep(0.05)
+    return (found[0] if found else ""), "\n".join(tail)
 
 
 def _under(cwd: str, base: str) -> bool:

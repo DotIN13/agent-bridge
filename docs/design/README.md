@@ -23,8 +23,18 @@ decision that looks arbitrary until you know what it was chosen against.
 | [15](15-reporting-is-a-directory-and-watching-is-a-monitor.md) | Reporting is a directory; watching is a monitor. `ab-notify` retired | after 0.3.0 |
 | [16](16-the-turn-is-the-job.md) | The turn is the job, unconditionally: `expect_report` and the `status` vocabulary removed | after 0.3.0 |
 | [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
+| [18](18-steering-opencode-is-http-not-a-pipe.md) | opencode jobs are steerable: `delivery: "steer"` on an attached server, not a pipe | after 0.3.0 |
 
 ## The load-bearing bits
+
+**18 finishes what 02 started on the other backend.** 02 built the steering
+channel around claude's streaming stdin and left opencode advertising
+`steering: False` — accurate, and never investigated. It turns out opencode has
+the better-named mechanism (`delivery: "steer"` vs `"queue"`, with a receipt),
+and the work is all in *reaching* it: `opencode run` closes stdin before the turn
+and its server has no port, so a steerable job needs `opencode serve` and
+`--attach`. Read 18 before assuming a second process per job is gratuitous, and
+for what attaching costs a job with attachments.
 
 **01 + 02 were one subject split by cost** — a docs correction that could ship
 immediately, and the behaviour behind it. 02 carries the empirical evidence that

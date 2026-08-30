@@ -840,8 +840,11 @@ def create_app(gw: Gateway) -> FastAPI:
             await run_in_threadpool(handle.send, body.prompt)
         except SteerError as exc:
             raise ApiError(409, "steering_unavailable", str(exc)) from exc
-        return {"id": jid, "delivered": True,
-                "note": "the agent picks this up at its next tool boundary"}
+        # The note is the handle's, not this route's: claude takes a steer at
+        # its next tool boundary, opencode admits it and promotes it into the
+        # running turn, and a response that says the first about the second is
+        # simply wrong.
+        return {"id": jid, "delivered": True, "note": handle.note}
 
     @app.get("/v1/jobs/{job_id}", dependencies=[auth],
              response_model=JobDetail, responses=ERROR_RESPONSES)
