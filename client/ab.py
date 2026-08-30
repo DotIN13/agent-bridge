@@ -371,12 +371,15 @@ def cmd_run(args):
 def cmd_submit(args):
     client = _client(args)
     job = client.submit(_resolve_prompt(args), **_submission(args))
-    # Wait for the session id by default: it is what makes the *next* call
-    # possible (a follow-up, a steer, a fork), and without it every caller pays
-    # a discover-the-session round trip it almost always wants. This waits for
-    # the id only, not for the work. `--no-wait` opts out.
-    if args.await_session:
-        job = client.await_session(job, timeout=args.await_timeout)
+    # Always wait for the session id. It is what makes the *next* call possible
+    # (a follow-up, a steer, a fork), and without it every caller pays a
+    # discover-the-session round trip it almost always wants.
+    #
+    # This waits for the id only, never for the work -- that is `ab run` -- and
+    # exceeding `--await-timeout` is not an error: the job keeps running and the
+    # row says `session: pending`. So there is no case in which waiting costs
+    # more than the timeout, which is why the opt-out went (design/08).
+    job = client.await_session(job, timeout=args.await_timeout)
 
     def human(value):
         # The bare id stays the whole of stdout: `id=$(ab submit -F t.md)` is a
@@ -780,10 +783,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = command("submit", "submit a prompt, waiting only for its session id")
     prompt_flags(sp); job_flags(sp)
-    sp.add_argument("--no-wait", dest="await_session", action="store_false",
-                    default=True,
-                    help="return as soon as the job is queued, without waiting "
-                         "for the session id (session_state stays 'pending')")
     sp.add_argument("--await-timeout", type=_positive_float,
                     default=AWAIT_SESSION_TIMEOUT, metavar="SECONDS",
                     help=f"how long to wait for the session id "

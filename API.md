@@ -254,8 +254,9 @@ Successful submission returns `202`, a `Location: /v1/jobs/<id>` header, and:
 echoed straight back with `session_state: "pinned"`, so continuing a thread
 needs no extra round trip. A fresh or forked run has no id yet — it first
 appears in the agent's init record — so it returns `"pending"`, and the id shows
-up as `session` on the job row once the run starts. `ab submit` waits for it by
-default (`--no-wait` opts out).
+up as `session` on the job row once the run starts. `ab submit` always waits for
+it, bounded by `--await-timeout` (default 30s); exceeding that is not an error,
+and the job keeps running with `session_state: "pending"`.
 
 #### Retry idempotency
 

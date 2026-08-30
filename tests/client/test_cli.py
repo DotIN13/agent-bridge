@@ -210,6 +210,47 @@ def test_await_session_stops_when_the_job_dies_before_init():
     assert client.calls == 1
 
 
+def test_submit_always_waits_for_the_session_id():
+    """`--no-wait` is gone: an old script gets an argparse error rather than a
+    silently different contract.
+
+    Removing it is safe because the wait was never unbounded — it stops at
+    `--await-timeout`, and running out is not a failure (see the tests above).
+    So the opt-out only ever bought back a few seconds, in exchange for a job id
+    whose session nobody could use yet. Reverses a piece of design/08."""
+    with pytest.raises(SystemExit) as exc:
+        ab.build_parser().parse_args(["submit", "hello", "--no-wait"])
+    assert exc.value.code == 2
+
+    args = ab.build_parser().parse_args(["submit", "hello"])
+    assert not hasattr(args, "await_session")
+    assert args.await_timeout == abclient.AWAIT_SESSION_TIMEOUT
+
+
+def test_submit_waits_without_being_asked_to(monkeypatch, capsys):
+    """The behaviour, not just the flag: one submit, one await, no choice."""
+    waited = []
+
+    class _Client(_AwaitClient):
+        def submit(self, prompt, **kwargs):
+            return {"id": "job-1", "status": "queued"}
+
+        def await_session(self, accepted, **kwargs):
+            waited.append(accepted["id"])
+            return {**accepted, "session": "sess-9", "session_state": "ready"}
+
+    monkeypatch.setattr(ab, "_client", lambda _args: _Client([]))
+    # A queued job is not a verdict on the work, so `submit` returns 0 rather
+    # than mapping a status to an exit code the way `run` and `wait` do.
+    assert ab.main(["submit", "do a thing"]) == 0
+    assert waited == ["job-1"]
+    out, err = capsys.readouterr()
+    # The bare id is still the whole of stdout — `id=$(ab submit …)` is a
+    # documented contract — and the session it now always carries is on stderr.
+    assert out == "job-1\n"
+    assert "session: sess-9 (ready)" in err
+
+
 def test_await_session_timeout_is_not_a_failure():
     client = _AwaitClient([{"status": "queued", "session": None}])
     out = client.await_session({"id": "job-1", "status": "queued"},
