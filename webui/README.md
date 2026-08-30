@@ -100,6 +100,35 @@ An authentication failure stops the supervisor instead of backing off. Retrying 
 two-factor host on a timer is a stream of push notifications to somebody's phone
 and a plausible route to a locked account.
 
+## Windows
+
+Untested, and the prompt dialog probably does not work there.
+
+The dashboard itself is ordinary Node and should run. What is in doubt is the one
+Windows-specific thing: ssh asking for a credential. The bundled client's askpass
+support is not dependable — `SSH_ASKPASS` was honoured by
+`OpenSSH_for_Windows_8.1p1` and is ignored by `8.6p1`
+([Win32-OpenSSH#2115](https://github.com/PowerShell/Win32-OpenSSH/issues/2115)),
+`SSH_ASKPASS_REQUIRE` was ignored outright in 8.1
+([#1726](https://github.com/PowerShell/Win32-OpenSSH/issues/1726)), and there is
+no native `ssh-askpass` on the platform. On top of that, ssh launches the helper
+with `CreateProcess`, which cannot execute the `.cmd` wrapper directly.
+
+So: nothing is lost relative to the pty version, which could not have run there
+at all (`pty` is a Unix module), but nothing is gained either. What works on
+Windows is a connection that needs no question asked:
+
+- a key in the OpenSSH agent (`ssh-add`, with the *OpenSSH Authentication Agent*
+  service running), or a passphraseless key;
+- or Git for Windows' ssh, named in full in the command —
+  `"ssh": "C:\\Program Files\\Git\\usr\\bin\\ssh.exe -N -L 8787:localhost:8787 midway5"`.
+  It is a msys2 OpenSSH build and honours `SSH_ASKPASS`; whether it will run a
+  `.cmd` through its own exec is still untested.
+
+When an interactive attempt fails without ssh ever asking, the tunnel's log says
+that, rather than leaving a bare "Permission denied" that looks like a typo in a
+password nobody was given the chance to type.
+
 ## Layout
 
 ```

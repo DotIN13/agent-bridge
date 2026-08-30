@@ -209,8 +209,19 @@ let cached: string | null = null;
  * Materialize the helper and its wrapper, and return the path ssh should run.
  *
  * `SSH_ASKPASS` takes a program and no arguments, so `node helper.mjs` needs a
- * wrapper either way: a `.cmd` on Windows — which both OpenSSH builds there
- * will run — and a shell script with a shebang everywhere else.
+ * wrapper either way: a shell script with a shebang on Unix, and a `.cmd` on
+ * Windows.
+ *
+ * **The Windows path is unverified, and there is reason to doubt it.** ssh's own
+ * askpass support there is not reliable — `SSH_ASKPASS` was honoured by
+ * `OpenSSH_for_Windows_8.1p1` and is ignored by `8.6p1`
+ * (PowerShell/Win32-OpenSSH#2115), `SSH_ASKPASS_REQUIRE` was ignored outright in
+ * 8.1 (#1726), and there is no native `ssh-askpass` on the platform at all.
+ * Beyond that, ssh launches the helper with `CreateProcess`, which cannot
+ * execute a batch file directly. So on Windows expect the prompt not to arrive:
+ * `tunnel.ts` says so in the log when an interactive attempt fails without ever
+ * asking, and the working configurations there are an agent, a key, or naming
+ * Git for Windows' `ssh.exe` in the command.
  */
 export function helperPath(): string {
   if (cached) return cached;

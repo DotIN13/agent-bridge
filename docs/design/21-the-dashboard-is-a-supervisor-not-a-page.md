@@ -55,6 +55,27 @@ the one running the server. It authenticates with a single-use token handed to i
 in its **environment**, not on its command line, which every process on the
 machine can read.
 
+### It does not fix Windows, and could not have
+
+Worth stating plainly, because dropping the pty looks like a portability win and
+is not one. The pty version could not run on Windows at all — Python's `pty` is a
+Unix module — so the platform was never served. Askpass does not serve it either:
+`SSH_ASKPASS` was honoured by `OpenSSH_for_Windows_8.1p1` and is ignored by
+`8.6p1` (Win32-OpenSSH#2115), `SSH_ASKPASS_REQUIRE` was ignored outright in 8.1
+(#1726), there is no native `ssh-askpass` there, and ssh launches the helper with
+`CreateProcess`, which cannot execute the `.cmd` wrapper directly. The move is
+neutral for Windows and removes three failure modes on Unix, which is why it is
+still the right one.
+
+What follows from that is a message rather than a mechanism: when an interactive
+attempt fails with `auth` and no prompt was ever raised, the log says so, and on
+win32 it names the two configurations that do work (an agent or a key; or Git for
+Windows' ssh in full). A wrong password and an ssh that cannot ask exit
+identically — same code, same "Permission denied" — so the only way to tell them
+apart is to have counted the questions. `tunnel.test.ts` has both halves: a fake
+ssh that ignores `SSH_ASKPASS` must produce the note, and a genuinely refused
+password must not.
+
 ## The three invariants that are not cosmetic
 
 These are the rules the first attempt learned by getting them wrong, and they

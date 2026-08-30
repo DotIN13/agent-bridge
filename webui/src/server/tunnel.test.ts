@@ -60,6 +60,27 @@ execFile(helper, ["somebody@host's password:"], (err, stdout) => {
   return file;
 }
 
+/**
+ * An ssh that ignores `SSH_ASKPASS`, which is the bundled Windows client.
+ *
+ * It refuses exactly as a wrong password does — same exit code, same words — so
+ * the only thing that separates the two from outside is whether a question was
+ * ever asked.
+ */
+function fakeSshThatIgnoresAskpass(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
+  const file = path.join(dir, "ssh");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node
+process.stderr.write("somebody@host: Permission denied (publickey,password).\n");
+process.exit(255);
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  return file;
+}
+
 interface Harness {
   tunnel: Tunnel;
   bridge: AskpassBridge;
@@ -210,6 +231,38 @@ test("a token-shaped string in ssh's output never reaches the page", () => {
   assert.match(log, /Bearer \[redacted\]/);
   assert.match(log, /token=\[redacted\]/);
   assert.ok(!log.includes("abc123secret"));
+});
+
+test("an ssh that ignores SSH_ASKPASS is told apart from a wrong password", async () => {
+  const bridge = new AskpassBridge(() => {});
+  await bridge.start();
+  const command = `${fakeSshThatIgnoresAskpass()} -N -L 18788:localhost:8787 host`;
+  const tunnel = new Tunnel("gw", parseSshCommand(command), command, false, bridge, () => {});
+
+  tunnel.up(true);
+  await waitFor(() => tunnel.state([], ["gw"]).status === "failed", 6000);
+
+  const state = tunnel.state([], ["gw"]);
+  assert.equal(state.blocked, "auth");
+  // The log has to say which of the two happened, because the exit code cannot.
+  assert.match(state.log.join(" "), /never asked for a credential through the askpass helper/);
+
+  tunnel.down();
+  await bridge.stop();
+});
+
+test("a password that was asked for and refused says nothing about askpass", async () => {
+  // The other half of the pair: a real refusal must not carry the Windows
+  // advice, or the advice means nothing.
+  const h = await harness("hunter2", "wrong");
+  h.tunnel.up(true);
+
+  await waitFor(() => h.status() === "failed", 6000);
+  const log = h.tunnel.state([], ["gw"]).log.join(" ");
+  assert.match(log, /Permission denied/);
+  assert.ok(!log.includes("never asked for a credential"));
+
+  await h.stop();
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {

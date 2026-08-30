@@ -67,6 +67,9 @@ export class Tunnel {
   private attempts = 0;
   private since: string | undefined;
   private blocked: BlockedReason | undefined;
+  /** Whether this attempt could prompt at all, and whether it ever did. */
+  private interactive = false;
+  private askedThisAttempt = 0;
   /**
    * Open prompts for this tunnel.
    *
@@ -137,6 +140,8 @@ export class Tunnel {
     this.stopping = false;
     this.clearRetry();
     this.blocked = undefined;
+    this.interactive = interactive;
+    this.askedThisAttempt = 0;
     this.setStatus("starting");
 
     const args = buildSshArgs(this.spec, { batch: !interactive });
@@ -185,6 +190,7 @@ export class Tunnel {
         return;
       }
       this.push(`ssh ${exitReason(code, signal)}`);
+      this.noteSilentAskpass();
       this.retry();
     });
 
@@ -211,6 +217,7 @@ export class Tunnel {
   /** ssh has asked something. Until it is answered this tunnel is not up. */
   notePrompt(): void {
     this.prompts++;
+    this.askedThisAttempt++;
     this.clearSettle();
     this.setStatus("authenticating");
   }
@@ -226,6 +233,26 @@ export class Tunnel {
     this.prompts = Math.max(0, this.prompts - 1);
     if (this.prompts === 0 && this.child) this.scheduleSettle(SETTLE_MS);
     else this.onChange();
+  }
+
+  /**
+   * A credential was refused, and ssh never asked us for one.
+   *
+   * The interesting case is not a wrong password — it is an ssh that ignored
+   * `SSH_ASKPASS` and so had no way to ask. That is the state of the bundled
+   * client on Windows (`askpass.ts` has the references), and from the outside it
+   * is indistinguishable from a rejected password: the same exit code, the same
+   * "Permission denied". Saying which it was is the difference between "try
+   * again" and "this ssh cannot ask through this channel".
+   */
+  private noteSilentAskpass(): void {
+    if (!this.interactive || this.blocked !== "auth" || this.askedThisAttempt > 0) return;
+    this.push("ssh never asked for a credential through the askpass helper, so nothing could be answered.");
+    this.push(
+      process.platform === "win32"
+        ? "On Windows the bundled ssh ignores SSH_ASKPASS. Use a key or the OpenSSH agent, or name Git for Windows' ssh.exe in the command."
+        : "Check that this ssh honours SSH_ASKPASS, or use a key or an agent.",
+    );
   }
 
   /**
