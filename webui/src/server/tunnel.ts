@@ -239,9 +239,9 @@ export class Tunnel {
    * A credential was refused, and ssh never asked us for one.
    *
    * The interesting case is not a wrong password — it is an ssh that ignored
-   * `SSH_ASKPASS` and so had no way to ask. That is the state of the bundled
-   * client on Windows (`askpass.ts` has the references), and from the outside it
-   * is indistinguishable from a rejected password: the same exit code, the same
+   * `SSH_ASKPASS` and so had no way to ask. Some Windows builds do that
+   * (`askpass.ts` has the references), and from the outside it is
+   * indistinguishable from a rejected password: the same exit code, the same
    * "Permission denied". Saying which it was is the difference between "try
    * again" and "this ssh cannot ask through this channel".
    */
@@ -250,7 +250,7 @@ export class Tunnel {
     this.push("ssh never asked for a credential through the askpass helper, so nothing could be answered.");
     this.push(
       process.platform === "win32"
-        ? "On Windows the bundled ssh ignores SSH_ASKPASS. Use a key or the OpenSSH agent, or name Git for Windows' ssh.exe in the command."
+        ? "Windows ssh honours SSH_ASKPASS on some builds and not others. Try Git for Windows' ssh.exe named in full, or a key in the OpenSSH agent."
         : "Check that this ssh honours SSH_ASKPASS, or use a key or an agent.",
     );
   }

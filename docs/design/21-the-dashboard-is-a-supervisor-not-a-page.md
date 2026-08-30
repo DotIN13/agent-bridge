@@ -55,26 +55,34 @@ the one running the server. It authenticates with a single-use token handed to i
 in its **environment**, not on its command line, which every process on the
 machine can read.
 
-### It does not fix Windows, and could not have
+### Windows: picone's wrapper stays, and my reasoning about it was wrong
 
-Worth stating plainly, because dropping the pty looks like a portability win and
-is not one. The pty version could not run on Windows at all — Python's `pty` is a
-Unix module — so the platform was never served. Askpass does not serve it either:
-`SSH_ASKPASS` was honoured by `OpenSSH_for_Windows_8.1p1` and is ignored by
-`8.6p1` (Win32-OpenSSH#2115), `SSH_ASKPASS_REQUIRE` was ignored outright in 8.1
-(#1726), there is no native `ssh-askpass` there, and ssh launches the helper with
-`CreateProcess`, which cannot execute the `.cmd` wrapper directly. The move is
-neutral for Windows and removes three failure modes on Unix, which is why it is
-still the right one.
+The pty version could not have run on Windows at all — Python's `pty` is a Unix
+module — so the platform was never served by it. Askpass does serve it: the
+mechanism here is picone's verbatim, `.cmd` wrapper included, and it is reported
+working on Windows machines in that project.
 
-What follows from that is a message rather than a mechanism: when an interactive
-attempt fails with `auth` and no prompt was ever raised, the log says so, and on
-win32 it names the two configurations that do work (an agent or a key; or Git for
-Windows' ssh in full). A wrong password and an ssh that cannot ask exit
-identically — same code, same "Permission denied" — so the only way to tell them
-apart is to have counted the questions. `tunnel.test.ts` has both halves: a fake
-ssh that ignores `SSH_ASKPASS` must produce the note, and a genuinely refused
-password must not.
+Worth recording because I argued the opposite from the code and was wrong. ssh
+launches the helper with `CreateProcess`, which cannot execute a batch file
+directly, so a `.cmd` target looks impossible; I wrote that into the docs as
+"expect the prompt not to arrive". A field report from two working machines
+outweighs that inference, and whatever Win32-OpenSSH's exec layer does with the
+path, it runs it. The lesson is narrow and worth keeping: do not replace that
+wrapper with a `.exe` or a bare `node` invocation on the CreateProcess argument
+alone.
+
+What is genuinely build-dependent is ssh's askpass support itself — `SSH_ASKPASS`
+was honoured by `OpenSSH_for_Windows_8.1p1` and is ignored by `8.6p1`
+(Win32-OpenSSH#2115), and `SSH_ASKPASS_REQUIRE` was ignored outright in 8.1
+(#1726). So the same configuration prompts on one install and not the next, which
+makes the failure worth naming rather than diagnosing twice: a wrong password and
+an ssh that cannot ask exit identically, same code and same "Permission denied",
+so the only way to tell them apart is to have counted the questions. An
+interactive attempt that fails with `auth` having raised no prompt says so, and
+on win32 names the two configurations that do work — Git for Windows' `ssh.exe`
+spelled out in full, which the per-tunnel `runnable` check already supports, or a
+key in the agent. `tunnel.test.ts` has both halves: a fake ssh that ignores
+`SSH_ASKPASS` must produce the note, and a genuinely refused password must not.
 
 ## The three invariants that are not cosmetic
 

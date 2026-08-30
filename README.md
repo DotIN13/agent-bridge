@@ -55,10 +55,9 @@ dialog, and shows the jobs behind each gateway. It reads the same
 cd webui && npm install && npm run build && npm start
 ```
 
-Unix only in practice: the dashboard runs anywhere Node does, but relaying ssh's
-password prompt relies on `SSH_ASKPASS`, which the ssh bundled with Windows does
-not honour dependably. See [webui/README.md](webui/README.md#windows) for what
-does work there.
+It runs anywhere Node does. On Windows the credential prompt depends on the ssh
+build — some honour `SSH_ASKPASS` and some ignore it — and
+[webui/README.md](webui/README.md#windows) says what to do when it is the latter.
 
 ## Agent-first CLI
 

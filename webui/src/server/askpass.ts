@@ -210,18 +210,21 @@ let cached: string | null = null;
  *
  * `SSH_ASKPASS` takes a program and no arguments, so `node helper.mjs` needs a
  * wrapper either way: a shell script with a shebang on Unix, and a `.cmd` on
- * Windows.
+ * Windows — which is picone's, and is reported working on Windows machines
+ * there, so it is kept verbatim rather than reasoned about.
  *
- * **The Windows path is unverified, and there is reason to doubt it.** ssh's own
- * askpass support there is not reliable — `SSH_ASKPASS` was honoured by
- * `OpenSSH_for_Windows_8.1p1` and is ignored by `8.6p1`
- * (PowerShell/Win32-OpenSSH#2115), `SSH_ASKPASS_REQUIRE` was ignored outright in
- * 8.1 (#1726), and there is no native `ssh-askpass` on the platform at all.
- * Beyond that, ssh launches the helper with `CreateProcess`, which cannot
- * execute a batch file directly. So on Windows expect the prompt not to arrive:
- * `tunnel.ts` says so in the log when an interactive attempt fails without ever
- * asking, and the working configurations there are an agent, a key, or naming
- * Git for Windows' `ssh.exe` in the command.
+ * That is worth saying because the reasoning went the other way and was wrong:
+ * ssh launches the helper with `CreateProcess`, which cannot execute a batch
+ * file directly, so a `.cmd` *looks* impossible. Whatever Win32-OpenSSH's exec
+ * layer does with the path, it evidently runs it. Do not "fix" this to a `.exe`
+ * or a bare `node` invocation on that argument alone.
+ *
+ * What is genuinely build-dependent is ssh's askpass support itself:
+ * `SSH_ASKPASS` was honoured by `OpenSSH_for_Windows_8.1p1` and ignored by
+ * `8.6p1` (PowerShell/Win32-OpenSSH#2115), and `SSH_ASKPASS_REQUIRE` was
+ * ignored outright in 8.1 (#1726). So it works on some Windows installs and not
+ * others; `tunnel.ts` says which happened rather than leaving a bare
+ * "Permission denied".
  */
 export function helperPath(): string {
   if (cached) return cached;
