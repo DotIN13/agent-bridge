@@ -121,7 +121,8 @@ terminal.
 ## Batch/external reports are post-terminal annotations
 POST /v1/jobs/{{ref}}/message accepts status, msg, report, host, slurm_job_id,
 ts, optional report_id, and extra scheduler fields. report_id deduplicates
-retries. `ab-notify` uses HTTP, shared JSONL, then local JSONL fallback.
+retries. A worker reports milestones by writing files into $AB_JOB_DIR
+(`ab-notify --msg` does that write); this endpoint is the HTTP equivalent.
 
 A report may arrive after the agent job and its SSE request have finished. It
 does not reopen or replace job status. Reconnect with the last cursor or poll an

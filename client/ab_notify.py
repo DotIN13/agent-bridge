@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Report a milestone from inside a job; stdlib only.
 
-One job, one verb: put a message where the caller will see it while the work is
-still going.
+For the **worker** -- the agent running the job on the gateway host. One job, one
+verb: put a message where the caller will see it while the work is still going.
 
     ab-notify --msg "server up, generating"
     ab-notify --msg-file "$RUNS/step-3.log" --report-id step-3
@@ -24,6 +24,13 @@ the work is over. What remains worth saying is what happened along the way.
 naming the remedy: an sbatch file already on a compute node cannot be edited in
 lockstep with the gateway, and exiting non-zero under `set -e` would cost the
 whole run rather than one milestone.
+
+Nothing is discovered and nothing is retried: `$AB_JOB_DIR` (or `--job-dir`) or
+it does not run. The url/token discovery and the three delivery tiers are gone,
+and so is rebuilding the path from `$AB_JOB_ID` + `$AB_DATA_DIR` -- that existed
+for a batch script on a compute node, and batch work is a monitor's job now
+(`ab-monitor`). A script that really does want to report from another node can
+still export `AB_JOB_DIR` and write into it, since the data dir is shared.
 """
 from __future__ import annotations
 
@@ -42,20 +49,11 @@ _SAFE = re.compile(r"[^a-z0-9._-]+")
 MAX_BYTES = 64 * 1024
 
 
-def _job_dir(explicit: str | None, job_id: str | None,
-             data_dir: str | None) -> Path | None:
-    """Where to write. `$AB_JOB_DIR` first, then rebuilt from the old flags.
-
-    The rebuild is what keeps `#SBATCH --export=ALL,AB_JOB_ID=…,AB_DATA_DIR=…`
-    working: those two are what older batch scripts carry, and they are enough to
-    name the directory.
-    """
+def _job_dir(explicit: str | None) -> Path | None:
+    """Where to write: `--job-dir`, else `$AB_JOB_DIR`, else nowhere."""
     for candidate in (explicit, os.environ.get("AB_JOB_DIR")):
         if candidate:
             return Path(candidate)
-    base = data_dir or os.environ.get("AB_DATA_DIR")
-    if base and job_id:
-        return Path(base) / "reports" / job_id
     return None
 
 
@@ -85,9 +83,6 @@ def build_parser() -> argparse.ArgumentParser:
                         help="stable name for this milestone; a retry with the "
                              "same one overwrites instead of adding another")
     parser.add_argument("--job-dir", help="defaults to $AB_JOB_DIR")
-    parser.add_argument("--job-id", default=os.environ.get("AB_JOB_ID"),
-                        help="with --data-dir, rebuilds the job dir path")
-    parser.add_argument("--data-dir", default=os.environ.get("AB_DATA_DIR"))
     # Accepted and ignored. Every call is a milestone now; see the module
     # docstring for why this is not an error.
     parser.add_argument("--status", help=argparse.SUPPRESS)
@@ -107,10 +102,11 @@ def main(argv=None) -> int:
         print(f"ab-notify: --status {args.status} is ignored; every call is a "
               f"milestone now ({remedy})", file=sys.stderr)
 
-    root = _job_dir(args.job_dir, args.job_id, args.data_dir)
+    root = _job_dir(args.job_dir)
     if root is None:
-        print("ab-notify: no $AB_JOB_DIR, and no --job-id/--data-dir to rebuild "
-              "one from. Nothing was reported.", file=sys.stderr)
+        print("ab-notify: no $AB_JOB_DIR and no --job-dir. This runs inside a "
+              "job, on the gateway host. Nothing was reported.",
+              file=sys.stderr)
         return 2
 
     text = args.msg or ""

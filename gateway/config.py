@@ -24,10 +24,6 @@ _DEFAULTS: dict = {
         "report_timeout_sec": 86400,
     },
     "db": {"path": "gateway.db"},
-    # Where `ab-notify` drops messages when it cannot reach the gateway over
-    # HTTP. Must be on a filesystem the compute nodes share with the login
-    # node; relative paths resolve against the data dir.
-    "messages": {"dir": "messages"},
     "cluster": {
         "enabled": True,
         "probe_timeout_sec": 15,
@@ -111,7 +107,6 @@ class Config:
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
     report_timeout_sec: float = 86400.0
-    messages_dir: str = ""        # absolute; ab-notify's fallback drop point
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -211,13 +206,6 @@ def load(path: str | os.PathLike | None) -> Config:
     if not db_path.is_absolute():
         db_path = data_dir / db_path
 
-    messages_dir = Path(raw.get("messages", {}).get("dir", "messages"))
-    if not messages_dir.is_absolute():
-        messages_dir = data_dir / messages_dir
-    # Created up front: a batch job on another node must be able to write here
-    # without racing to mkdir.
-    messages_dir.mkdir(parents=True, exist_ok=True)
-
     agents: dict[str, AgentConfig] = {}
     for name, a in raw.get("agents", {}).items():
         agents[name] = AgentConfig(
@@ -250,7 +238,6 @@ def load(path: str | os.PathLike | None) -> Config:
         report_timeout_sec=float(
             raw["worker"].get("report_timeout_sec", 86400)),
         db_path=str(db_path),
-        messages_dir=str(messages_dir),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),
         cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),

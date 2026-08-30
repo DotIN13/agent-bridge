@@ -52,7 +52,7 @@ echo "server up, generating" > "$AB_JOB_DIR/progress/010-up.md"
 - **A milestone is a note, not a log.** `ab-notify --msg-file` refuses anything over 64 KB rather than posting the first part of it; a whole log belongs in `report.md`, or point it at an excerpt.
 - **Put the whole content in the file.** A path only you can open is not evidence; `report.md` is uploaded whole and `ab job <ref>` prints it.
 - **Nothing you write ends your job.** The turn's own end does that. (One exception: a job submitted `--expect-report` is parked and waiting, and `echo finished > "$AB_JOB_DIR/status"` is what closes it. `ab-notify` deliberately does not do this — it reports milestones and nothing else.)
-- **Compute nodes write here too**, since the data dir is on the shared filesystem. That is the same requirement the old `[messages] dir` had.
+- **`ab-notify` needs `$AB_JOB_DIR` and nothing else** — no url, no token, and no discovery. A batch script on another node can still write into the directory if you export `AB_JOB_DIR` to it and the data dir is shared, but a **monitor** is the better answer for anything that outlives your turn.
 
 **Your final message is still the deliverable** (see above). The job dir is for what a message cannot carry: progress while you are still working, and output that outlives your turn.
 

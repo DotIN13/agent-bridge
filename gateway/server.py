@@ -268,11 +268,15 @@ def _as_seconds(value: str | None) -> float | None:
 def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
     """Pull in everything a job reported outside its own event stream.
 
-    The job dir first, then the JSONL fallback: both are idempotent, both are
-    keyed so a second pass inserts nothing, and a caller should never have to
-    know which channel a delegate used. Returns the rows inserted by the job
-    dir so a live-stream sweeper can publish them; the JSONL path predates the
-    bus and stays read-triggered.
+    One channel: the job dir. Idempotent and keyed, so a second pass inserts
+    nothing, and cheap enough to run on every read. Returns the rows it
+    inserted so a live-stream sweeper can publish them.
+
+    There used to be a second channel here -- a shared-filesystem JSONL drop,
+    for a compute node that could not reach the gateway over HTTP. Nothing has
+    written it since `ab-notify` became a job-dir reporter, and a reader with no
+    writer is worse than nothing: it was a whole ingestion path, with its own
+    bounds and dedup identity, that no test could exercise from the outside.
     """
     job_dir = str(jobdir.path_for(gw.cfg.data_dir, job_id))
     rows = gw.db.ingest_job_dir(job_id, job_dir)
@@ -280,7 +284,6 @@ def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
         # Here rather than only in the sweeper: a read is the other moment a
         # pending registration can be noticed, and adoption is idempotent.
         _adopt_monitor_drops(gw, job_id)
-    gw.db.ingest_messages(job_id, gw.cfg.messages_dir)
     return rows
 
 

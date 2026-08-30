@@ -28,7 +28,6 @@ def make_config(tmp_path) -> Config:
     return Config(
         host="127.0.0.1", port=0, token="x", concurrency=1,
         db_path=str(tmp_path / "gw.db"), data_dir=str(tmp_path),
-        messages_dir=str(tmp_path / "messages"),
         files_dir=str(tmp_path / "files"), cluster_enabled=False,
         agents={"claude": agent})
 

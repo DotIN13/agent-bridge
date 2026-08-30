@@ -103,17 +103,14 @@ def test_the_old_transport_flags_are_ignored_rather_than_fatal(tmp_path, capsys)
     assert "--url" in err and "--token" in err
 
 
-def test_the_directory_is_rebuilt_from_the_old_job_id_and_data_dir(tmp_path):
-    assert ab_notify.main(["--msg", "up", "--job-id", "job-1",
-                           "--data-dir", str(tmp_path)]) == 0
-    assert len(list((tmp_path / "reports" / "job-1" / "progress").iterdir())) == 1
-
-
-def test_with_nothing_to_write_to_it_says_so(tmp_path, monkeypatch, capsys):
+def test_without_a_job_dir_it_says_where_it_expects_to_run(tmp_path, monkeypatch,
+                                                           capsys):
+    """No discovery and no fallback: $AB_JOB_DIR or it does not run."""
     monkeypatch.delenv("AB_JOB_DIR", raising=False)
-    monkeypatch.delenv("AB_DATA_DIR", raising=False)
     assert ab_notify.main(["--msg", "up"]) == 2
-    assert "Nothing was reported" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Nothing was reported" in err
+    assert "gateway host" in err
 
 
 def test_the_job_dir_comes_from_the_environment(tmp_path, monkeypatch):

@@ -216,8 +216,7 @@ def test_the_job_dir_cannot_collide_with_the_attachment_store(tmp_path):
     from gateway.config import Config
 
     cfg = Config(host="127.0.0.1", port=1, token="t", concurrency=1,
-                 db_path=str(tmp_path / "g.db"), data_dir=str(tmp_path),
-                 messages_dir=str(tmp_path / "m"), files_dir=str(tmp_path),
+                 db_path=str(tmp_path / "g.db"), data_dir=str(tmp_path), files_dir=str(tmp_path),
                  files_enabled=True, cluster_enabled=False, agents={},
                  notes_path=str(tmp_path / "gateway.md"))
     assert Path(filemod.job_dir(cfg, "j1")) != jobdir.path_for(tmp_path, "j1")
@@ -247,8 +246,7 @@ def test_the_worker_creates_the_dir_and_hands_it_to_the_adapter(tmp_path, monkey
         allowed_dirs=(str(allowed),), timeout_sec=0, max_sessions_in_index=5,
         models=("claude-test",))
     cfg = Config(host="127.0.0.1", port=1, token="t", concurrency=1,
-                 db_path=str(tmp_path / "w.db"), data_dir=str(tmp_path),
-                 messages_dir=str(tmp_path / "m"), files_dir=str(tmp_path / "f"),
+                 db_path=str(tmp_path / "w.db"), data_dir=str(tmp_path), files_dir=str(tmp_path / "f"),
                  files_enabled=True, cluster_enabled=False,
                  agents={"claude": agent},
                  notes_path=str(tmp_path / "gateway.md"))

@@ -214,30 +214,6 @@ def test_a_parked_job_survives_a_gateway_restart(tmp_path):
     db.close()
 
 
-def test_the_file_fallback_closes_a_parked_job_too(tmp_path):
-    """On a cluster this is the usual path, not the exception.
-
-    Compute nodes routinely cannot reach the gateway, so `ab-notify` drops the
-    report on shared storage instead. A job closed only over HTTP would wait
-    out its whole deadline with the finish sitting in a file on disk.
-    """
-    db = Database(str(tmp_path / "j.db"))
-    job = _job(db, expect_report=True)
-    _succeed(db, job)
-    messages = tmp_path / "messages"
-    messages.mkdir()
-    (messages / f"{job}.jsonl").write_text(
-        json.dumps({"status": "finished", "msg": "24/24",
-                    "report_id": "done", "ts": 1786500000.0}) + "\n",
-        encoding="utf-8")
-
-    assert db.ingest_messages(job, str(messages)) == 1
-    row = db.get_job(job)
-    assert row["status"] == "succeeded"
-    assert row["finished_at"] == 1786500000.0
-    db.close()
-
-
 def test_the_closing_status_reaches_the_stream(tmp_path):
     db = Database(str(tmp_path / "j.db"))
     job = _job(db, expect_report=True)

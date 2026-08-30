@@ -12,7 +12,7 @@ So each job is handed one directory instead, in `$AB_JOB_DIR`:
       status                  one word: running | finished | failed
       progress/001-slug.md    a milestone; any name, ingested in name order
       report.md               the deliverable, when it outgrows the turn
-      monitors/<id>.json      written by `ab-monitor`, read by the gateway
+      monitors/<name>         key-values, written by `ab-monitor`
 
 Every readable file becomes one `message` event on that job's stream, so a
 delegate reports with `echo` and `cp` and nothing else. The format is
@@ -40,8 +40,8 @@ MONITORS_DIR = "monitors"
 #: silently equivalent to having written nothing.
 STATUSES = ("queued", "running", "finished", "failed")
 
-#: Matches the per-line cap on the JSONL fallback, for the same reason: one
-#: report must not be able to exhaust memory or the event row it lands in.
+#: One report must not be able to exhaust memory or the event row it lands in.
+#: `ab-notify` refuses a larger `--msg-file` up front for the same reason.
 MAX_FILE_BYTES = 64 * 1024
 
 #: A job dir with more files than this is a loop, not a report. The excess is
@@ -60,8 +60,8 @@ class Drop:
     status: str | None  # set only by the status file
 
 
-#: Beside `messages/` and the file store rather than under either. Not
-#: `<data_dir>/jobs/` specifically: the file store already keeps promoted
+#: Beside the file store rather than under it. Not `<data_dir>/jobs/`
+#: specifically: the file store already keeps promoted
 #: attachments in `<files_dir>/jobs/<job_id>`, and `promote_staging` renames a
 #: whole directory into that name and fails if it already exists -- so a
 #: deployment that pointed `[files] dir` at the data dir would have the two

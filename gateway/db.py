@@ -2,7 +2,8 @@
 
 One lock protects the connection.  Every event source uses the same per-job
 allocator, so an `after` cursor is globally monotonic even across worker events,
-HTTP reports, filesystem reports, failures, and restart recovery.
+job-dir reports, HTTP reports, monitor transitions, failures, and restart
+recovery.
 """
 from __future__ import annotations
 
@@ -26,16 +27,16 @@ from typing import Any
 def _normalise_report(data: dict) -> tuple[dict, float]:
     """Return the payload with an ISO `ts`, plus the epoch to timestamp it with.
 
-    `ab-notify` always sends an epoch float, and a report is otherwise the one
+    An HTTP reporter may send an epoch float, and a report is otherwise the one
     place a bare epoch still reaches a reader -- hidden inside a passthrough dict
     the response models never touch. The event's own timestamp still needs the
     number, so both come back rather than the caller re-deriving one from the
     other: doing that is what broke the `--report-id` path, which parsed a `ts`
     another line had already rewritten to a string.
 
-    Idempotent, and applied by every ingestion path before hashing, so the same
-    report keeps one dedup identity whether it arrives over HTTP, through the
-    shared-filesystem fallback, or twice.
+    Idempotent, and applied before hashing by both paths that produce a
+    `message`, so a report keeps one dedup identity whether it arrives over HTTP
+    or twice.
     """
     raw = data.get("ts")
     if isinstance(raw, bool) or raw is None:
@@ -140,8 +141,6 @@ MONITOR_TERMINAL = {"finished", "failed", "expired", "canceled"}
 # able to tell the difference. The row stays open because the work it
 # describes is still out there on a scheduler.
 AWAITING_REPORT = "awaiting_report"
-_REPORT_BATCH_LINES = 256
-_REPORT_LINE_MAX_BYTES = 64 * 1024
 
 
 class IdempotencyConflict(ValueError):
@@ -798,107 +797,6 @@ class Database:
             except Exception:
                 self._conn.rollback()
                 raise
-
-    def ingest_messages(self, job_id: str, messages_dir: str) -> int:
-        """Ingest fallback JSONL with bounded memory and transactions.
-
-        A malformed or non-object JSON value is retained as a safe diagnostic
-        event instead of poisoning job/event reads. Logical lines are capped in
-        memory while their full bytes still contribute to the deduplication id.
-        """
-        path = os.path.join(messages_dir, f"{job_id}.jsonl")
-
-        def records():
-            try:
-                source = open(path, "rb")
-            except OSError:
-                return
-            with source:
-                index = 0
-                while True:
-                    chunk = source.readline(_REPORT_LINE_MAX_BYTES + 1)
-                    if not chunk:
-                        break
-                    digest = hashlib.sha256()
-                    digest.update(chunk)
-                    preview = bytearray(chunk[:_REPORT_LINE_MAX_BYTES])
-                    oversized = len(chunk) > _REPORT_LINE_MAX_BYTES
-                    while chunk and not chunk.endswith(b"\n"):
-                        chunk = source.readline(_REPORT_LINE_MAX_BYTES + 1)
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-                        remaining = _REPORT_LINE_MAX_BYTES - len(preview)
-                        if remaining > 0:
-                            preview.extend(chunk[:remaining])
-                        oversized = oversized or len(preview) >= _REPORT_LINE_MAX_BYTES
-                    text = bytes(preview).decode("utf-8", errors="replace").rstrip("\r\n")
-                    yield index, text, digest.hexdigest(), oversized
-                    index += 1
-
-        def ingest_batch(batch) -> int:
-            inserted = 0
-            with self._lock:
-                self._conn.execute("BEGIN IMMEDIATE")
-                try:
-                    for index, line, line_digest, oversized in batch:
-                        if not line.strip() and not oversized:
-                            continue
-                        if oversized:
-                            data = {"status": "unknown", "raw": line[:2000],
-                                    "error": "report line exceeded 65536 bytes"}
-                        else:
-                            try:
-                                parsed = json.loads(line)
-                            except (TypeError, ValueError):
-                                parsed = None
-                            if isinstance(parsed, dict):
-                                data = parsed
-                            else:
-                                data = {"status": "unknown", "raw": line[:2000],
-                                        "error": "report line must be a JSON object"}
-                        explicit_id = data.get("report_id")
-                        report_id = str(explicit_id or hashlib.sha256(
-                            f"{os.path.abspath(path)}:{index}:{line_digest}".encode()
-                        ).hexdigest())
-                        # Same normalisation as the HTTP path, and before the
-                        # hash: a report that arrives both ways must reduce to
-                        # one identity, not two rows that disagree about `ts`.
-                        data, epoch = _normalise_report(data)
-                        request_hash = hashlib.sha256(json.dumps(
-                            data, sort_keys=True, separators=(",", ":")
-                        ).encode()).hexdigest()
-                        source_kind = "report" if explicit_id else "file"
-                        try:
-                            _row, duplicate = self._report_locked(
-                                job_id, source_kind, report_id, request_hash,
-                                data, epoch)
-                        except ReportConflict:
-                            duplicate = True
-                        if not duplicate:
-                            inserted += 1
-                            # A terminal report closes a parked job here too.
-                            # On a cluster this is the *usual* path, not the
-                            # exception: compute nodes routinely cannot reach
-                            # the gateway, so the report lands as a file and a
-                            # job closed only over HTTP would wait forever.
-                            self._close_awaiting_locked(job_id, data, epoch)
-                    self._conn.commit()
-                except Exception:
-                    self._conn.rollback()
-                    raise
-            return inserted
-
-        added = 0
-        batch = []
-        for record in records() or ():
-            batch.append(record)
-            if len(batch) >= _REPORT_BATCH_LINES:
-                added += ingest_batch(batch)
-                batch.clear()
-        if batch:
-            added += ingest_batch(batch)
-        return added
 
     def ingest_job_dir(self, job_id: str, job_dir: str) -> list[dict]:
         """Turn every new file in a job's directory into one `message` event.

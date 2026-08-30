@@ -40,34 +40,6 @@ max_bytes = 65536      # how much of it is served
 [db]
 path = "gateway.db"  # relative paths resolve against the data dir
 
-[messages]
-# Legacy: where the retired `ab-notify` fallback dropped JSONL reports when it
-# could not reach the gateway. Still ingested so nothing already on disk is lost.
-# Reporting now goes to <data_dir>/reports/<job-id> ($AB_JOB_DIR), which needs
-# the same thing of this filesystem: the COMPUTE NODES must share it.
-# Must be on a filesystem the COMPUTE NODES share with the login node (GPFS
-# /project, not /tmp). Relative paths resolve against the data dir.
-#
-# Batch jobs never write gateway.db directly: it runs in WAL mode, whose index
-# is mmap'd shared memory and so requires every writer on one host. Appending
-# JSONL with O_APPEND needs no locking; the gateway ingests it on read and uses
-# the same monotonic event cursor. Give retries a stable --report-id.
-dir = "messages"
-
-[files]
-# File upload/download surface (/v1/files, and files attached to jobs).
-# dir = ""  -> per-user store under the system temp dir (tempfile.gettempdir(),
-#              e.g. /tmp/agent-bridge-<uid>/files), created 0700 so other users
-#              on the node can't read your uploads.
-#              (Note: /tmp is reaped after ~10 days idle — fine for job inputs.)
-# dir = "abs/path"       -> used as-is;  dir = "relname" -> under the data dir.
-# The store is readable by forked agents and downloadable even though it's
-# outside allowed_dirs; everything else stays sandboxed to allowed_dirs.
-enabled = true
-dir = ""
-max_file_mb = 100          # per-file cap
-max_request_mb = 512       # whole-request cap; larger data -> scp + pass {path}
-
 # Watching work that outlives an agent turn. A delegate registers a monitor --
 # `ab-monitor add --slurm 12345`, or a key-value file in $AB_JOB_DIR/monitors/ --
 # and the gateway runs its poll command on a timer until it resolves.

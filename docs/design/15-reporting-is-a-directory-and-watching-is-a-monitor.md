@@ -126,8 +126,13 @@ watching. `ab monitor` shows that word; the event's report-shaped `status` reads
   lockstep with the gateway, and exiting non-zero under `set -e` would cost the
   run rather than one milestone. It does *not* write `status`, so closing a
   parked `--expect-report` job stays an explicit `echo finished >
-  "$AB_JOB_DIR/status"`. The `[messages]` ingest stays until no deployment
-  writes it.
+  "$AB_JOB_DIR/status"`. Narrowing it to `$AB_JOB_DIR` -- no `--job-id` +
+  `--data-dir` rebuild -- then left the `[messages]` JSONL ingest with no writer
+  at all, so that went too: the `[messages]` config block, `messages_dir`, and
+  `db.ingest_messages` with its own bounds, batching and cross-transport dedup
+  identity. A reader nothing writes is worse than nothing, because no test can
+  reach it from the outside. `POST /v1/jobs/{ref}/message` remains the HTTP
+  equivalent for a caller that wants immediate delivery.
 - **`tests/backend/test_expect_report.py`** is the record of what the opt-in
   still guarantees. Its own history is the warning: the suite stayed green the
   last time this default moved, because nothing asserted it.

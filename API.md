@@ -174,8 +174,8 @@ restart rather than being failed as stale. `finished_at` stays null until the
 work actually finishes. If no report arrives within `worker.report_timeout_sec`
 (default 86400, 0 disables) the gateway fails it with `report_timeout`.
 
-A parked job is closed by `status` in the job dir, by an HTTP report, or by the
-shared-filesystem JSONL, which is the usual path from a compute node that cannot
+A parked job is closed by `status` in the job dir or by an HTTP report, the
+former being the usual path from a compute node that cannot
 reach the gateway.
 
 **Both routes list a session only if a human spoke or the agent acted**, and the
@@ -378,12 +378,13 @@ may arrive after the agent SSE stream has closed. Fetch them by reconnecting
 with the last cursor or polling an event page. A single already-open SSE request
 does not wait forever for future batch work.
 
-Reports also arrive without HTTP. Files a delegate writes into its job dir
-(`$AB_JOB_DIR` = `<data_dir>/reports/<job-id>`) and lines in the legacy shared
-JSONL are ingested on job/event reads and by the gateway's sweeper, and receive
-the same monotonic sequence allocation. Job-dir reports are deduplicated by
-relative path and content digest; HTTP and JSONL reports use
-`report_id`/`$AB_REPORT_ID`. A job dir may close a job that is parked in
+Reports also arrive without HTTP: files a delegate writes into its job dir
+(`$AB_JOB_DIR` = `<data_dir>/reports/<job-id>`) are ingested on job/event reads
+and by the gateway's sweeper, and receive the same monotonic sequence allocation.
+Job-dir reports are deduplicated by relative path and content digest; HTTP
+reports use `report_id`. There is no shared-filesystem JSONL channel: it existed
+for a compute node that could not reach the gateway, nothing has written it since
+`ab-notify` became a job-dir reporter, and a reader with no writer was removed. A job dir may close a job that is parked in
 `awaiting_report` and may not end a turn that is still running — the turn's own
 end does that.
 

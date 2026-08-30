@@ -229,12 +229,13 @@ See `config.example.toml`. Important controls:
   compute nodes need direct report HTTP.
 - `[worker] concurrency`, `cancel_grace_sec`.
 - `[files] enabled`, store, per-file and request bounds.
-- `[messages] dir` — shared filesystem fallback.
 - `[agents.<name>] allowed_dirs`, `default_cwd`, `dispatch_mode`, model catalog,
   permission mode, and timeout.
 
-Only the login-node gateway writes SQLite WAL. Compute nodes append JSONL when
-HTTP is unavailable. Scope `allowed_dirs` deliberately; noninteractive
+Only the login-node gateway writes SQLite WAL; nothing else writes the database.
+A job reports by writing files into its own directory under the data dir, so put
+the data dir on a filesystem the compute nodes share if a batch script is going to
+write there too. Scope `allowed_dirs` deliberately; noninteractive
 permission modes let an agent edit and execute within those roots.
 
 A systemd user service example is in `systemd/agent-bridge.service`. Skills for

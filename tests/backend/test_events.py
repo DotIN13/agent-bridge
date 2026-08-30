@@ -77,20 +77,6 @@ def test_report_deduplication_and_conflict(tmp_path):
     db.close()
 
 
-def test_report_id_deduplicates_across_http_and_file_fallback(tmp_path):
-    db = Database(str(tmp_path / "events.db"))
-    job = make_job(db)
-    payload = {"status": "running", "report_id": "cross-transport"}
-    first = db.add_message(job, payload)
-    messages = tmp_path / "messages"
-    messages.mkdir()
-    (messages / f"{job}.jsonl").write_text(json.dumps(payload) + "\n")
-    assert db.ingest_messages(job, str(messages)) == 0
-    assert len(db.events_after(job, 0)) == 1
-    assert db.events_after(job, 0)[0]["seq"] == first["seq"]
-    db.close()
-
-
 def test_a_report_carrying_a_timestamp_is_accepted(tmp_path):
     """`ab-notify` always sends an epoch `ts`, and with `--report-id`.
 
@@ -112,21 +98,6 @@ def test_a_report_carrying_a_timestamp_is_accepted(tmp_path):
     db.close()
 
 
-def test_a_timestamped_report_keeps_one_identity_across_transports(tmp_path):
-    """The fallback path has to normalise too, or `ts` splits the dedup key."""
-    db = Database(str(tmp_path / "events.db"))
-    job = make_job(db)
-    payload = {"status": "running", "report_id": "both-ways", "ts": 1786500000.0}
-    first = db.add_message(job, payload)
-    messages = tmp_path / "messages"
-    messages.mkdir()
-    (messages / f"{job}.jsonl").write_text(json.dumps(payload) + "\n")
-    assert db.ingest_messages(job, str(messages)) == 0
-    assert len(db.events_after(job, 0)) == 1
-    assert db.events_after(job, 0)[0]["seq"] == first["seq"]
-    db.close()
-
-
 def test_normalising_a_report_twice_changes_nothing(tmp_path):
     """Idempotent, so an already-ISO `ts` survives and re-ingestion is safe."""
     db = Database(str(tmp_path / "events.db"))
@@ -141,32 +112,6 @@ def test_normalising_a_report_twice_changes_nothing(tmp_path):
     assert again["duplicate"] is True
     assert db.events_after(job, 0)[0]["ts"] == 1786500000.0
     db.close()
-
-
-def test_filesystem_reports_are_streamed_bounded_and_nonobjects_are_safe(
-        client, auth, gateway):
-    accepted = client.post("/v1/jobs", headers=auth,
-                           json={"prompt": "fallback reports"}).json()
-    job = accepted["id"]
-    messages = Path(gateway.cfg.messages_dir)
-    messages.mkdir(exist_ok=True)
-    lines = ["[]", "null", '"text"', "{not-json"]
-    lines.extend(json.dumps({"status": "running", "index": index})
-                 for index in range(300))
-    lines.append(json.dumps({"status": "running", "msg": "x" * 70000}))
-    (messages / f"{job}.jsonl").write_text("\n".join(lines) + "\n")
-
-    assert gateway.db.ingest_messages(job, str(messages)) == len(lines)
-    events = gateway.db.events_after(job, 0, limit=1000)
-    assert len(events) == len(lines)
-    assert all(isinstance(event["data"], dict) for event in events)
-    assert events[0]["data"]["error"] == "report line must be a JSON object"
-    assert events[-1]["data"]["error"].startswith("report line exceeded")
-    assert len(events[-1]["data"]["raw"]) <= 2000
-    assert gateway.db.ingest_messages(job, str(messages)) == 0
-    assert client.get(f"/v1/jobs/{job}", headers=auth).status_code == 200
-    assert client.get(f"/v1/jobs/{job}/events?limit=500",
-                      headers=auth).status_code == 200
 
 
 def test_event_page_is_bounded_and_has_cursor(client, auth, gateway):
@@ -377,7 +322,6 @@ def test_cancel_during_terminal_commit_cannot_be_falsely_accepted(
     cfg = Config(
         host="127.0.0.1", port=0, token="x", concurrency=1,
         db_path=str(tmp_path / "race.db"), data_dir=str(tmp_path),
-        messages_dir=str(tmp_path / "messages"),
         files_dir=str(tmp_path / "files"), cluster_enabled=False,
         agents={"claude": agent})
     db = Database(cfg.db_path)
