@@ -189,7 +189,14 @@ export class Tunnel {
         this.setStatus("off");
         return;
       }
-      this.push(`ssh ${exitReason(code, signal)}`);
+      this.push(
+        this.spec.remoteCommand && code === 0
+          // With a command, the connection's life *is* the command's life, so a
+          // clean exit is the far side letting go rather than ssh failing. The
+          // bare "exited with code 0" read as a mystery.
+          ? `the remote command finished, so the connection closed: ${this.spec.remoteCommand}`
+          : `ssh ${exitReason(code, signal)}`,
+      );
       this.noteSilentAskpass();
       this.retry();
     });

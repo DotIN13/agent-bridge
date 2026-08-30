@@ -4,6 +4,23 @@ import path from "node:path";
 import { parseSshCommand, type SshSpec } from "./ssh-command.ts";
 
 /**
+ * Where `ab-serve` is, said in a way that survives not knowing.
+ *
+ * `$AB_BIN_PATH/ab-serve` is the form to reach for, and on its own it is a trap:
+ * an unset variable expands to nothing and the command becomes `/ab-serve`,
+ * which fails as "not found" and names nothing useful. `${VAR:+$VAR/}` adds the
+ * slash only when there is something to put in front of it, so this is
+ * `$AB_BIN_PATH/ab-serve` where the variable is set and a bare `ab-serve` — found
+ * on `PATH` — where it is not. Quoted, so a path with a space in it survives.
+ *
+ * `exec` replaces the login shell rather than leaving it waiting: one process
+ * fewer on the far side, and the signal that arrives when the connection drops
+ * goes straight to `ab-serve`.
+ */
+export const DEFAULT_EXEC_TARGET = '"${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"';
+export const DEFAULT_EXEC = `exec ${DEFAULT_EXEC_TARGET}`;
+
+/**
  * `ab`'s own `gateways.json`, read rather than copied.
  *
  * A gateway configured once for the CLI is configured for the dashboard, and
@@ -22,7 +39,15 @@ export interface GatewayEntry {
   tokenName?: string;
   tokenError?: string;
   ssh?: string;
-  /** Parsed from `ssh`, so the ports can be drawn and probed. */
+  /**
+   * What to run on the far side when the tunnel comes up.
+   *
+   * `true` means the shipped default — start the gateway with `ab-serve` — and a
+   * string is the user's own longer script. Absent means nothing runs and the
+   * connection is a plain forward.
+   */
+  exec?: true | string;
+  /** Parsed from `ssh`, with `exec` folded in. Drawn and probed from here. */
   spec?: SshSpec;
   enabled: boolean;
   autoStart: boolean;
@@ -98,6 +123,35 @@ function resolveToken(
   return { token: null, tokenSource: "none", tokenError: "no token, token_env or token_file" };
 }
 
+/** `true`, a command, or nothing. Anything else in the file is nothing. */
+function readExec(raw: unknown): true | string | undefined {
+  if (raw === true) return true;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  return undefined;
+}
+
+/**
+ * Fold `exec` into the parsed command, and let the `ssh` line win.
+ *
+ * A command written into the line is the more specific and the more visible of
+ * the two — it is right there in the field somebody is looking at — so `exec` is
+ * what fills the gap when the line ends at the host. Both is a mistake worth a
+ * diagnostic rather than a silent choice.
+ */
+export function withExec(spec: SshSpec, exec: true | string | undefined): SshSpec {
+  if (exec === undefined) return spec;
+  if (spec.remoteCommand) {
+    return {
+      ...spec,
+      diagnostics: [
+        ...spec.diagnostics,
+        `The ssh line already ends in a command, so "exec" is not used: ${spec.remoteCommand}`,
+      ],
+    };
+  }
+  return { ...spec, remoteCommand: exec === true ? DEFAULT_EXEC : exec };
+}
+
 export function loadConfig(): LoadedConfig {
   const file = configPath();
   const errors: string[] = [];
@@ -130,12 +184,14 @@ export function loadConfig(): LoadedConfig {
       continue;
     }
     const ssh = typeof value.ssh === "string" && value.ssh.trim() ? value.ssh.trim() : undefined;
+    const exec = readExec(value.exec);
     gateways.push({
       name,
       baseUrl,
       ...resolveToken(value),
       ssh,
-      spec: ssh ? parseSshCommand(ssh) : undefined,
+      exec,
+      spec: ssh ? withExec(parseSshCommand(ssh), exec) : undefined,
       enabled: value.enabled === undefined ? true : Boolean(value.enabled),
       autoStart: Boolean(value.autostart ?? value.autoStart),
       isDefault: name === defaultName,

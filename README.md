@@ -32,9 +32,10 @@ Stable console commands are installed together:
 - `ab` — CLI
 - `ab-monitor` — register a watch on work that outlives a turn
 - `ab-notify` — report a milestone from inside a job
+- `ab-serve` — ensure the gateway is serving, then hold an ssh connection open
 
 Legacy invocation remains supported: `python -m gateway`,
-`python client/ab.py`, `bin/ab-monitor`, and `bin/ab-notify`.
+`python client/ab.py`, `bin/ab-monitor`, `bin/ab-notify`, and `bin/ab-serve`.
 
 On a laptop, keep one tunnel alive:
 
@@ -229,6 +230,42 @@ Short work writes the real report and ends its turn. Work that will run for an
 hour or more registers a monitor and writes a *preliminary* report, so the job
 closes while the watch carries the tail — and the monitor's terminal event is the
 record of how that work actually ended.
+
+## `ab-serve`
+
+The command a laptop's ssh line runs on the login node, so that connecting *is*
+starting the gateway:
+
+```bash
+ssh -L 8787:localhost:8787 midway5 '~/.local/bin/ab-serve'
+```
+
+The dashboard puts it there for you: `"exec": true` on a gateway entry (a switch
+in its config dialog) runs `exec "${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"` when
+the tunnel comes up, and a string in the same key runs your own script instead.
+See [webui/README.md](webui/README.md#starting-the-gateway-on-connect).
+
+It answers the four questions every hand-written version of this has to answer,
+and gets them right in the direction that loses least:
+
+- **Already serving?** Start nothing. A second gateway on the same port is not a
+  spare — it is a bind failure in a log nobody reads.
+- **Port held by something that is not a gateway?** Stop, and do not touch it.
+  Freeing a port this script did not bind is not a launcher's decision to make.
+- **Failed to start?** Exit non-zero, printing the tail of `gateway.log` — over
+  ssh, so the reason lands in whatever is watching the connection rather than on
+  the far side only.
+- **Connection dropped?** The gateway keeps running. It is started in a session
+  of its own, so a closed laptop costs the tunnel and not the jobs: a `waiting`
+  job is an agent still alive on the cluster with an sbatch to report, and
+  killing that to save a socket is the wrong trade. For the opposite — a gateway
+  that dies with the connection — run `ssh -L … host 'exec agent-bridge'`, which
+  needs none of this.
+
+While it holds, it re-checks `/health` and restarts a gateway that has gone,
+giving up after `--max-restarts` (default 3): something that dies four times in
+a row wants a human, not another restart. `--no-park` does the checks and exits,
+which is the form to use from a script.
 
 ## Operator notes
 

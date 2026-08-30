@@ -94,6 +94,15 @@ export interface GatewayState {
   baseUrl: string;
   /** The ssh command that makes `baseUrl` reachable, when the entry names one. */
   ssh?: string;
+  /**
+   * What runs on the far side when the tunnel comes up.
+   *
+   * `true` is the shipped default — `ab-serve`, which starts the gateway if it
+   * is not already serving — and a string is the user's own script.
+   */
+  exec?: true | string;
+  /** The command that will actually run, default expanded, for the dialog. */
+  execCommand?: string;
   enabled: boolean;
   isDefault: boolean;
   /** Where the token comes from. The token itself never leaves the server. */

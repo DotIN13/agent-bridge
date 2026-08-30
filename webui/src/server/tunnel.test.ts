@@ -265,6 +265,62 @@ test("a password that was asked for and refused says nothing about askpass", asy
   await h.stop();
 });
 
+/**
+ * An ssh that reports what it was handed and then behaves as told.
+ *
+ * `hold` decides the half being tested: staying alive is a remote command
+ * holding the connection open (`ab-serve`), and exiting 0 is one that finished.
+ */
+function fakeSshEchoingArgs(hold: boolean): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "ab-fake-ssh-"));
+  const file = path.join(dir, "ssh");
+  writeFileSync(
+    file,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.stderr.write("argc=" + args.length + "\\n");
+process.stderr.write("last=" + args[args.length - 1] + "\\n");
+${hold ? "setInterval(() => {}, 1000);" : "process.exit(0);"}
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  return file;
+}
+
+test("a remote command reaches ssh as one argument and holds the tunnel up", async () => {
+  const bridge = new AskpassBridge(() => {});
+  await bridge.start();
+  const command = `${fakeSshEchoingArgs(true)} -L 18789:localhost:8787 host 'ab-serve --interval 30'`;
+  const tunnel = new Tunnel("gw", parseSshCommand(command), command, false, bridge, () => {});
+
+  tunnel.up(true);
+  await waitFor(() => tunnel.state([], ["gw"]).status === "up", 6000);
+
+  const log = tunnel.state([], ["gw"]).log.join("\n");
+  // One argument, with its own spacing — not three words ssh would have to
+  // reassemble, and not a `-N` that would forbid a command at all.
+  assert.match(log, /last=ab-serve --interval 30/);
+  assert.ok(!log.includes(" -N "));
+
+  tunnel.down();
+  await bridge.stop();
+});
+
+test("a remote command that finishes is reported as that, not as a bare exit 0", async () => {
+  const bridge = new AskpassBridge(() => {});
+  await bridge.start();
+  const command = `${fakeSshEchoingArgs(false)} -L 18790:localhost:8787 host 'ab-serve'`;
+  const tunnel = new Tunnel("gw", parseSshCommand(command), command, false, bridge, () => {});
+
+  tunnel.up(true);
+  // No autostart, so a finished command leaves the tunnel off rather than
+  // retrying — and `ab-serve` exiting means the gateway would not serve.
+  await waitFor(() => tunnel.running === false, 6000);
+  assert.match(tunnel.state([], ["gw"]).log.join("\n"), /the remote command finished.*ab-serve/);
+
+  await bridge.stop();
+});
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {

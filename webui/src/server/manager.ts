@@ -239,6 +239,8 @@ export class Manager {
       name: entry.name,
       baseUrl: entry.baseUrl,
       ssh: entry.ssh,
+      exec: entry.exec,
+      execCommand: entry.spec?.remoteCommand,
       enabled: entry.enabled,
       isDefault: entry.isDefault,
       tokenSource: entry.tokenSource,
@@ -356,6 +358,7 @@ export class Manager {
       autoStart?: boolean;
       makeDefault?: boolean;
       rename?: string;
+      exec?: true | string | false;
     },
   ): void {
     if (this.readOnly) throw new Error(`${this.configFile} is TOML; edit it by hand`);
@@ -368,6 +371,11 @@ export class Manager {
       entry.base_url = url;
     }
     if (patch.ssh !== undefined) entry.ssh = patch.ssh?.trim() ? patch.ssh.trim() : undefined;
+    // `true` for the shipped default, a string for a script of their own, and
+    // the key removed when nothing should run — three states, one field.
+    if (patch.exec !== undefined) {
+      entry.exec = patch.exec === false ? undefined : patch.exec;
+    }
     // The three token forms are mutually exclusive, so setting one clears the
     // others: an entry carrying both `token_env` and `token_file` reads as two
     // sources of truth, and `ab` silently prefers one of them.

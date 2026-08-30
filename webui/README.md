@@ -41,21 +41,76 @@ them. The dashboard adds two optional keys, which `ab` ignores:
     "midway5": {
       "base_url": "http://localhost:8787",
       "token_env": "AGENT_BRIDGE_TOKEN",
-      "ssh": "ssh -N -L 8787:localhost:8787 midway5",
+      "ssh": "ssh -L 8787:localhost:8787 midway5",
+      "exec": true,
       "autostart": false
     }
   }
 }
 ```
 
-`ssh` is the command you would type. It is run as written — with `-N`, a few
+`ssh` is the command you would type. It is run as written — with a few
 keep-alives and `ExitOnForwardFailure=yes` added, and the user's own `-o`s last
 so they win. `autostart` brings it up when the server starts and lets a dropped
-connection come back on a backoff.
+connection come back on a backoff. `exec` is the next section.
 
-Edits from the config dialog preserve everything else in the file, including keys
-this build has never heard of, and land as an atomic `0600` write. A `.toml`
-config is read-only here: the dialog says so rather than rewriting it as JSON.
+## Starting the gateway on connect
+
+`exec` decides what runs on the far side once the forward is up, and the
+connection then lives as long as that command does. Three states, one key:
+
+| `exec` | What runs |
+|---|---|
+| absent | Nothing. A plain forward, and `-N` goes on the argv. |
+| `true` | `exec "${AB_BIN_PATH:+$AB_BIN_PATH/}ab-serve"` — the shipped default. |
+| a string | That, verbatim, on the far side. |
+
+In the dialog it is one switch — *Start the gateway when the tunnel comes up* —
+and a box that is empty for the default and holds your script when you have one.
+
+`ab-serve` ships with agent-bridge. It checks whether the gateway is already
+serving, starts it if not, holds the ssh open while it serves, and **exits if it
+cannot** — which drops the tunnel, so the row goes red with the reason in the
+console instead of green in front of a dead gateway. It starts the gateway in a
+session of its own, so closing a laptop costs the tunnel and not the jobs. The
+root [README](../README.md#ab-serve) has the rest.
+
+Three things follow from the mechanism:
+
+- `-N` is added exactly when there is **no** command — the two are exclusive,
+  since `-N` means "no command".
+- A command written into the `ssh` line wins over `exec`, and the clash is a
+  diagnostic rather than a silent choice: the line is the more specific of the
+  two and it is right there in the field.
+- A command that returns immediately takes the tunnel with it, and the log says
+  so rather than reporting a bare "exited with code 0". `systemctl --user start
+  agent-bridge` alone is that mistake; `… && exec ab-serve` is not.
+
+### Why the default is written that way
+
+`$AB_BIN_PATH/ab-serve` looks like the obvious default and is a trap: unset, the
+variable expands to nothing and the command becomes `/ab-serve`, which fails as
+"not found" and names nothing useful. `${AB_BIN_PATH:+$AB_BIN_PATH/}` adds the
+slash only when there is something to put before it, so the default is
+`$AB_BIN_PATH/ab-serve` where the variable is set and a bare `ab-serve` — found
+on `PATH` — where it is not. It is quoted, so a path with a space survives, and
+prefixed with `exec` so the login shell is replaced rather than left waiting.
+
+**Whether the variable is there at all** is the part worth checking.
+`ssh host cmd` runs a non-interactive shell. bash does read `~/.bashrc` in that
+case, but nearly every distribution's `.bashrc` opens with an early return when
+not interactive, so exports below that line never run — the variable exists in
+your login shell and not in the one ssh uses. This settles it in one command:
+
+```bash
+ssh midway5 'echo "AB_BIN_PATH=$AB_BIN_PATH"; command -v ab-serve'
+```
+
+If neither prints anything useful, the fixes in ascending order of assumption
+are: put the `export` *above* the interactivity guard in `~/.bashrc`; or set
+`exec` to a path — `"~/.local/bin/ab-serve"`, which the remote shell expands with
+no profile involved; or to `"bash -lc 'exec ab-serve'"` when it has to come from
+`~/.profile`.
 
 ## The security model
 

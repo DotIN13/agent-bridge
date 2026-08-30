@@ -44,6 +44,13 @@ function Body(props: { name: string | null }) {
     existing()?.tokenSource === "token_file" ? (existing()!.tokenName ?? "") : "",
   );
   const [enabled, setEnabled] = createSignal(existing()?.enabled ?? true);
+  // Three states in two controls: off, on with the shipped default, and on with
+  // a script. The text box is empty for the default, which is what makes "on"
+  // mean "do the usual thing" without anybody having to know what that is.
+  const [onConnect, setOnConnect] = createSignal(existing()?.exec !== undefined);
+  const [execScript, setExecScript] = createSignal(
+    typeof existing()?.exec === "string" ? (existing()!.exec as string) : "",
+  );
   const [makeDefault, setMakeDefault] = createSignal(existing()?.isDefault ?? false);
   const [parsed, setParsed] = createSignal<ParsedSsh | null>(null);
   const [confirming, setConfirming] = createSignal(false);
@@ -88,6 +95,7 @@ function Body(props: { name: string | null }) {
         tokenEnv: tokenEnv().trim() ? tokenEnv().trim() : null,
         tokenFile: tokenFile().trim() ? tokenFile().trim() : null,
         enabled: enabled(),
+        exec: !onConnect() ? false : execScript().trim() ? execScript().trim() : true,
         makeDefault: makeDefault(),
         ...(isNew() || name().trim() === props.name ? {} : { rename: name().trim() }),
       };
@@ -169,8 +177,8 @@ function Body(props: { name: string | null }) {
           onValue={setSsh}
           rows={2}
           spellcheck={false}
-          placeholder="ssh -N -L 8787:localhost:8787 midway5"
-          hint="The command you would type. It is run as written, with -N and a few keep-alives added."
+          placeholder="ssh -L 8787:localhost:8787 midway5 'ab-serve'"
+          hint="The command you would type, run as written with a few keep-alives added. A command after the host runs there when the tunnel comes up — ab-serve starts the gateway and holds the connection open for as long as it serves."
         />
 
         <Show when={parsed()}>
@@ -196,6 +204,14 @@ function Body(props: { name: string | null }) {
                   </Show>
                 </span>
               </div>
+              <Show when={result().remoteCommand}>
+                {(command) => (
+                  <div data-slot="parse-row">
+                    <span data-slot="field-label">On connect</span>
+                    <code>{command()}</code>
+                  </div>
+                )}
+              </Show>
               <Show when={result().diagnostics.length}>
                 <ul data-slot="parse-problems">
                   <For each={result().diagnostics}>{(line) => <li>{line}</li>}</For>
@@ -231,6 +247,26 @@ function Body(props: { name: string | null }) {
           One or the other. The token itself is never typed here and never leaves the server — this names where to read
           it from, exactly as <code>ab</code> does.
         </p>
+
+        <div data-slot="form-switches">
+          <Switch
+            checked={onConnect()}
+            onChange={setOnConnect}
+            label="Start the gateway when the tunnel comes up"
+          />
+        </div>
+
+        <Show when={onConnect()}>
+          <TextArea
+            label="On connect"
+            value={execScript()}
+            onValue={setExecScript}
+            rows={2}
+            spellcheck={false}
+            placeholder={existing()?.execCommand ?? "ab-serve"}
+            hint="Left empty this runs ab-serve, which starts the gateway if it is not already serving and holds the connection open while it is. Put your own script here to do more — it runs on the far side, and the tunnel lives as long as it does."
+          />
+        </Show>
 
         <div data-slot="form-switches">
           <Switch checked={enabled()} onChange={setEnabled} label="Enabled" />

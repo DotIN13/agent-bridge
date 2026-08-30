@@ -40,10 +40,11 @@ Token order: `token`, `token_env`, `token_file`. Config discovery:
 `--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
 `~/.config/agent-bridge/gateways.json`, `./gateways.json`.
 
-Two further keys are read by the dashboard in [`webui/`](../webui/README.md) and
-ignored here: `ssh`, the command that makes `base_url` reachable, and
-`autostart`. `ab` never starts a tunnel — it expects one to exist — so an entry
-carrying them works unchanged at the CLI.
+Three further keys are read by the dashboard in [`webui/`](../webui/README.md)
+and ignored here: `ssh`, the command that makes `base_url` reachable; `exec`,
+what to run on the far side once it is up (`true` for the shipped `ab-serve`, or
+a script of your own); and `autostart`. `ab` never starts a tunnel — it expects
+one to exist — so an entry carrying them works unchanged at the CLI.
 
 ## CLI
 

@@ -71,6 +71,7 @@ export function createRouter(manager: Manager): Router {
       tokenFile: nullable(body.tokenFile),
       enabled: bool(body.enabled),
       autoStart: bool(body.autoStart),
+      exec: execOf(body.exec),
       makeDefault: bool(body.makeDefault),
       rename: str(body.rename),
     });
@@ -137,4 +138,10 @@ function nullable(value: unknown): string | null | undefined {
 
 function bool(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+/** `true` for the default, a string for a script, `false` to clear the key. */
+function execOf(value: unknown): true | string | false | undefined {
+  if (value === true || value === false) return value;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

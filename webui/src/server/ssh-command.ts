@@ -25,6 +25,15 @@ export interface SshSpec {
   options: Record<string, string>;
   /** Everything else, in order, handed to ssh untouched. */
   passthrough: string[];
+  /**
+   * A command to run on the far side, when the line names one.
+   *
+   * `ssh -L … host 'ab-serve'` is the shape that makes a gateway start itself:
+   * the command holds the connection open for as long as it is serving, so the
+   * tunnel and the service go up and down together. Its presence is what drops
+   * `-N` from the argv — the two are exclusive, since `-N` is *no command*.
+   */
+  remoteCommand?: string;
   /** Refusals and problems, in the words the user should read. */
   diagnostics: string[];
 }
@@ -32,10 +41,21 @@ export interface SshSpec {
 /** Binds that keep a forward on this machine. Anything else is refused. */
 const LOOPBACK = new Set(["", "localhost", "127.0.0.1", "::1", "[::1]"]);
 
-/** Flags that take a value in the next argument. */
+/**
+ * Flags that take a value in the next argument.
+ *
+ * Arity is the one thing this parser cannot infer: an unknown flag is assumed
+ * to take none, because assuming otherwise made `-4 -L …` swallow the forward.
+ * The cost is that a *wrapper's* valued flag reads as a boolean and its value
+ * becomes the destination — `autossh -M 0 -L … midway5` came out with a host of
+ * `0`. So `-M`, autossh's monitoring port, is named here alongside ssh's own.
+ * Anything else with an argument needs the attached form (`-Mn0`) or a
+ * diagnostic will not save it.
+ */
 const VALUED = new Set([
   "-L", "-R", "-D", "-p", "-i", "-J", "-o", "-l", "-F", "-b", "-c", "-m", "-w", "-e", "-B", "-I",
   "-S", "-Q", "-W",
+  "-M",
 ]);
 
 /**
@@ -44,12 +64,35 @@ const VALUED = new Set([
  */
 const OURS = new Set(["-N", "-f", "-n", "-T", "-t", "-v", "-vv", "-vvv", "-q"]);
 
-/** Split a command line, respecting quotes. No shell is involved anywhere. */
-export function tokenize(command: string): string[] {
-  const out: string[] = [];
+/** One token, and where it sat in the line it came from. */
+interface Token {
+  value: string;
+  /** Index of the first character, opening quote included. */
+  start: number;
+  /** Index just past the last character consumed. */
+  end: number;
+}
+
+/**
+ * Split a command line, respecting quotes. No shell is involved anywhere.
+ *
+ * The spans are what let a remote command be lifted out *as written* rather
+ * than rebuilt from tokens: `'systemctl --user start x && ab-serve'` has to
+ * reach the far side with its own quoting intact, and reassembling it from
+ * unquoted pieces is how a `&&` ends up as an argument to `systemctl`.
+ */
+function scan(command: string): Token[] {
+  const out: Token[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
   let started = false;
+  let start = 0;
+
+  const push = (end: number) => {
+    out.push({ value: current, start, end });
+    current = "";
+    started = false;
+  };
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -59,20 +102,34 @@ export function tokenize(command: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'") {
+      if (!started && !current) start = i;
       quote = ch;
       started = true;
       continue;
     }
     if (/\s/.test(ch)) {
-      if (started || current) out.push(current);
-      current = "";
-      started = false;
+      if (started || current) push(i);
       continue;
     }
+    if (!started && !current) start = i;
     current += ch;
   }
-  if (started || current) out.push(current);
+  if (started || current) push(command.length);
   return out;
+}
+
+export function tokenize(command: string): string[] {
+  return scan(command).map((token) => token.value);
+}
+
+/** One enclosing layer of quotes, removed. What ssh would have been handed. */
+function unwrap(text: string): string {
+  const trimmed = text.trim();
+  const first = trimmed[0];
+  if ((first === '"' || first === "'") && trimmed.endsWith(first) && trimmed.length > 1) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
 }
 
 /**
@@ -129,29 +186,48 @@ export function parseSshCommand(command: string): SshSpec {
   const forwards: Forward[] = [];
   const options: Record<string, string> = {};
   const passthrough: string[] = [];
-  const tokens = tokenize(command);
+  const spans = scan(command);
+  const tokens = spans.map((span) => span.value);
 
   const parsed: SshSpec = { destination: "", forwards, options, passthrough, diagnostics };
 
   let i = 0;
-  // The leading `ssh`, or a path to one. Anything else is a destination-first
-  // command, which is not a form ssh accepts, so treat it as the binary.
+  /*
+   * The first word is the program, whatever it is called.
+   *
+   * Matching only `/ssh$/` here looked safer and was not: a line starting
+   * `autossh -M 0 -L …` had `autossh` taken as the *destination*, so the real
+   * host became a remote command and the connect button reported "no ssh on
+   * PATH" — three symptoms, none of them naming the cause. Found by a live run
+   * against a fake called `ssh-exec`. A bare `ssh` stays `undefined` so the
+   * argv keeps using whatever is on PATH.
+   */
   if (tokens.length && !tokens[0]!.startsWith("-")) {
     const first = tokens[0]!;
-    if (/(^|[\\/])ssh(\.exe)?$/i.test(first)) {
-      if (first.toLowerCase() !== "ssh") parsed.binary = first;
-      i = 1;
-    }
+    if (first.toLowerCase() !== "ssh") parsed.binary = first;
+    i = 1;
   }
 
   for (; i < tokens.length; i++) {
     const token = tokens[i]!;
 
     if (!token.startsWith("-")) {
-      if (!parsed.destination) parsed.destination = token;
-      // Anything after the destination is a remote command, which `-N` forbids.
-      else diagnostics.push(`Ignored "${token}": the connection runs with -N, so it carries no remote command.`);
-      continue;
+      if (!parsed.destination) {
+        parsed.destination = token;
+        continue;
+      }
+      /*
+       * The rest of the line is a command for the far side, taken raw.
+       *
+       * ssh itself stops reading options at the destination, so being faithful
+       * would mean treating *everything* after it as the command — except that
+       * `ssh midway5 -L 8787:localhost:8787` used to parse here as a forward,
+       * and turning somebody's working config into a remote `-L` silently is a
+       * worse failure than not being faithful. So a token starting with `-` is
+       * still read as a flag, and anything else opens the command.
+       */
+      parsed.remoteCommand = unwrap(command.slice(spans[i]!.start));
+      break;
     }
 
     if (OURS.has(token)) continue;
@@ -225,7 +301,11 @@ export function parseSshCommand(command: string): SshSpec {
  */
 export function buildSshArgs(spec: SshSpec, options: { batch: boolean }): string[] {
   const args = [
-    "-N",
+    // `-N` is "no command", so it goes exactly when there is no command. With
+    // one, the connection lives as long as that command runs — which is the
+    // whole mechanism behind `ab-serve`: it holds the ssh open while the
+    // gateway serves, and exits when it cannot.
+    ...(spec.remoteCommand ? [] : ["-N"]),
     "-o", "ExitOnForwardFailure=yes",
     "-o", "ServerAliveInterval=30",
     "-o", "ServerAliveCountMax=3",
@@ -249,6 +329,10 @@ export function buildSshArgs(spec: SshSpec, options: { batch: boolean }): string
   for (const [key, value] of Object.entries(spec.options)) args.push("-o", `${key}=${value}`);
 
   args.push(spec.destination);
+  // One argument, not several: ssh joins its remaining arguments with spaces
+  // before handing them to the remote shell, so passing the command whole is
+  // the same thing said once — and it keeps the user's own quoting inside it.
+  if (spec.remoteCommand) args.push(spec.remoteCommand);
   return args;
 }
 

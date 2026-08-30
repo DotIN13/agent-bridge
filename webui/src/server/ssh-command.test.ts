@@ -73,15 +73,82 @@ test("a command with no host says so", () => {
   assert.match(parseSshCommand("ssh -L 8787:localhost:8787").diagnostics.join(" "), /No host/);
 });
 
-test("a full path to ssh is kept as the binary, and a bare `ssh` is not", () => {
+test("the first word is the program, whatever it is called", () => {
   assert.equal(parseSshCommand("/usr/bin/ssh gw").binary, "/usr/bin/ssh");
+  // A bare `ssh` stays undefined, so the argv uses whatever is on PATH.
   assert.equal(parseSshCommand("ssh gw").binary, undefined);
+  assert.equal(parseSshCommand("ssh.exe gw").binary, "ssh.exe");
+
+  /*
+   * The one that cost a live run: matching only `/ssh$/` made `autossh` the
+   * *destination*, which turned the real host into a remote command and left
+   * the connect button reporting "no ssh on PATH".
+   */
+  // `-M 0` is autossh's monitoring port. Arity is the one thing this parser
+  // cannot infer, so it is named in VALUED — without that its `0` became the
+  // destination and `midway5` a remote command.
+  const autossh = parseSshCommand("autossh -M 0 -L 8787:localhost:8787 midway5");
+  assert.equal(autossh.binary, "autossh");
+  assert.equal(autossh.destination, "midway5");
+  assert.equal(autossh.remoteCommand, undefined);
+  assert.deepEqual(autossh.forwards, [
+    { kind: "local", localPort: 8787, remoteHost: "localhost", remotePort: 8787 },
+  ]);
 });
 
-test("a remote command after the destination is ignored, because -N carries none", () => {
-  const parsed = parseSshCommand("ssh gw sleep 100");
-  assert.equal(parsed.destination, "gw");
-  assert.match(parsed.diagnostics.join(" "), /carries no remote command/);
+test("a command after the host is kept, and takes -N off the argv with it", () => {
+  const parsed = parseSshCommand("ssh -L 8787:localhost:8787 midway5 ab-serve");
+  assert.equal(parsed.destination, "midway5");
+  assert.equal(parsed.remoteCommand, "ab-serve");
+  assert.deepEqual(parsed.diagnostics, []);
+
+  const args = buildSshArgs(parsed, { batch: false });
+  // `-N` is "no command", so the two are exclusive.
+  assert.ok(!args.includes("-N"));
+  assert.deepEqual(args.slice(-2), ["midway5", "ab-serve"]);
+});
+
+test("a quoted command reaches the far side as one argument, quoting intact", () => {
+  // Rebuilt from tokens, `&&` becomes an argument to systemctl and the second
+  // half never runs. It has to travel as written.
+  const parsed = parseSshCommand(
+    `ssh -L 8787:localhost:8787 gw 'systemctl --user start agent-bridge && exec ab-serve --interval 30'`,
+  );
+  assert.equal(parsed.remoteCommand, "systemctl --user start agent-bridge && exec ab-serve --interval 30");
+  const args = buildSshArgs(parsed, { batch: false });
+  assert.equal(args.at(-1), "systemctl --user start agent-bridge && exec ab-serve --interval 30");
+  assert.equal(args.filter((arg) => arg === "systemctl --user start agent-bridge && exec ab-serve --interval 30").length, 1);
+});
+
+test("an unquoted command keeps every word, including its own flags", () => {
+  const parsed = parseSshCommand("ssh gw ab-serve --config ~/.config/agent-bridge/config.toml");
+  assert.equal(parsed.remoteCommand, "ab-serve --config ~/.config/agent-bridge/config.toml");
+  // The command's own `--config` is not read as ssh's: everything past the
+  // first non-flag word belongs to the far side.
+  assert.deepEqual(parsed.options, {});
+});
+
+test("a flag after the destination is still a flag, so an old config keeps working", () => {
+  /*
+   * ssh itself stops reading options at the destination, so `-L` here is
+   * strictly a remote command. Being faithful would silently turn
+   * `ssh midway5 -L 8787:localhost:8787` — which this parser used to accept —
+   * into a remote `-L` and drop the forward, which is a worse failure than not
+   * being faithful.
+   */
+  const parsed = parseSshCommand("ssh midway5 -L 8787:localhost:8787");
+  assert.equal(parsed.destination, "midway5");
+  assert.equal(parsed.remoteCommand, undefined);
+  assert.deepEqual(parsed.forwards, [
+    { kind: "local", localPort: 8787, remoteHost: "localhost", remotePort: 8787 },
+  ]);
+  assert.ok(buildSshArgs(parsed, { batch: false }).includes("-N"));
+});
+
+test("the command is the whole tail, so a flag inside it is not lifted out", () => {
+  const parsed = parseSshCommand("ssh gw bash -lc 'exec ab-serve'");
+  assert.equal(parsed.remoteCommand, "bash -lc 'exec ab-serve'");
+  assert.deepEqual(parsed.passthrough, []);
 });
 
 test("the argv puts the user's own options last, so they win", () => {
@@ -110,6 +177,11 @@ test("a dynamic forward comes back as -D and not as a broken -L", () => {
   assert.deepEqual(parsed.forwards, [{ kind: "dynamic", localPort: 1080 }]);
   const args = buildSshArgs(parsed, { batch: false });
   assert.deepEqual(args.slice(args.indexOf("-D"), args.indexOf("-D") + 2), ["-D", "1080"]);
+});
+
+test("the formatted command quotes the remote command as the one argument it is", () => {
+  const parsed = parseSshCommand("ssh -L 1:localhost:1 gw 'ab-serve --interval 30'");
+  assert.match(formatSshCommand(parsed, { batch: false }), /gw "ab-serve --interval 30"$/);
 });
 
 test("the formatted command quotes an option with a space in it", () => {

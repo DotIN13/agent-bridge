@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { loadConfig, removeEntry, renameEntry, writeEntry } from "./config.ts";
+import { execFileSync } from "node:child_process";
+import { DEFAULT_EXEC, DEFAULT_EXEC_TARGET, loadConfig, removeEntry, renameEntry, writeEntry } from "./config.ts";
 
 /** A config file of our own, pointed at the way `ab` points at one. */
 function withConfig(contents: unknown): string {
@@ -82,6 +83,66 @@ test("a config that is not JSON is reported with the parse error in it", () => {
   const file = withConfig({});
   writeFileSync(file, "{ nope", "utf8");
   assert.match(loadConfig().errors.join(" "), /is not valid JSON/);
+});
+
+test("exec true means the shipped default, and a string means your own script", () => {
+  withConfig({
+    gateways: {
+      plain: { base_url: "http://localhost:1", ssh: "ssh gw" },
+      standard: { base_url: "http://localhost:2", ssh: "ssh gw2", exec: true },
+      custom: { base_url: "http://localhost:3", ssh: "ssh gw3", exec: "~/bin/start.sh --wait" },
+      // A key the file may carry and this reader turns into "absent", so the
+      // three states downstream stay three.
+      off: { base_url: "http://localhost:4", ssh: "ssh gw4", exec: false },
+    },
+  });
+
+  const byName = Object.fromEntries(loadConfig().gateways.map((entry) => [entry.name, entry]));
+  assert.equal(byName.plain!.spec!.remoteCommand, undefined);
+  assert.equal(byName.standard!.spec!.remoteCommand, DEFAULT_EXEC);
+  assert.equal(byName.custom!.spec!.remoteCommand, "~/bin/start.sh --wait");
+  assert.equal(byName.off!.exec, undefined);
+  assert.equal(byName.off!.spec!.remoteCommand, undefined);
+});
+
+test("a command in the ssh line wins over exec, and the clash is said out loud", () => {
+  // The line is the more specific and the more visible of the two — it is in the
+  // field somebody is looking at — so `exec` fills the gap rather than taking
+  // over. Silently preferring either one is how a config lies.
+  withConfig({
+    gateways: { gw: { base_url: "http://localhost:1", ssh: "ssh host 'my-own-thing'", exec: true } },
+  });
+  const entry = loadConfig().gateways[0]!;
+  assert.equal(entry.spec!.remoteCommand, "my-own-thing");
+  assert.match(entry.spec!.diagnostics.join(" "), /already ends in a command/);
+});
+
+test("exec with no ssh command carries nothing, because there is no connection to carry it", () => {
+  withConfig({ gateways: { gw: { base_url: "http://localhost:1", exec: true } } });
+  const entry = loadConfig().gateways[0]!;
+  assert.equal(entry.exec, true);
+  assert.equal(entry.spec, undefined);
+});
+
+test("the default command finds ab-serve with or without $AB_BIN_PATH", () => {
+  /*
+   * The whole point of the expansion, checked against a real shell rather than
+   * read. `$AB_BIN_PATH/ab-serve` on its own is the trap: unset, it expands to
+   * `/ab-serve` and fails as "not found", naming nothing useful.
+   */
+  const expand = (env: Record<string, string>) =>
+    execFileSync("/bin/sh", ["-c", `echo ${DEFAULT_EXEC_TARGET}`], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", ...env },
+    }).trim();
+
+  assert.equal(expand({}), "ab-serve");
+  assert.equal(expand({ AB_BIN_PATH: "/opt/ab/bin" }), "/opt/ab/bin/ab-serve");
+  // A path with a space survives, because the expansion is quoted.
+  assert.equal(expand({ AB_BIN_PATH: "/opt/my tools" }), "/opt/my tools/ab-serve");
+  // And it replaces the shell, so the signal from a dropped connection lands on
+  // ab-serve rather than on a shell waiting for it.
+  assert.ok(DEFAULT_EXEC.startsWith("exec "));
 });
 
 test("a diagnostic from the ssh command is attached to the entry that carries it", () => {

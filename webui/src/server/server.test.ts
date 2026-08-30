@@ -213,6 +213,41 @@ test("the config dialog's save lands in ab's own file and is read back at once",
   await app.stop();
 });
 
+test("the on-connect switch writes exec, and the tunnel picks up the default command", async () => {
+  const file = writeConfig({});
+  const app = await run();
+
+  await call(app.base, "/gateways/gw", {
+    method: "PUT",
+    body: JSON.stringify({
+      baseUrl: "http://localhost:8787",
+      ssh: "ssh -L 8787:localhost:8787 midway5",
+      exec: true,
+    }),
+  });
+
+  let raw = JSON.parse(await readFile(file)) as Record<string, any>;
+  assert.equal(raw.gateways.gw.exec, true);
+  // `true` in the file, the expansion in the argv: the page never has to know
+  // what the default is, and the file never has to carry a copy of it.
+  const command = app.manager.state().tunnels[0]!.command;
+  assert.equal(command, "ssh -L 8787:localhost:8787 midway5");
+  assert.match(app.manager.state().gateways[0]!.execCommand!, /ab-serve/);
+
+  // A script of their own replaces it, and turning it off removes the key
+  // rather than writing `false` — one absent state, not two falsy ones.
+  await call(app.base, "/gateways/gw", { method: "PUT", body: JSON.stringify({ exec: "~/bin/mine.sh" }) });
+  raw = JSON.parse(await readFile(file)) as Record<string, any>;
+  assert.equal(raw.gateways.gw.exec, "~/bin/mine.sh");
+
+  await call(app.base, "/gateways/gw", { method: "PUT", body: JSON.stringify({ exec: false }) });
+  raw = JSON.parse(await readFile(file)) as Record<string, any>;
+  assert.ok(!("exec" in raw.gateways.gw));
+  assert.equal(app.manager.state().gateways[0]!.execCommand, undefined);
+
+  await app.stop();
+});
+
 test("a base URL that is not one is refused before it reaches the file", async () => {
   const file = writeConfig({});
   const app = await run();

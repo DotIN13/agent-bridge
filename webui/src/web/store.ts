@@ -213,6 +213,8 @@ export function answerPrompt(id: string, answer: string | null): Promise<unknown
 
 export interface GatewayPatch {
   baseUrl?: string;
+  /** `true` for the shipped default, a script of your own, `false` for none. */
+  exec?: true | string | false;
   ssh?: string | null;
   tokenEnv?: string | null;
   tokenFile?: string | null;
@@ -248,6 +250,8 @@ export function steerJob(gateway: string, jobId: string, prompt: string): Promis
 export interface ParsedSsh {
   binary?: string;
   destination: string;
+  /** What will run on the far side when the tunnel comes up, if anything. */
+  remoteCommand?: string;
   forwards: Array<{ kind: "local" | "dynamic"; localPort: number; remoteHost?: string; remotePort?: number }>;
   port?: number;
   jump?: string;

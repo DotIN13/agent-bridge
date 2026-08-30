@@ -14,6 +14,7 @@ ab = "client.ab:main"
 agent-bridge = "gateway.__main__:main"
 ab-notify = "client.ab_notify:main"
 ab-monitor = "client.ab_monitor:main"
+ab-serve = "gateway.serve:main"
 
 [project.optional-dependencies]
 test = [

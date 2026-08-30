@@ -66,6 +66,7 @@ def test_console_scripts_and_dynamic_version_are_declared():
         "agent-bridge": "gateway.__main__:main",
         "ab-notify": "client.ab_notify:main",
         "ab-monitor": "client.ab_monitor:main",
+        "ab-serve": "gateway.serve:main",
     }
     assert config["tool"]["setuptools"]["dynamic"]["version"]["attr"] == \
         "client._version.__version__"
@@ -90,7 +91,7 @@ def test_console_scripts_install_and_run_offline(tmp_path):
         "--no-build-isolation"], check=True, capture_output=True, text=True,
         timeout=120)
     suffix = ".exe" if os.name == "nt" else ""
-    for command in ("ab", "agent-bridge", "ab-notify", "ab-monitor"):
+    for command in ("ab", "agent-bridge", "ab-notify", "ab-monitor", "ab-serve"):
         result = subprocess.run([str(scripts / f"{command}{suffix}"), "--help"],
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, (command, result.stdout, result.stderr)
