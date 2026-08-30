@@ -201,8 +201,18 @@ when its turn ends and long work is a monitor.
 `POST /v1/jobs/{ref}/message` remains for anything that wants immediate delivery
 over HTTP.
 
-A job is terminal when its turn ends, always. `ab wait` has one end to wait for,
-and `ab monitor <id> --wait` is how you block on work that outlives a turn.
+**A job is `succeeded` when its turn has ended and it has written
+`$AB_JOB_DIR/report.md`.** Between the two the row is `waiting`: the agent process
+stays alive, remains steerable, and can still write the file. No report within
+`[worker] report_wait_sec` (default 30 minutes) fails the job with
+`report_missing`.
+
+    queued -> running -> waiting -> succeeded | failed | canceled
+
+Short work writes the real report and ends its turn. Work that will run for an
+hour or more registers a monitor and writes a *preliminary* report, so the job
+closes while the watch carries the tail — and the monitor's terminal event is the
+record of how that work actually ended.
 
 ## Operator notes
 

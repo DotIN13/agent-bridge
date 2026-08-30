@@ -157,10 +157,22 @@ share a millisecond.
 
 ### Job status
 
-`queued` → `running` → `succeeded` | `failed` | `canceled`. **The turn is the
-job**: a row goes terminal when the agent's turn ends, `finished_at` is set then,
-and nothing a delegate writes into its job dir changes it. A caller that wants to
-end a job early uses `POST /v1/jobs/{ref}/cancel`.
+`queued` → `running` → `waiting` → `succeeded` | `failed` | `canceled`.
+
+A job is `succeeded` when **both** halves have happened: its turn has ended and
+`$AB_JOB_DIR/report.md` has been written. Between them the row is `waiting`, which
+is non-terminal — the agent process is still alive, can still be steered, and can
+still write the file. The gateway notices the report within a sweep (5s) and the
+row becomes `succeeded` with `reason: report_written`.
+
+A `waiting` job with no report by `worker.report_wait_sec` (default 1800, 0 waits
+indefinitely) fails with `report_missing`. That window is a grace period, not a
+wait: the delegate is meant to write the report *before* ending its turn. The
+turn's last message is kept on the row either way.
+
+A turn that fails or is canceled goes terminal directly — there is no deliverable
+to wait for. A caller that wants to end a job early uses
+`POST /v1/jobs/{ref}/cancel`, which also releases a `waiting` job.
 
 Work that outlives the turn is a **monitor** with its own row and its own
 terminal states — see *Monitors* below, and `ab monitor <id> --wait` to block on
@@ -396,8 +408,11 @@ filters on `job`, `status` and `active`; `GET /v1/monitors/{id}` is the detail;
 `POST /v1/monitors/{id}/cancel` stops watching and is idempotent — it says
 nothing about the work, which keeps running.
 
-Monitor statuses are `queued`, `running`, `finished`, `failed`, `expired` and
-`canceled`. `expired` means a deadline passed and the gateway stopped watching,
+A monitor's terminal transition is the **record of how the long task ended**,
+carried on the creating job's stream long after that job closed: `terminal: true`
+plus the label, the poll command, the last output, when it resolved, how long it
+was watched, and the `result_paths`. Monitor statuses are `queued`, `running`,
+`finished`, `failed`, `expired` and `canceled`. `expired` means a deadline passed and the gateway stopped watching,
 which is a weaker claim than the work having failed. Only *transitions* emit
 events, on the creating job's stream, carrying both a report-shaped `status` and
 the precise `monitor_status`.

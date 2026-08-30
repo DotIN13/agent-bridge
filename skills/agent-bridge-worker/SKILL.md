@@ -13,9 +13,33 @@ You are the **remote agent**. A local session, working with a human, wrote the b
 ## Workflow
 
 1. **Inventory, then do the work.** You can see this machine; the caller cannot.
-2. **If it hands off to a scheduler or a long background run**, submit it and monitor with bounded probes or a background wait — never a blocking sleep, which just hits the tool timeout.
-3. **Report a milestone at each real step**, so a long run does not look hung: `ab-notify --msg "..."`.
-4. **If the work outlives your turn, register a monitor before you end it** — `ab-monitor add --slurm <id>`. Then end the turn and report what you submitted. The gateway watches the scheduler; you do not have to, and you must not block on it.
+2. **Report a milestone at each real step**, so a long run does not look hung: `ab-notify --msg "..."`.
+3. **Then take one of two paths, by how long the work will take.**
+
+**Under an hour — stay with it.** Keep working, wait out the run with bounded probes (never a blocking sleep, which just hits the tool timeout), and write the real report when it is done:
+
+```bash
+cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"     # or write it yourself
+```
+
+Then end your turn. **Writing the report is what finishes the job** — your turn ending is only half of it.
+
+**An hour or more — hand it over and hand it back.** Submit, register a monitor, write a *preliminary* report, end your turn:
+
+```bash
+JOBID=$(sbatch --parsable run.sbatch)
+ab-monitor add --slurm "$JOBID" --label train --interval 15m --deadline 12h \
+  --result "$RUNS/RESULTS.md"
+cat > "$AB_JOB_DIR/report.md" <<'EOF'
+# Submitted, not finished
+Slurm 12345 on gpu-h200, ~8h. Watch: monitor `train`.
+What I did: <the steps>, the sbatch file at <path>, the config at <path>.
+What to expect: RESULTS.md at <path> when it completes.
+Assumptions: <which held, which did not>.
+EOF
+```
+
+The preliminary report is what lets the job finish instead of holding a slot for eight hours, and the monitor is what records the outcome later. **Both, or neither is any use**: a monitor with no report leaves the caller waiting on a job that will time out, and a report with no monitor loses the ending.
 
 ## Your report is the caller's only window
 
@@ -51,10 +75,11 @@ echo "server up, generating" > "$AB_JOB_DIR/progress/010-up.md"
 - **Milestones are ingested in name order**, not by mtime. `ab-notify` handles that: `--report-id` gives a stable name, and without one you get a timestamp that sorts the way it happened. Writing them by hand, number them — `010-`, `020-`.
 - **A milestone is a note, not a log.** `ab-notify --msg-file` refuses anything over 64 KB rather than posting the first part of it; a whole log belongs in `report.md`, or point it at an excerpt.
 - **Put the whole content in the file.** A path only you can open is not evidence; `report.md` is uploaded whole and `ab job <ref>` prints it.
-- **Nothing you write ends your job** — the turn's own end does that, with no exceptions. So there is no "finish" to send: if the work outlives your turn, register a monitor for it and say so in your final message. A `status` file, if you write one out of habit, is read as one more milestone and means nothing to the gateway.
+- **`report.md` is what finishes the job**, together with your turn ending. Until both have happened the row reads `waiting`, your process stays alive, and you can still be steered — which is also your chance to write the report if you forgot. Nothing else you write ends a job; a `status` file is read as one more milestone and means nothing to the gateway.
+- **If you never write one, the job fails** with `report_missing` after the gateway's grace window (30 minutes by default). Your turn's last message is kept either way, but the row says the deliverable is absent — which is the honest reading.
 - **`ab-notify` needs `$AB_JOB_DIR` and nothing else** — no url, no token, and no discovery. A batch script on another node can still write into the directory if you export `AB_JOB_DIR` to it and the data dir is shared, but a **monitor** is the better answer for anything that outlives your turn.
 
-**Your final message is still the deliverable** (see above). The job dir is for what a message cannot carry: progress while you are still working, and output that outlives your turn.
+**Your final message and `report.md` are both read**, and they are not the same thing. The message is what the caller sees first; the report is the artifact that finishes the job and survives being read months later. When the work is short they can say the same thing — write the report, then say it. When it is long, the report is preliminary and says what was submitted and where the results will be.
 
 ## Work that outlives your turn: register a monitor
 
@@ -87,8 +112,8 @@ ab-monitor add --slurm "$JOBID" --label train \
   ```
 
   The file name is the watch's identity, so writing it twice registers one monitor.
-- **Say the monitor's label in your final message**, so the caller can find it: `ab monitors --job <ref>`, then `ab monitor <id> --wait`.
-- **A monitor is not your job's status.** Your job finishes with your turn; the watch resolves on its own, hours later, and its transitions land on your job's event stream as annotations.
+- **Say the monitor's label in your final message and in `report.md`**, so the caller can find it: `ab monitors --job <ref>`, then `ab monitor <id> --wait`.
+- **A monitor is not your job's status.** Your job finishes when your turn ends and its report is written; the watch resolves on its own, hours later. Its ending is recorded on your job's event stream — what was watched, what it last read, how long it ran, and the result paths — so the outcome is on the record even though the job closed long before.
 
 ## Submitting scheduler work
 

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from gateway import jobdir
 from gateway.adapters.base import Cancellation, RunResult
 from gateway.bus import Bus
 from gateway.config import AgentConfig, Config
@@ -345,6 +346,10 @@ def test_cancel_during_terminal_commit_cannot_be_falsely_accepted(
         return original_finish(job_id, fields, events, **kwargs)
 
     monkeypatch.setattr(db, "finish_job_with_events", paused_finish)
+    # A successful turn only reaches the terminal commit once its report is
+    # there; without one the row goes `waiting` instead (design/17), and the
+    # race this test is about would never be entered.
+    jobdir.publish(jobdir.path_for(tmp_path, job) / jobdir.REPORT_FILE, "done")
     worker = threading.Thread(target=pool._run_job, args=(job,))
     worker.start()
     assert entered.wait(2)

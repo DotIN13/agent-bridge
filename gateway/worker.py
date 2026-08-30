@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 import traceback
 
 from . import jobdir
@@ -11,7 +12,7 @@ from .adapters import build as build_adapter
 from .adapters.base import Cancellation, Event, JobSpec, Steering
 from .bus import Bus
 from .config import Config
-from .db import Database
+from .db import WAITING, Database
 
 
 class WorkerPool:
@@ -43,6 +44,32 @@ class WorkerPool:
             self._threads.append(thread)
         for job_id in queued:
             self.submit(job_id)
+
+    @property
+    def report_wait_sec(self) -> float:
+        return float(getattr(self.cfg, "report_wait_sec", 0.0) or 0.0)
+
+    def _on_turn_end(self, job_id: str, spec: JobSpec, fields: dict) -> None:
+        """The agent has answered. Whether the job is done is another question.
+
+        A job is finished when its turn has ended *and* its report is written.
+        With the report already there — the short-job path, and the long-job path
+        where a preliminary report was written before ending the turn — close the
+        agent's stdin and let the run wind up normally. Without it, the row goes
+        `waiting` and the process stays alive: it can still be steered, and it
+        can still write the file (design/17).
+        """
+        steer = self._steers.get(job_id)
+        if not spec.job_dir or jobdir.has_report(spec.job_dir):
+            if steer is not None:
+                steer.close()
+            return
+        self.db.save_result_fields(job_id, fields)
+        deadline = (time.time() + self.report_wait_sec
+                    if self.report_wait_sec > 0 else None)
+        row = self.db.mark_waiting(job_id, deadline)
+        if row:
+            self.bus.publish(job_id, row)
 
     def submit(self, job_id: str) -> None:
         if self._stop.is_set():
@@ -239,6 +266,12 @@ class WorkerPool:
                     return
                 if event.type == "status" and event.data.get("session_id"):
                     self._claim(job_id, event.data["session_id"])
+                if event.type == "status" and \
+                        event.data.get("stage") == "turn_end":
+                    # Not persisted as-is: whichever way this goes writes its
+                    # own event, and two would say the same thing twice.
+                    self._on_turn_end(job_id, spec, event.data)
+                    return
                 self._emit(job_id, event)
 
             result = adapter.run(spec, emit)
@@ -259,25 +292,49 @@ class WorkerPool:
                 "session": result.session,
                 "cost_usd": result.cost_usd,
             }
+            # Written before any status decision, and whatever the outcome: on
+            # the hold-open path the run returns *after* the sweeper has already
+            # finished the row, so a guarded terminal update would drop the
+            # turn's own answer on the floor.
+            self.db.save_result_fields(job_id, fields)
+            waiting = False
             if cancel.cancelled():
                 status = "canceled"
                 fields.update(status=status, error="canceled")
             elif result.ok:
                 status = "succeeded"
                 fields.update(status=status, result=result.result, error=None)
+                # A backend whose child exits with its turn (opencode, the
+                # dispatcher modes) never reaches `_on_turn_end`, so the same
+                # rule is applied here: no report yet means `waiting`, not
+                # success. The row already waiting is left alone rather than
+                # having its deadline pushed out.
+                if spec.job_dir and not jobdir.has_report(spec.job_dir):
+                    waiting = self.db.get_job(job_id)["status"] == WAITING
+                    if not waiting:
+                        row = self.db.mark_waiting(
+                            job_id, time.time() + self.report_wait_sec
+                            if self.report_wait_sec > 0 else None)
+                        waiting = row is not None
+                        if row:
+                            self.bus.publish(job_id, row)
             else:
                 status = "failed"
                 fields.update(status=status, error=result.error or "run failed")
-            rows = self.db.finish_job_with_events(
+            rows = [] if waiting else self.db.finish_job_with_events(
                 job_id, fields,
                 [("status", {"stage": "done", "status": status})])
-            # Releases the worker slot and the session claim: the agent process
-            # is gone, so holding the claim would block every later resume of
-            # that session.
+            # Releases the worker slot and the session claim. Done even while
+            # `waiting`, because reaching here means the agent process has
+            # exited: holding the claim would block every later resume of that
+            # session for the whole grace window.
             self._release_locked(job_id)
         for row in rows:
             self.bus.publish(job_id, row)
-        self.bus.close(job_id)
+        if not waiting:
+            # A waiting job's stream stays open: the follower is here to see the
+            # report land, and the sweeper closes it when it does.
+            self.bus.close(job_id)
 
     def _emit(self, job_id: str, event: Event) -> None:
         row = self.db.append_event(job_id, event.type, event.data)

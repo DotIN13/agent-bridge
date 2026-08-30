@@ -401,3 +401,46 @@ def test_a_drop_without_a_poll_is_not_a_monitor(tmp_path):
     root = jobdir.prepare(tmp_path, "job-1")
     jobdir.publish(root / "monitors" / "notes", "label = just a note\n")
     assert jobdir.monitor_drops(root) == []
+
+
+def test_a_terminal_transition_records_how_the_long_task_ended(client, auth,
+                                                               gateway, tmp_path):
+    """The record a caller reads months later, on the stream of the job that
+    started the work: what was watched, what it last read, how long it ran, and
+    where the results are."""
+    from gateway.server import _poll_monitors
+
+    job = client.post("/v1/jobs", json={"prompt": "submit the sweep"},
+                      headers=auth).json()["id"]
+    state = _state_file(tmp_path, "COMPLETED\n")
+    monitor = client.post("/v1/monitors", headers=auth, json={
+        "poll": f"cat {state}", "job": job, "label": "train",
+        "interval_sec": 1, "result_paths": ["/project/x/RESULTS.md"]}).json()
+
+    _poll_monitors(gateway)
+
+    events = client.get(f"/v1/jobs/{job}/events?after=0&type=message",
+                        headers=auth).json()["events"]
+    final = events[-1]["data"]
+    assert final["terminal"] is True
+    assert final["monitor_status"] == "finished"
+    assert final["label"] == "train"
+    assert final["poll_cmd"] == f"cat {state}"
+    assert final["detail"] == "COMPLETED"
+    assert final["result_paths"] == ["/project/x/RESULTS.md"]
+    assert final["finished_at"].startswith("20")
+    assert final["watched_for_sec"] >= 0
+    assert final["monitor"] == monitor["id"]
+
+
+def test_a_non_terminal_transition_stays_a_one_liner(gateway, tmp_path):
+    """Only the ending is worth the full record; `running` is a heartbeat."""
+    from gateway.server import _monitor_event
+
+    row = gateway.db.create_monitor(monitor_id="m1", job_id=None,
+                                    poll_cmd="true", interval_sec=1)
+    assert "terminal" not in {**row}          # the row itself carries no such key
+    gateway.db.record_poll("m1", "running", "RUNNING")
+    live = gateway.db.monitor("m1")
+    _monitor_event(gateway, live)             # job_id is None: nothing published
+    assert live["status"] == "running"

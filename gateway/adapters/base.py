@@ -361,9 +361,14 @@ reading your transcript. Rewriting a file with new content reports again;
 rewriting it unchanged does not. Keep the whole content in the file rather than
 pointing at a path only you can open.
 
-Your job ends when this turn ends; nothing you write changes that. If you start
-work that outlives the turn, register a monitor for it (`ab-monitor add --slurm
-<id>`) and name it in your final message.
+Your job is finished when this turn has ended AND report.md is written -- both,
+or the job waits and then fails. So:
+  - work under an hour: stay with it, write the report, then end the turn.
+  - an hour or more: submit it, register a monitor (`ab-monitor add --slurm <id>`),
+    write a PRELIMINARY report.md naming that monitor and where the results will
+    land, and end the turn. The watch records the outcome later.
+Until the report exists this process stays alive and can still be steered, which
+is your chance to write it if you forgot.
 """
 
 

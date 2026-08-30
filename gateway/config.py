@@ -12,7 +12,16 @@ _DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8787},
     "auth": {"token": ""},
     "worker": {
-        "concurrency": 2,
+        # High because a job now holds its slot while `waiting` for its report
+        # (design/17): the agent process stays alive after its turn, so a couple
+        # of slow reporters must not be able to stall the queue. These are
+        # subprocesses on a login node, so mind what the box can take.
+        "concurrency": 16,
+        # How long a job that ended its turn has to write
+        # $AB_JOB_DIR/report.md before the gateway fails it. A grace window, not
+        # a wait: the delegate is meant to write it *before* ending the turn.
+        # 0 waits indefinitely.
+        "report_wait_sec": 1800,
         # Cancel sends SIGINT first (the ESC equivalent) and only escalates if
         # the agent hasn't wound down within this many seconds.
         "cancel_grace_sec": 15,
@@ -100,6 +109,7 @@ class Config:
     db_path: str          # absolute
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
+    report_wait_sec: float = 1800.0
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -228,6 +238,7 @@ def load(path: str | os.PathLike | None) -> Config:
         token=token,
         concurrency=int(raw["worker"]["concurrency"]),
         cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
+        report_wait_sec=float(raw["worker"].get("report_wait_sec", 1800)),
         db_path=str(db_path),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),

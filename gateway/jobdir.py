@@ -171,6 +171,21 @@ def _read(root: Path, rel: str) -> Drop | None:
                 digest=digest.hexdigest(), oversized=oversized)
 
 
+def has_report(job_dir: str | os.PathLike[str]) -> bool:
+    """Is the deliverable there?
+
+    A job is finished when its turn has ended *and* it has written its report,
+    so this is the predicate the lifecycle turns on (design/17). Emptiness
+    counts as absent: a zero-byte `report.md` is a delegate that started to
+    write and did not, which is exactly the case worth waiting out.
+    """
+    report = Path(job_dir) / REPORT_FILE
+    try:
+        return report.is_file() and report.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def job_id_from(job_dir: str | os.PathLike[str]) -> str:
     """The job a directory belongs to.
 

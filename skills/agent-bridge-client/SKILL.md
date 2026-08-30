@@ -20,7 +20,7 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 6. **`ab sessions`**, then **`ab sessions --cwd <dir>`** — which directories have work, then the sessions in that project. Pick one to continue; a new session is a new subject.
 7. **`ab run -F recon.md`** — one short alignment turn before the real brief, in the session that will do the work. Required for anything needing a full brief; skipped for a lookup. See *Align the plan before you delegate*.
 8. **`ab submit -F brief.md --session <uuid> --no-fork`** — always from a file, never an inline prompt. The brief **must** carry a Verification section naming the check that settles the work, and a Finishing section saying whether to commit, what the report must contain, and — when the work outlives the turn — that the worker registers a monitor and names it. A brief without the check produces a report you cannot tell from a guess. Full template below.
-9. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it. A job ends with its turn, so there is one end to wait for; work that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
+9. **`ab wait` asynchronously** — bounded `--timeout`, or in the background. Never block your turn on it. A job is `succeeded` once its turn has ended **and** the worker has written `$AB_JOB_DIR/report.md`; between the two it reads `waiting`. Work that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
 
 ## Starting a job
 
@@ -117,13 +117,15 @@ Six sections, in this order:
 
 ## Long and batch jobs
 
-- **A job finishes when its turn finishes**, always. Work that outlives the turn is a **monitor** — its own row, polled by the gateway, resolving hours later without holding the job open. Require one in the brief for anything scheduler-shaped.
+- **A job finishes when its turn ends and its report is written.** In between it is `waiting`: the worker's process is still alive, still steerable, and the gateway is watching for `report.md`. If none arrives within the grace window the job fails with `report_missing` — the deliverable is the point, so its absence is a failure rather than a footnote.
+- **Work that outlives the turn is a monitor** — its own row, polled by the gateway, resolving hours later without holding the job open. Require one in the brief for anything scheduler-shaped, and require a **preliminary report** with it: that is what lets the job close instead of sitting in `waiting`. Its ending is recorded on the job's own event stream, so `ab events <ref> --type message` still tells you how the batch work finished.
 - **One end to wait for.** `ab wait <ref>` returns when the row is terminal, which is when the turn ended. To block on the batch work instead, wait on its monitor: `ab monitor <id> --wait`.
 - **A coding-agent worker cannot wait hours for scheduler work.** Tell it to submit, register a monitor, return the identifiers, and end its turn. The gateway polls; the worker does not sit there, and neither do you.
 
 ## Reading results
 
-- **`ab job REF` first.** The result is stored and printed whole — usually all you need.
+- **`ab job REF` first.** The turn's last message is stored and printed whole — usually all you need. `report.md` arrives as a `message` event, so `ab events REF --type message` is where the artifact itself is.
+- **`waiting` means the turn ended and the report has not landed yet.** Give it a moment; it becomes `succeeded` within a sweep of the file appearing, or `failed` with `report_missing` at the deadline.
 - Then `ab events REF`, which reads from the **end** by default; `total`/`first_seq`/`last_seq` show the shape so you never page blind. `--after 0` restores top-down reading.
 - Narrow with `--type` before widening `--tail`, or a long job's tool results will flood you.
 - **Parse `--output json`**, and use `--output jsonl` when you want one typed record per line.

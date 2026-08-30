@@ -454,10 +454,19 @@ class ClaudeAdapter:
                     continue
                 self._handle_record(rec, emit, res, capture_nested, replay)
                 if rec.get("type") == "result" and steer is not None:
-                    # Streaming input keeps the agent alive waiting for more
-                    # work after it answers. Closing stdin is what ends the run
-                    # — without it the loop below blocks forever.
-                    steer.close()
+                    # The turn is over; the run may not be. Streaming input
+                    # keeps the agent alive waiting for more work after it
+                    # answers, and closing stdin is what ends the run — so hand
+                    # the decision to the worker, which knows whether the report
+                    # has been written (design/17). It closes this handle when
+                    # the job is done, and the read loop then sees EOF.
+                    emit(Event("status", {
+                        "stage": "turn_end",
+                        # Carried so a `waiting` row can show the turn's answer:
+                        # the run may not return for another half hour, and
+                        # `ab job` is the first thing a caller reads.
+                        "result": res.result, "session": res.session,
+                        "cost_usd": res.cost_usd}))
         finally:
             if timer is not None:
                 timer.cancel()

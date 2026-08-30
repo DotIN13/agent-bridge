@@ -38,7 +38,7 @@ from .bus import Bus
 from .cluster import ClusterInfo
 from .config import Config
 from .db import (Database, IdempotencyConflict, ReportConflict, TERMINAL,
-                 derive_title)
+                 WAITING, derive_title)
 from .docs import render_llms_txt
 from .files import FileError
 from .notes import NotesStore
@@ -203,6 +203,20 @@ def _monitor_event(gw: Gateway, row: dict) -> None:
             "monitor_status": row["status"], "msg": monmod.summary(row)}
     if row.get("result_paths"):
         data["result_paths"] = row["result_paths"]
+    if row["status"] in monmod.TERMINAL:
+        # The record of how the long task actually ended, on the stream of the
+        # job that started it: what was watched, what it last read, when it
+        # resolved, and where the results are. A caller reading
+        # `ab events <job> --type message` months later has the whole story
+        # without the scheduler's own logs.
+        data["terminal"] = True
+        data["label"] = row.get("label") or ""
+        data["poll_cmd"] = row["poll_cmd"]
+        data["detail"] = row.get("detail") or ""
+        data["finished_at"] = iso_local(row["finished_at"]) \
+            if row.get("finished_at") else None
+        data["watched_for_sec"] = round(
+            (row["finished_at"] or time.time()) - row["created_at"], 1)
     try:
         event = gw.db.append_event(row["job_id"], "message", data)
     except Exception as exc:                          # a deleted job, say
@@ -306,16 +320,50 @@ def _poll_monitors(gw: Gateway, now: float | None = None) -> None:
         _monitor_event(gw, expired)
 
 
+def _finish_if_reported(gw: Gateway, job_id: str) -> None:
+    """A `waiting` job whose report has landed is finished.
+
+    Also what ends the *run*: the agent is still alive with its stdin held open
+    (design/17), so closing that handle is how the worker learns to wind up. A
+    backend whose child already exited has no handle, and the row is all there
+    is to close.
+    """
+    if not jobdir.has_report(jobdir.path_for(gw.cfg.data_dir, job_id)):
+        return
+    rows = gw.db.finish_reported(job_id)
+    if not rows:
+        return
+    for row in rows:
+        gw.bus.publish(job_id, row)
+    steering = gw.pool.steering(job_id)
+    if steering is not None:
+        try:
+            steering.close()
+        except Exception:                              # already gone
+            pass
+    gw.bus.close(job_id)
+
+
+def _expire_waiting(gw: Gateway) -> None:
+    """Give up on a job that ended its turn and never wrote its report."""
+    for job_id in gw.db.expire_waiting():
+        steering = gw.pool.steering(job_id)
+        if steering is not None:
+            try:
+                steering.close()
+            except Exception:
+                pass
+        gw.bus.close(job_id)
+
+
 async def _sweep_reports(gw: Gateway, interval: float = 5.0) -> None:
     """Notice what a delegate wrote, and move the monitors along.
 
     Not read-triggered only: a follower that has been streaming since the turn
     started never issues another read, so a milestone drop would sit unseen
     until it reconnected. The job-dir scan is a handful of stats over at most
-    200 rows, so it can run this often.
-
-    It used to carry a second, slower beat that expired report deadlines. There
-    are no deadlines now -- a job ends with its turn (design/16).
+    200 rows, so it can run this often -- which is also how quickly a `waiting`
+    job notices its report and finishes.
     """
     while True:
         try:
@@ -323,6 +371,9 @@ async def _sweep_reports(gw: Gateway, interval: float = 5.0) -> None:
                 for event in await run_in_threadpool(
                         _ingest_external, gw, row["id"]):
                     gw.bus.publish(row["id"], event)
+                if row.get("status") == WAITING:
+                    await run_in_threadpool(_finish_if_reported, gw, row["id"])
+            await run_in_threadpool(_expire_waiting, gw)
             if gw.cfg.monitors_enabled:
                 await run_in_threadpool(_poll_monitors, gw)
         except asyncio.CancelledError:

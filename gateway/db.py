@@ -72,9 +72,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at        REAL NOT NULL,
     started_at        REAL,
     finished_at       REAL,
-    -- Vestigial. A job could once park in `awaiting_report` waiting for
-    -- something to call in; nothing reads or writes these now (design/16).
-    -- Kept so a database written by an older gateway has a fresh one's shape.
+    -- `expect_report` is vestigial (design/16). `report_deadline` is live
+    -- again: it is when a `waiting` job gives up on its report (design/17).
     expect_report     INTEGER,
     report_deadline   REAL
 );
@@ -135,6 +134,11 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 """
 
 TERMINAL = {"succeeded", "failed", "canceled"}
+#: The turn has ended and the report has not been written yet. Non-terminal, and
+#: unlike the `awaiting_report` it replaces, the agent process is still alive:
+#: the gateway is waiting on a file the delegate is expected to write, not on a
+#: call from somewhere it cannot see (design/17).
+WAITING = "waiting"
 #: Terminal for a *monitor*, which is not a job: `expired` says we stopped
 #: watching, which is a different claim from the work having failed.
 MONITOR_TERMINAL = {"finished", "failed", "expired", "canceled"}
@@ -434,6 +438,118 @@ class Database:
                         for kind, data in events]
                 self._conn.commit()
                 return rows
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def mark_waiting(self, job_id: str, deadline: float | None = None,
+                     now: float | None = None) -> dict | None:
+        """The turn ended without a report. Returns the status event, or None.
+
+        Only from `running`, and only once: a second turn on the same job (a
+        steer woke it) re-enters through here and refreshes the deadline, which
+        is right -- it is working again.
+        """
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self._conn.execute(
+                    "UPDATE jobs SET status=?,report_deadline=? WHERE id=? "
+                    "AND status IN ('running',?)",
+                    (WAITING, deadline, job_id, WAITING))
+                if cursor.rowcount != 1:
+                    self._conn.commit()
+                    return None
+                row = self._append_event_locked(job_id, "status", {
+                    "stage": "waiting", "status": WAITING,
+                    "detail": "turn ended; waiting for $AB_JOB_DIR/report.md"},
+                    now)
+                self._conn.commit()
+                return row
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def save_result_fields(self, job_id: str, fields: dict[str, Any]) -> None:
+        """Persist a turn's result/session/cost without touching the status.
+
+        The turn is over and the row is `waiting`: the answer is already worth
+        keeping, and `ab job` should show it while the report is still coming.
+        """
+        # `None` means "nothing to say", never "clear it". Both ends of a
+        # held-open run write here -- the turn's own answer at `turn_end`, then
+        # the RunResult when the run finally winds up -- and the second must not
+        # blank a value the first had.
+        values = {k: v for k, v in fields.items()
+                  if k in ("result", "session", "cost_usd", "error")
+                  and v is not None}
+        if not values:
+            return
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                columns = ", ".join(f"{key}=?" for key in values)
+                self._conn.execute(f"UPDATE jobs SET {columns} WHERE id=?",
+                                   (*values.values(), job_id))
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def finish_reported(self, job_id: str,
+                        now: float | None = None) -> list[dict]:
+        """The report landed while the job was `waiting`: it is finished."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = self._conn.execute(
+                    "UPDATE jobs SET status='succeeded',finished_at=?,"
+                    "report_deadline=NULL WHERE id=? AND status=?",
+                    (now, job_id, WAITING))
+                if cursor.rowcount != 1:
+                    self._conn.commit()
+                    return []
+                rows = [self._append_event_locked(job_id, "status", {
+                    "stage": "done", "status": "succeeded",
+                    "reason": "report_written"}, now)]
+                self._conn.commit()
+                return rows
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def expire_waiting(self, now: float | None = None) -> list[str]:
+        """Fail jobs that ended their turn and never wrote a report.
+
+        The deliverable is the point of the job, so its absence is a failure
+        rather than a footnote -- and the delegate is meant to write it *before*
+        ending its turn, which makes this window a grace period, not a wait.
+        """
+        now = time.time() if now is None else now
+        message = ("the turn ended and no report was written to "
+                   "$AB_JOB_DIR/report.md before the deadline")
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = self._conn.execute(
+                    "SELECT id FROM jobs WHERE status=? AND "
+                    "report_deadline IS NOT NULL AND report_deadline <= ?",
+                    (WAITING, now)).fetchall()
+                expired = [r["id"] for r in rows]
+                for jid in expired:
+                    self._conn.execute(
+                        "UPDATE jobs SET status='failed',error=COALESCE(error,?),"
+                        "finished_at=?,report_deadline=NULL WHERE id=?",
+                        (message, now, jid))
+                    self._append_event_locked(jid, "error", {
+                        "code": "report_missing", "message": message}, now)
+                    self._append_event_locked(jid, "status", {
+                        "stage": "done", "status": "failed",
+                        "reason": "report_missing"}, now)
+                self._conn.commit()
+                return expired
             except Exception:
                 self._conn.rollback()
                 raise
@@ -757,10 +873,10 @@ class Database:
         now = time.time() if now is None else now
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id FROM jobs WHERE status='running' "
+                "SELECT id,status FROM jobs WHERE status IN ('running',?) "
                 "OR (finished_at IS NOT NULL AND finished_at >= ?) "
                 "ORDER BY created_at DESC LIMIT 200",
-                (now - grace_sec,)).fetchall()
+                (WAITING, now - grace_sec)).fetchall()
         return [dict(row) for row in rows]
 
     # -- monitors ---------------------------------------------------------

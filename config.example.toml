@@ -15,13 +15,23 @@ token = ""
 # Queued rows are re-enqueued after a gateway restart. A row that was running
 # is failed with an explicit gateway-restarted event; process recovery is not
 # guessed. Graceful shutdown interrupts and joins before SQLite closes.
-concurrency = 2      # number of jobs run in parallel (mind sshd/cost limits)
+# Jobs run in parallel. High because a job holds its slot while `waiting` for
+# its report -- the agent process stays alive after its turn -- so a couple of
+# slow reporters must not stall the queue. These are subprocesses on a login
+# node: mind what the box, sshd and your budget can take.
+concurrency = 16
 
 # Cancel interrupts rather than kills: SIGINT (what ESC maps to in the
 # interactive client) lets the agent stop its turn, flush the transcript and
 # exit, so the session stays resumable. Escalates to SIGTERM then SIGKILL only
 # if it hasn't wound down in this long.
 cancel_grace_sec = 15
+# A job is finished when its turn has ended AND $AB_JOB_DIR/report.md is
+# written. This is how long a job that ended its turn without one has to produce
+# it before the gateway fails it with `report_missing`. A grace window, not a
+# wait: the delegate is meant to write the report *before* ending its turn.
+# 0 waits indefinitely.
+report_wait_sec = 1800
 
 # What this machine's owner knows and no probe can discover: scheduler
 # accounts, full filesystems, which env holds which package. Served beside the

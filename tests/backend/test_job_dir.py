@@ -131,7 +131,7 @@ def test_the_agent_is_told_where_to_write_and_gets_it_in_its_environment():
     note = job_dir_note(spec)
     assert "/data/reports/j1" in note
     assert "ab-notify --msg" in note
-    assert "ends when this turn ends" in note
+    assert "report.md is written" in note
     assert child_env(spec)["AB_JOB_DIR"] == "/data/reports/j1"
 
 

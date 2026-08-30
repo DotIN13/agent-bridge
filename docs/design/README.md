@@ -22,6 +22,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [11](11-a-turn-is-not-a-job.md) | `expect_report`: a job that hands work to a scheduler waits for it | after 0.3.0 |
 | [15](15-reporting-is-a-directory-and-watching-is-a-monitor.md) | Reporting is a directory; watching is a monitor. `ab-notify` retired | after 0.3.0 |
 | [16](16-the-turn-is-the-job.md) | The turn is the job, unconditionally: `expect_report` and the `status` vocabulary removed | after 0.3.0 |
+| [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
 
 ## The load-bearing bits
 
@@ -53,6 +54,14 @@ The rule those three converge on: **a session exists if a human spoke or the
 agent acted.** Anything touching how transcripts are filtered should run
 `tests/backend/test_session_stubs.py`, which pins each failure by name — including
 the custom-slash-command case that no session on the development store exercises.
+
+**17 is 16 with its cost paid.** 16 made the turn the whole of a job, which let a
+delegate end cleanly having produced nothing. 17 puts `report.md` into the
+definition and adds `waiting` for the gap between the two — a post-turn state
+again, but one that waits on a file in a directory the gateway already scans,
+with the agent still alive and a 30-minute grace window rather than a day. Its
+table comparing `waiting` to 11's `awaiting_report` is the thing to read before
+assuming this is the same mistake twice.
 
 **16 ends a default that moved three times**, and 11 → 15 → 16 is worth reading
 in order: the turn was the job, then it wasn't and every row waited, then waiting
