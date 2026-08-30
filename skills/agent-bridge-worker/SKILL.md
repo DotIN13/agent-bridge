@@ -1,6 +1,6 @@
 ---
 name: agent-bridge-worker
-description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, reporting through $AB_JOB_DIR, and registering a monitor for work that outlives your turn. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
+description: How to execute a task dispatched through agent-bridge on this host — your remit versus the caller's, being steered mid-turn, finishing a turn properly, submitting Slurm (or PBS/LSF) work, reporting milestones with ab-notify or a file in $AB_JOB_DIR, and registering a monitor for work that outlives your turn. Use whenever you are running a brief that arrived via agent-bridge, submitting batch jobs, or doing compute that outlives your turn.
 allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSearch
 ---
 
@@ -8,13 +8,13 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, TodoWrite, WebFetch, WebSear
 
 You are the **remote agent**. A local session, working with a human, wrote the brief you are executing. `ab job <id>` shows which backend and model you are.
 
-**Flags are in `ab help` and `ab-monitor --help`.** This file is the judgement that is not in either.
+**Flags are in `ab help`, `ab-notify --help` and `ab-monitor --help`.** This file is the judgement that is not in any of them.
 
 ## Workflow
 
 1. **Inventory, then do the work.** You can see this machine; the caller cannot.
 2. **If it hands off to a scheduler or a long background run**, submit it and monitor with bounded probes or a background wait — never a blocking sleep, which just hits the tool timeout.
-3. **Drop a milestone at each real step**, so a long run does not look hung: `echo "..." > "$AB_JOB_DIR/progress/010-slug.md"`.
+3. **Report a milestone at each real step**, so a long run does not look hung: `ab-notify --msg "..."`.
 4. **If the work outlives your turn, register a monitor before you end it** — `ab-monitor add --slurm <id>`. Then end the turn and report what you submitted. The gateway watches the scheduler; you do not have to, and you must not block on it.
 
 ## Your report is the caller's only window
@@ -34,17 +34,24 @@ Your last message is stored whole and returned by `ab job <ref>`.
 Your job has a directory of its own, already created, in `$AB_JOB_DIR`. Writing a file there is how anything other than your final message reaches the caller. **No job id, url or token is involved** — that plumbing is gone, along with the failure where a job could not identify itself and sat until its deadline.
 
 ```bash
-echo "server up, generating"      > "$AB_JOB_DIR/progress/010-up.md"
-echo "12/24 sources done"         > "$AB_JOB_DIR/progress/020-sources.md"
-cp "$RUNS/RESULTS.md"               "$AB_JOB_DIR/report.md"
-echo finished                     > "$AB_JOB_DIR/status"   # or: failed
+ab-notify --msg "server up, generating"                       # a milestone
+ab-notify --msg "12/24 sources done" --report-id sources      # a named one
+ab-notify --msg-file "$RUNS/step-3.log" --report-id step-3    # from a file
+cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"                 # the deliverable
+```
+
+`ab-notify` is a convenience over one write, and is worth using because it names the file for you in a way that sorts. Where it is not on PATH, do the write:
+
+```bash
+echo "server up, generating" > "$AB_JOB_DIR/progress/010-up.md"
 ```
 
 - **Each file becomes one event** on your job's stream, so the caller sees it without reading your transcript. `ab events <ref> --type message` is the progress log.
-- **Rewriting a file with new content reports again**; rewriting it unchanged does not. So `status` can go `running` then `finished`, and a retried step can overwrite its own milestone without piling up duplicates.
-- **Name milestones in order** — `010-`, `020-` — because they are ingested in name order, not by mtime.
+- **Rewriting a file with new content reports again**; rewriting it unchanged does not. So a retried step can overwrite its own milestone without piling up duplicates — that is what `--report-id` is for, and why a retry with the same one reports once.
+- **Milestones are ingested in name order**, not by mtime. `ab-notify` handles that: `--report-id` gives a stable name, and without one you get a timestamp that sorts the way it happened. Writing them by hand, number them — `010-`, `020-`.
+- **A milestone is a note, not a log.** `ab-notify --msg-file` refuses anything over 64 KB rather than posting the first part of it; a whole log belongs in `report.md`, or point it at an excerpt.
 - **Put the whole content in the file.** A path only you can open is not evidence; `report.md` is uploaded whole and `ab job <ref>` prints it.
-- **`status` is advisory while your turn is running.** It records what you say; it does not end your turn. The turn's own end does that. On a job submitted `--expect-report` — parked, waiting — `finished` or `failed` in `status` is exactly what closes it.
+- **Nothing you write ends your job.** The turn's own end does that. (One exception: a job submitted `--expect-report` is parked and waiting, and `echo finished > "$AB_JOB_DIR/status"` is what closes it. `ab-notify` deliberately does not do this — it reports milestones and nothing else.)
 - **Compute nodes write here too**, since the data dir is on the shared filesystem. That is the same requirement the old `[messages] dir` had.
 
 **Your final message is still the deliverable** (see above). The job dir is for what a message cannot carry: progress while you are still working, and output that outlives your turn.

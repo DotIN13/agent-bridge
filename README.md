@@ -31,7 +31,7 @@ Stable console commands are installed together:
 - `agent-bridge` — gateway process
 - `ab` — CLI
 - `ab-monitor` — register a watch on work that outlives a turn
-- `ab-notify` — deprecated shim over `$AB_JOB_DIR`
+- `ab-notify` — report a milestone from inside a job
 
 Legacy invocation remains supported: `python -m gateway`,
 `python client/ab.py`, `bin/ab-monitor`, and `bin/ab-notify`.
@@ -193,9 +193,13 @@ Callers read watches with `ab monitors --job <ref>` and `ab monitor <id>
 annotations. `[monitors]` bounds how many watches a gateway keeps, the interval
 floor, the poll timeout, and the deadline ceiling.
 
-`ab-notify` is a deprecated shim that translates its old flags into those file
-writes. `POST /v1/jobs/{ref}/message` remains for anything that wants immediate
-delivery over HTTP.
+`ab-notify --msg "12/24 done" [--report-id sources]` is a convenience for the
+milestone write: it names the file so milestones sort the way they happened, and
+a retry under the same `--report-id` overwrites rather than adding a second one.
+It reports progress and nothing else — it has no `--status`, because a job ends
+when its turn ends and long work is a monitor.
+`POST /v1/jobs/{ref}/message` remains for anything that wants immediate delivery
+over HTTP.
 
 Opt into the old behaviour with `ab submit --expect-report` when you want one
 `ab wait` to cover both the turn and the work it started: the row parks in

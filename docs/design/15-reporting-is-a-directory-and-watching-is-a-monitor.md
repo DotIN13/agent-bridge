@@ -115,11 +115,19 @@ watching. `ab monitor` shows that word; the event's report-shaped `status` reads
   reconnecting.
 - **Nothing reaps `reports/`.** One directory per job, holding text. Bounded per
   job (`MAX_FILES`, `MAX_FILE_BYTES`) and not bounded across jobs.
-- **`ab-notify` is a shim now**, translating its old flags into those writes so
-  that sbatch files already on disk keep reporting. `--url`/`--token` and the
-  JSONL tiers are gone; the flags are accepted and ignored rather than fatal,
-  because dying on argv would turn a reporting change into a lost report. The
-  `[messages]` ingest stays until no deployment writes it.
+- **`ab-notify` is a milestone reporter now.** It shipped in this change as a
+  shim translating its old flags into job-dir writes, and was rewritten a commit
+  later to do one thing: put a note in `progress/`. Dropping `--status` is what
+  made it small — nothing needs telling that the work is over, so what is left
+  worth saying is what happened along the way. It names the file so milestones
+  sort the way they happened, and `--report-id` keeps a retried step to one
+  milestone. `--status` and the old transport flags are accepted and ignored
+  rather than fatal: an sbatch file already on a compute node cannot be edited in
+  lockstep with the gateway, and exiting non-zero under `set -e` would cost the
+  run rather than one milestone. It does *not* write `status`, so closing a
+  parked `--expect-report` job stays an explicit `echo finished >
+  "$AB_JOB_DIR/status"`. The `[messages]` ingest stays until no deployment
+  writes it.
 - **`tests/backend/test_expect_report.py`** is the record of what the opt-in
   still guarantees. Its own history is the warning: the suite stayed green the
   last time this default moved, because nothing asserted it.
