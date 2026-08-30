@@ -113,6 +113,21 @@ too, so the `agent-bridge` it looks for next is found in the directory it was
 itself found in. `exec` replaces the login shell, so one process fewer waits
 around and the signal from a dropped connection reaches `ab-serve` directly.
 
+**Quoting.** Single-quote the command when you type it, and it makes no
+difference here — which is worth knowing in both directions. The dashboard runs
+ssh with no shell of its own, so the command crosses as one literal argument and
+the *remote* login shell expands `$AB_PATH`; quotes, double quotes and none at
+all come out identical. But the same line pasted into a terminal goes through
+your local shell first, and there the single quotes are the whole difference
+between sending `$AB_PATH` and sending whatever your laptop happens to have:
+
+```bash
+ssh -L 8787:localhost:8787 midway5 'PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve'
+```
+
+So write them. They cost nothing where they are unnecessary and they are load
+bearing where they are not.
+
 **Whether `$AB_PATH` is set at all** is the other half, and the reason the
 fallback matters. `ssh host cmd` runs a non-interactive shell: bash does read
 `~/.bashrc` there, but nearly every distribution's `.bashrc` opens with an early

@@ -145,6 +145,39 @@ test("a flag after the destination is still a flag, so an old config keeps worki
   assert.ok(buildSshArgs(parsed, { batch: false }).includes("-N"));
 });
 
+test("quoting the command changes nothing here, because there is no local shell", () => {
+  /*
+   * The question this settles: does `$AB_PATH` get expanded on the way out?
+   *
+   * No — there is nothing to expand it. `spawn` runs ssh without a shell, so the
+   * command crosses as one literal argv element and the *remote* login shell
+   * does the expanding, which is the only correct answer: this machine's
+   * `$AB_PATH` says nothing about a cluster's layout.
+   *
+   * So single quotes, double quotes and none at all come out the same. They are
+   * still worth writing: the same line pasted into a terminal goes through a
+   * local shell first, and there the quotes are what stop it expanding
+   * `$AB_PATH` before ssh ever sees it.
+   */
+  const command = 'PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve';
+  const forms = [
+    `ssh -L 8787:localhost:8787 midway5 '${command}'`,
+    `ssh -L 8787:localhost:8787 midway5 ${command}`,
+  ];
+
+  for (const line of forms) {
+    const parsed = parseSshCommand(line);
+    assert.equal(parsed.destination, "midway5");
+    assert.equal(parsed.remoteCommand, command);
+    // Unexpanded, and one argument: what ssh hands the far side verbatim.
+    assert.equal(buildSshArgs(parsed, { batch: false }).at(-1), command);
+  }
+
+  // A double-quoted one loses its outer pair the same way, and its `$` survives.
+  const doubled = parseSshCommand('ssh gw "exec $AB_PATH/ab-serve"');
+  assert.equal(doubled.remoteCommand, "exec $AB_PATH/ab-serve");
+});
+
 test("the command is the whole tail, so a flag inside it is not lifted out", () => {
   const parsed = parseSshCommand("ssh gw bash -lc 'exec ab-serve'");
   assert.equal(parsed.remoteCommand, "bash -lc 'exec ab-serve'");

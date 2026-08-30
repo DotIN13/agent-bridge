@@ -109,6 +109,14 @@ It holds because `spawn` runs ssh with no shell of its own — the command reach
 ssh as one argv element, literally — and sshd hands it to the remote user's login
 shell.
 
+Quoting follows from that and is worth stating, because the answer differs by
+where the line is typed. In `gateways.json` the quotes are decoration: there is
+no local shell to protect the `$` from. In a terminal they are the whole
+difference between sending `$AB_PATH` and sending whatever the laptop has. Since
+the same string wants to be copy-pasteable between the two, the documented form
+is single-quoted, and a test asserts the three forms parse identically so nobody
+has to remember which one the dashboard needs.
+
 Checked rather than reasoned about, twice. A fake ssh that runs the command under
 a *different* environment shows the remote `AB_PATH` winning while a local one
 points somewhere else entirely; and a unit test asserts the argv still carries
