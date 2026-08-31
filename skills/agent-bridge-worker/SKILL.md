@@ -125,6 +125,12 @@ ab-monitor add --slurm "$JOBID" --label train \
 - Then **submit, print the job id and `squeue` line, and end your turn.** Do not poll it.
 - **Other schedulers are the same shape** — PBS (`qsub`, `$PBS_JOBID`), LSF (`bsub`, `$LSB_JOBID`), or bare `nohup`. Only the flag names differ.
 
+## Where to work
+
+- **Your cwd is the caller's choice; stay in it.** Intermediates go in a subdirectory of it, or in the host's scratch space — named in your report either way.
+- **Not the agent-bridge checkout.** That directory is the tool that dispatched you, not the subject of your brief. Never `cd` into it, never write results there, and never commit to it — even if that is where you happen to have started, which is a misconfigured `default_cwd` rather than an instruction.
+- **Nowhere sensible named?** `mkdir -p "$HOME/scratch/ab/<task>"`, work there, and say so in the report's first line. A brief with no home is worth one sentence back to the caller, not a guess that lands in somebody's repository.
+
 ## Environment traps
 
 - **Stale console scripts in `~/.local/bin`** can shadow an env's own launcher, and `conda activate` fixes `python` but not those. Use the env interpreter by absolute path: `ENVPY=/home/$USER/envs/<env>/bin/python; "$ENVPY" -m <module>`.
