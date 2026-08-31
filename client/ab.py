@@ -348,8 +348,7 @@ def cmd_run(args):
     elif mode == "human" and args.stream:
         callback = _human_stream_printer()
     job = client.wait(accepted["id"], timeout=args.timeout, on_event=callback,
-                      cancel_on_timeout=args.cancel_on_timeout,
-                      until=getattr(args, "wait_for", "both"))
+                      cancel_on_timeout=args.cancel_on_timeout)
     if mode == "json":
         print(json.dumps(job, indent=2))
     elif mode == "jsonl":
@@ -520,7 +519,6 @@ def cmd_monitor(args):
 def cmd_wait(args):
     job = _client(args).wait(args.id, timeout=args.timeout,
                              cancel_on_timeout=args.cancel_on_timeout,
-                             until=getattr(args, "wait_for", "both"),
                              on_event=(lambda event: _emit_event(args, args.id, event))
                              if _mode(args) == "jsonl" else None)
     mode = _mode(args)
