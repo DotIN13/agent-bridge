@@ -56,8 +56,40 @@ def test_help_and_version_are_discoverable(capsys):
     with pytest.raises(SystemExit):
         parser.parse_args(["--help"])
     output = capsys.readouterr().out
-    for command in ("health", "agents", "capabilities", "wait", "events"):
+    for command in ("health", "agents", "monitors", "wait", "events"):
         assert command in output
+
+
+def test_the_advertised_operations_are_exactly_the_parser_s_verbs():
+    """`ab help --output json` is the machine-readable contract, so a verb
+    missing from it is a verb an agent will not try. Two hand-kept copies had
+    already drifted — both lost `monitors`/`monitor` when monitors shipped —
+    which is why there is now one list and this test."""
+    import argparse
+
+    parser = ab.build_parser()
+    subparsers = [action for action in parser._actions
+                  if isinstance(action, argparse._SubParsersAction)]
+    assert len(subparsers) == 1
+    verbs = set(subparsers[0].choices)
+
+    assert set(abclient.OPERATIONS) == verbs
+    assert len(abclient.OPERATIONS) == len(set(abclient.OPERATIONS)), "no dupes"
+    assert abclient.client_capabilities()["operations"] == \
+        list(abclient.OPERATIONS)
+
+
+def test_the_client_half_of_the_contract_needs_no_gateway():
+    """`ab help --output json` runs with nothing configured and no network, so
+    the client half must not reach for either."""
+    caps = abclient.client_capabilities()
+    assert caps["version"] == ab.CLIENT_VERSION
+    assert caps["output_modes"] == ["human", "json", "jsonl"]
+    assert caps["streaming"] == "sse"
+    assert caps["exit_codes"] == {
+        "success": 0, "local_error": ab.EXIT_LOCAL,
+        "invocation": ab.EXIT_INVOCATION, "remote_failure": ab.EXIT_REMOTE,
+        "wait_timeout": ab.EXIT_TIMEOUT}
 
 
 class FakeClient:
@@ -178,6 +210,47 @@ def test_await_session_stops_when_the_job_dies_before_init():
     assert client.calls == 1
 
 
+def test_submit_always_waits_for_the_session_id():
+    """`--no-wait` is gone: an old script gets an argparse error rather than a
+    silently different contract.
+
+    Removing it is safe because the wait was never unbounded — it stops at
+    `--await-timeout`, and running out is not a failure (see the tests above).
+    So the opt-out only ever bought back a few seconds, in exchange for a job id
+    whose session nobody could use yet. Reverses a piece of design/08."""
+    with pytest.raises(SystemExit) as exc:
+        ab.build_parser().parse_args(["submit", "hello", "--no-wait"])
+    assert exc.value.code == 2
+
+    args = ab.build_parser().parse_args(["submit", "hello"])
+    assert not hasattr(args, "await_session")
+    assert args.await_timeout == abclient.AWAIT_SESSION_TIMEOUT
+
+
+def test_submit_waits_without_being_asked_to(monkeypatch, capsys):
+    """The behaviour, not just the flag: one submit, one await, no choice."""
+    waited = []
+
+    class _Client(_AwaitClient):
+        def submit(self, prompt, **kwargs):
+            return {"id": "job-1", "status": "queued"}
+
+        def await_session(self, accepted, **kwargs):
+            waited.append(accepted["id"])
+            return {**accepted, "session": "sess-9", "session_state": "ready"}
+
+    monkeypatch.setattr(ab, "_client", lambda _args: _Client([]))
+    # A queued job is not a verdict on the work, so `submit` returns 0 rather
+    # than mapping a status to an exit code the way `run` and `wait` do.
+    assert ab.main(["submit", "do a thing"]) == 0
+    assert waited == ["job-1"]
+    out, err = capsys.readouterr()
+    # The bare id is still the whole of stdout — `id=$(ab submit …)` is a
+    # documented contract — and the session it now always carries is on stderr.
+    assert out == "job-1\n"
+    assert "session: sess-9 (ready)" in err
+
+
 def test_await_session_timeout_is_not_a_failure():
     client = _AwaitClient([{"status": "queued", "session": None}])
     out = client.await_session({"id": "job-1", "status": "queued"},
@@ -296,3 +369,14 @@ def test_follow_failure_flag_applies_when_until_is_reached(monkeypatch):
 def test_snapshot_queries_do_not_fail_by_default(monkeypatch):
     monkeypatch.setattr(ab, "_client", lambda _args: FakeClient("failed"))
     assert ab.main(["job", "job-1", "--output", "json"]) == 0
+
+
+def test_the_capabilities_verb_is_gone_and_fails_loudly():
+    """It returned this client's half plus the gateway's name plus a verbatim
+    GET /v1/agents — `ab gateways` and `ab agents`. An old script gets an
+    argparse error, which is better than a wrapper nobody maintains."""
+    assert "capabilities" not in abclient.OPERATIONS
+    assert not hasattr(abclient.Client, "capabilities")
+    with pytest.raises(SystemExit) as exc:
+        ab.build_parser().parse_args(["capabilities"])
+    assert exc.value.code == 2

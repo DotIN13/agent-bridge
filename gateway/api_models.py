@@ -89,11 +89,10 @@ class JobCreate(StrictModel):
     model: str | None = None
     permission_mode: str | None = None
     include_thinking: bool = False
-    # The turn is not the job. Default true: a job is finished when the work
-    # says so, not when the agent stops talking, so every job parks in
-    # `awaiting_report` until `ab-notify --status finished|failed` closes it.
-    # Send false for a job whose turn really is the whole of it.
-    expect_report: bool = True
+    # Removed, and kept on the DTO only so the refusal can name itself: a job
+    # ends when its turn ends, and work that outlives the turn is a monitor
+    # (design/16). `true` is a typed 400; `false` is what every job does.
+    expect_report: bool = False
     files: list[FileItem] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -253,6 +252,58 @@ class MessageResponse(BaseModel):
     id: str
     seq: int
     duplicate: bool = False
+
+
+class MonitorCreate(StrictModel):
+    """Register a watch on work that outlives the turn that started it.
+
+    `poll` is authored by the caller because the caller is what knows what it
+    submitted; the gateway runs it on a timer and reads the first word of its
+    output (see gateway/monitors.py). `slurm` is sugar for the common case and
+    expands to an `sacct` read.
+    """
+
+    poll: str | None = Field(default=None, max_length=4000)
+    slurm: str | None = Field(default=None, max_length=64)
+    job: str | None = None
+    label: str | None = Field(default=None, max_length=120)
+    map: str | None = Field(default=None, max_length=1000)
+    note: str | None = Field(default=None, max_length=2000)
+    interval_sec: float | None = Field(default=None, ge=1, le=86400)
+    deadline_sec: float | None = Field(default=None, ge=1)
+    result_paths: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def valid_monitor(self):
+        if not (self.poll or self.slurm):
+            raise ValueError("one of 'poll' or 'slurm' is required")
+        if self.poll and self.slurm:
+            raise ValueError("pass either 'poll' or 'slurm', not both")
+        return self
+
+
+class MonitorDetail(BaseModel):
+    id: str
+    job_id: str | None = None
+    label: str | None = None
+    poll_cmd: str
+    map_spec: str | None = None
+    interval_sec: float
+    deadline: float | None = None
+    status: str
+    detail: str | None = None
+    result_paths: list[str] = Field(default_factory=list)
+    note: str | None = None
+    created_at: float
+    last_poll_at: float | None = None
+    next_poll_at: float | None = None
+    finished_at: float | None = None
+
+
+class MonitorPage(BaseModel):
+    monitors: list[MonitorDetail] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class AgentDescription(BaseModel):

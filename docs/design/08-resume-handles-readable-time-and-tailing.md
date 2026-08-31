@@ -73,7 +73,7 @@ alongside the existing `title=`.
 
 **Decided: submit awaits the session by default.** `ab submit` blocks only until
 the session id is known — the agent's `init` record, not job completion — and
-prints it. `--no-wait` restores the old instant return. Rationale: the id is
+prints it; `--no-wait` restored the old instant return. Rationale: the id is
 what makes the next call possible, and a default that omits it means every
 agent pays a discover-the-session round trip it will almost always want.
 
@@ -92,6 +92,14 @@ Four cases the default has to survive, none of which may hang:
 | job dies before `init` (bad model, missing binary) | stop as soon as the row goes terminal; report `session_state: "failed"` and the job's error |
 | job still queued behind others (`concurrency` full) | keep waiting until the timeout — a queued job has no session yet and that is not an error |
 | timeout (`--await-timeout`, default 30s) | `session_state: "pending"`, print the job id, **exit 0** |
+
+**Later: the opt-out went.** `--no-wait` was part of this decision and has been
+removed; `ab submit` always waits. The argument for keeping an escape hatch was
+that a caller might not want to block — but the block is bounded by
+`--await-timeout` and running out of it is not an error (the row below), so the
+flag only ever bought back a few seconds in exchange for a job id whose session
+nobody could use yet. An old script naming it gets an argparse error, which is
+better than the same flag quietly meaning nothing.
 
 **Timeout is not a failure.** The submission succeeded and the job is running;
 the session is an enhancement on top. Exit 4 would be wrong here and would break
@@ -235,10 +243,9 @@ default quietly getting smaller.
 
 - **Part 1:** submit with a pinned session returns it as `pinned` without
   waiting; a fresh submit waits and returns `ready` with the new id; `session`
-  equals `forked_session` across fresh, fork, and in-place resume; `--no-wait`
-  returns immediately with `pending`; a submit whose job fails before `init`
-  stops at the terminal row rather than waiting out the timeout; a timeout
-  exits 0 with the job id still on stdout.
+  equals `forked_session` across fresh, fork, and in-place resume; a submit
+  whose job fails before `init` stops at the terminal row rather than waiting out
+  the timeout; a timeout exits 0 with the job id still on stdout.
 - **Part 2:** every float timestamp has an ISO sibling that round-trips to the
   same instant; `elapsed` of the first event is 0; ISO values sort in seq order.
 - **Part 3:** `total` matches a direct count; `tail=N` returns the same rows as

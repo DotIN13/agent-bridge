@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    // Imports carry `.ts` so `tsx` can run the sources unbuilt; tsc rewrites
+    // them to `.js` on emit, so the same line works either way.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["src/server/**/*.ts", "src/protocol.ts"]
+}

@@ -1,0 +1,188 @@
+[data-component="button"] {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: none;
+  border-radius: 6px;
+  font-weight: 530;
+  font-size: calc(13px * var(--font-scale));
+  line-height: 20px;
+  letter-spacing: -0.04px;
+  color: var(--v2-text-text-base);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  cursor: pointer;
+  outline: none;
+  white-space: nowrap;
+}
+
+[data-component="button"]:is(:focus-visible, [data-state="focus"]):not(:disabled) {
+  outline: 2px solid var(--v2-border-border-focus);
+  outline-offset: 2.5px;
+}
+
+[data-component="button"][data-size="small"] {
+  min-height: max(24px, calc(24px * var(--font-scale)));
+  padding: 0 9px;
+  border-radius: 4px;
+}
+[data-component="button"][data-size="normal"] {
+  min-height: max(28px, calc(28px * var(--font-scale)));
+  padding: 0 11px;
+}
+[data-component="button"][data-size="large"] {
+  min-height: max(32px, calc(32px * var(--font-scale)));
+  padding: 0 15px;
+}
+
+[data-component="button"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Neutral ── */
+[data-component="button"][data-variant="neutral"] {
+  background-color: var(--v2-background-bg-button-neutral);
+  box-shadow: var(--v2-elevation-button-neutral);
+}
+[data-component="button"][data-variant="neutral"]:hover:not(:disabled) {
+  background-image: linear-gradient(
+    var(--v2-overlay-simple-overlay-hover),
+    var(--v2-overlay-simple-overlay-hover)
+  );
+}
+[data-component="button"][data-variant="neutral"]:active:not(:disabled) {
+  background-image: linear-gradient(
+    var(--v2-overlay-simple-overlay-pressed),
+    var(--v2-overlay-simple-overlay-pressed)
+  );
+}
+
+/* ── Contrast (primary) ── */
+[data-component="button"][data-variant="contrast"] {
+  background-color: var(--v2-background-bg-contrast);
+  color: var(--v2-text-text-contrast);
+  box-shadow: var(--v2-elevation-button-contrast);
+}
+[data-component="button"][data-variant="contrast"]:hover:not(:disabled) {
+  background-image: linear-gradient(
+    var(--v2-overlay-simple-overlay-contrast-hover),
+    var(--v2-overlay-simple-overlay-contrast-hover)
+  );
+}
+[data-component="button"][data-variant="contrast"]:active:not(:disabled) {
+  background-image: linear-gradient(
+    var(--v2-overlay-simple-overlay-contrast-pressed),
+    var(--v2-overlay-simple-overlay-contrast-pressed)
+  );
+}
+
+/* ── Outline ── */
+[data-component="button"][data-variant="outline"] {
+  background-color: transparent;
+  box-shadow: 0 0 0 1px var(--v2-border-border-base);
+}
+[data-component="button"][data-variant="outline"]:hover:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+}
+
+/* ── Ghost ── */
+[data-component="button"][data-variant="ghost"] {
+  background-color: transparent;
+}
+[data-component="button"][data-variant="ghost"]:hover:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+}
+[data-component="button"][data-variant="ghost"]:active:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-pressed);
+}
+
+[data-component="button"][data-variant="ghost-muted"] {
+  background-color: transparent;
+  color: var(--v2-text-text-muted);
+}
+[data-component="button"][data-variant="ghost-muted"]:hover:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+  color: var(--v2-text-text-base);
+}
+
+/* ── Danger ── */
+[data-component="button"][data-variant="danger"] {
+  background-color: var(--v2-state-bg-danger);
+  color: var(--v2-state-fg-danger);
+  box-shadow: 0 0 0 0.5px var(--v2-state-border-danger);
+}
+[data-component="button"][data-variant="danger"]:hover:not(:disabled) {
+  background-image: linear-gradient(
+    var(--v2-overlay-simple-overlay-hover),
+    var(--v2-overlay-simple-overlay-hover)
+  );
+}
+
+/* ── Icon button ── */
+[data-component="icon-button"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--v2-icon-icon-base);
+  cursor: pointer;
+  outline: none;
+}
+
+/* Square, and grown with the text so they stay level with the controls they
+   sit beside. The glyph inside keeps its own size — a pictogram does not have
+   to grow for the hit area to. */
+[data-component="icon-button"][data-size="small"] {
+  width: max(20px, calc(20px * var(--font-scale)));
+  height: max(20px, calc(20px * var(--font-scale)));
+}
+[data-component="icon-button"][data-size="normal"] {
+  width: max(24px, calc(24px * var(--font-scale)));
+  height: max(24px, calc(24px * var(--font-scale)));
+}
+
+[data-component="icon-button"]:is(:focus-visible, [data-state="focus"]):not(:disabled) {
+  outline: 2px solid var(--v2-border-border-focus);
+  outline-offset: 1px;
+}
+
+[data-component="icon-button"][data-variant="ghost"]:hover:not(:disabled),
+[data-component="icon-button"][data-variant="neutral"]:hover:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+  color: var(--v2-text-text-base);
+}
+[data-component="icon-button"]:active:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-pressed);
+}
+
+[data-component="icon-button"][data-variant="ghost-muted"] {
+  color: var(--v2-icon-icon-muted);
+}
+[data-component="icon-button"][data-variant="ghost-muted"]:hover:not(:disabled) {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+  color: var(--v2-text-text-base);
+}
+
+[data-component="icon-button"][data-variant="danger"] {
+  color: var(--v2-state-fg-danger);
+}
+[data-component="icon-button"][data-variant="danger"]:hover:not(:disabled) {
+  background-color: var(--v2-state-bg-danger);
+}
+
+[data-component="icon-button"]:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+[data-component="icon-button"][data-variant="neutral"] {
+  background-color: var(--v2-background-bg-button-neutral);
+  box-shadow: var(--v2-elevation-button-neutral);
+  border-radius: 6px;
+}

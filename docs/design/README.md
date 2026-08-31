@@ -20,8 +20,49 @@ decision that looks arbitrary until you know what it was chosen against.
 | [08](08-resume-handles-readable-time-and-tailing.md) | Canonical resume handle, local ISO timestamps, reading a log from the end | after 0.3.0 |
 | [10](10-untitled-sessions-and-a-slow-dirs-view.md) | Slash-command residue is not a session; the dirs view got ~65x faster | after 0.3.0 |
 | [11](11-a-turn-is-not-a-job.md) | `expect_report`: a job that hands work to a scheduler waits for it | after 0.3.0 |
+| [15](15-reporting-is-a-directory-and-watching-is-a-monitor.md) | Reporting is a directory; watching is a monitor. `ab-notify` retired | after 0.3.0 |
+| [16](16-the-turn-is-the-job.md) | The turn is the job, unconditionally: `expect_report` and the `status` vocabulary removed | after 0.3.0 |
+| [17](17-a-job-is-a-turn-and-a-report.md) | A job is a turn *and* a report: the `waiting` state, with the agent still alive | after 0.3.0 |
+| [18](18-steering-opencode-is-http-not-a-pipe.md) | opencode jobs are steerable: `delivery: "steer"` on an attached server, not a pipe | after 0.3.0 |
+| [19](19-one-contract-not-three.md) | `ab capabilities` removed — it was `ab help` + `ab gateways` + `ab agents`, and its verb list had drifted | after 0.3.0 |
+| [21](21-the-dashboard-is-a-supervisor-not-a-page.md) | `webui/`: the ssh forwards get a dashboard — askpass rather than a pty, and three invariants with tests on them | after 0.3.0 |
+| [22](22-connecting-is-starting-the-gateway.md) | `ab-serve`: the ssh line can end in a command, and connecting starts the gateway without owning it | after 0.3.0 |
+| [23](23-the-report-is-the-result.md) | `report.md` is the job's `result`, not one more event; progress is `ab-notify` rather than a path | after 0.3.0 |
+| [24](24-the-launcher-does-the-setup.md) | `run.sh` folded into `ab-serve`: the launcher seeds the config, installs the deps, and fixes the `PATH` the agents are found on | after 0.3.0 |
+| [25](25-the-delegate-s-tools-are-not-the-client.md) | `ab-notify` and `ab-monitor` move out of `client/` into `worker/`: they run in the job, not on the caller's machine | after 0.3.0 |
+
+**20 is missing on purpose.** It recorded the first attempt at a web UI, whose
+four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed
+and why. The number is not reused — a commit message pointing at design/20 still
+means the pty-based version, which is reachable by sha.
 
 ## The load-bearing bits
+
+**24 finishes 22 and corrects it.** 22 made connecting start the gateway and got
+the `$AB_PATH` layer right while leaving the layer below it wrong: the gateway's
+own `PATH`, which is how `bin = "claude"` is resolved. 24 folds `run.sh` in, which
+is where that fix had been living all along without anybody noticing it was load
+bearing.
+
+**23 narrows 15 and 17 rather than reversing them.** 15 made reporting a
+directory and 17 made the report half of what finishes a job; 23 keeps both and
+removes the second place a delegate was asked to say the same thing — the closing
+message — by making the file the `result`.
+
+**19 reverses a piece of 06**, which is worth reading as a pair: 06 added
+`ab capabilities` so an agent could learn the contract in one call, and the verb
+turned out to be three other commands stapled together with a hand-maintained
+list that then drifted. The intent survives — one machine-readable contract —
+but it lives in `ab help --output json`, with a test holding it to the parser.
+
+**18 finishes what 02 started on the other backend.** 02 built the steering
+channel around claude's streaming stdin and left opencode advertising
+`steering: False` — accurate, and never investigated. It turns out opencode has
+the better-named mechanism (`delivery: "steer"` vs `"queue"`, with a receipt),
+and the work is all in *reaching* it: `opencode run` closes stdin before the turn
+and its server has no port, so a steerable job needs `opencode serve` and
+`--attach`. Read 18 before assuming a second process per job is gratuitous, and
+for what attaching costs a job with attachments.
 
 **01 + 02 were one subject split by cost** — a docs correction that could ship
 immediately, and the behaviour behind it. 02 carries the empirical evidence that
@@ -51,6 +92,29 @@ The rule those three converge on: **a session exists if a human spoke or the
 agent acted.** Anything touching how transcripts are filtered should run
 `tests/backend/test_session_stubs.py`, which pins each failure by name — including
 the custom-slash-command case that no session on the development store exercises.
+
+**17 is 16 with its cost paid.** 16 made the turn the whole of a job, which let a
+delegate end cleanly having produced nothing. 17 puts `report.md` into the
+definition and adds `waiting` for the gap between the two — a post-turn state
+again, but one that waits on a file in a directory the gateway already scans,
+with the agent still alive and a 30-minute grace window rather than a day. Its
+table comparing `waiting` to 11's `awaiting_report` is the thing to read before
+assuming this is the same mistake twice.
+
+**16 ends a default that moved three times**, and 11 → 15 → 16 is worth reading
+in order: the turn was the job, then it wasn't and every row waited, then waiting
+was opt-in, then the long tail became a monitor and the opt-in had nothing left to
+do. 16 also records the one thing this costs — a clean turn whose *work* failed
+reads `succeeded` — so it is not rediscovered as a bug.
+
+**15 closes the loop 07 and 11 opened.** 07 kept the two lifecycles apart, 11
+merged them behind `expect_report` and then defaulted it on, and 15 reversed the
+default while keeping the opt-in — the long tail became a monitor with its own
+row instead. Read 11 for why the opt-in existed and why a parked job was
+deliberately not `running`; 16 then removed it. 15 also deletes the reason
+`ab-notify` existed, which was that a compute node could not be seen; it turned
+out the *job* could not be identified either, and `$AB_JOB_ID` was never set by
+anything.
 
 **11 partly supersedes 07**, and the pair is worth reading together. 07 decided
 a coding-agent job and external compute must not be merged into one status

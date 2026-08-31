@@ -126,8 +126,7 @@ def test_worker_shutdown_joins_before_database_close(tmp_path):
         timeout_sec=0, max_sessions_in_index=1, models=())
     cfg = Config(
         host="127.0.0.1", port=0, token="x", concurrency=2,
-        db_path=str(tmp_path / "worker.db"), data_dir=str(tmp_path),
-        messages_dir=str(tmp_path / "messages"), files_dir=str(tmp_path / "files"),
+        db_path=str(tmp_path / "worker.db"), data_dir=str(tmp_path), files_dir=str(tmp_path / "files"),
         cluster_enabled=False, agents={"claude": agent})
     db = Database(cfg.db_path)
     pool = WorkerPool(cfg, db, Bus())

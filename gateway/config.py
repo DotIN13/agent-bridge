@@ -12,27 +12,37 @@ _DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8787},
     "auth": {"token": ""},
     "worker": {
-        "concurrency": 2,
+        # High because a job now holds its slot while `waiting` for its report
+        # (design/17): the agent process stays alive after its turn, so a couple
+        # of slow reporters must not be able to stall the queue. These are
+        # subprocesses on a login node, so mind what the box can take.
+        "concurrency": 16,
+        # How long a job that ended its turn has to write
+        # $AB_JOB_DIR/report.md before the gateway fails it. A grace window, not
+        # a wait: the delegate is meant to write it *before* ending the turn.
+        # 0 waits indefinitely.
+        "report_wait_sec": 1800,
         # Cancel sends SIGINT first (the ESC equivalent) and only escalates if
         # the agent hasn't wound down within this many seconds.
         "cancel_grace_sec": 15,
-        # How long a job that declared `expect_report` may sit in
-        # `awaiting_report` before the gateway gives up on it. Without a
-        # deadline a scheduler job that dies silently leaves its row open
-        # forever and `ab wait` blocks on a report nobody will send.
-        # 0 disables the deadline, which means exactly that.
-        "report_timeout_sec": 86400,
     },
     "db": {"path": "gateway.db"},
-    # Where `ab-notify` drops messages when it cannot reach the gateway over
-    # HTTP. Must be on a filesystem the compute nodes share with the login
-    # node; relative paths resolve against the data dir.
-    "messages": {"dir": "messages"},
     "cluster": {
         "enabled": True,
         "probe_timeout_sec": 15,
         # env vars reported presence-only (never their values) at /v1/info
         "env_presence": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+    },
+    # Watching work that outlives the turn that started it. The delegate
+    # authors the poll command, so these are the bounds on what it can ask the
+    # gateway to run on a timer -- see gateway/monitors.py.
+    "monitors": {
+        "enabled": True,
+        "max_active": 32,          # refuse a new watch beyond this
+        "default_interval_sec": 300,
+        "min_interval_sec": 30,    # floor; a delegate asking for less gets this
+        "poll_timeout_sec": 20,    # per poll; a hung command is a failed read
+        "max_deadline_sec": 604800,  # 7d ceiling on how long we keep watching
     },
     # Operator notes: what this machine's owner knows and the probes cannot
     # discover. One markdown file, served to every client (see gateway/notes.py).
@@ -77,6 +87,19 @@ class AgentConfig:
     max_sessions_in_index: int
     models: tuple[str, ...] = ()
 
+    #: Make this backend's jobs reachable mid-turn. Only the opencode adapter
+    #: reads it: claude is steerable through the stdin it already opens, where
+    #: opencode needs its job attached to a real HTTP server, which costs a
+    #: second process per job and opencode's own attachment limits (a directory
+    #: is refused, a file over 10 MiB is refused). See docs/design/18.
+    steering: bool = True
+
+    #: Attach to an opencode server the operator already runs, instead of
+    #: starting one per job. Its password is read from the *gateway's*
+    #: environment (`OPENCODE_SERVER_PASSWORD`), never from this file, for the
+    #: same reason the auth token is not in it.
+    server_url: str = ""
+
     def resolve_cwd(self, requested: str | None) -> str:
         """Return an allowed absolute cwd, or raise ValueError."""
         target = Path(requested).expanduser() if requested else Path(self.default_cwd)
@@ -99,8 +122,7 @@ class Config:
     db_path: str          # absolute
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
-    report_timeout_sec: float = 86400.0
-    messages_dir: str = ""        # absolute; ab-notify's fallback drop point
+    report_wait_sec: float = 1800.0
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -110,6 +132,12 @@ class Config:
     files_max_request_mb: int = 512
     notes_path: str = ""          # absolute; the operator notes document
     notes_max_bytes: int = 65536
+    monitors_enabled: bool = True
+    monitors_max_active: int = 32
+    monitors_default_interval_sec: float = 300.0
+    monitors_min_interval_sec: float = 30.0
+    monitors_poll_timeout_sec: float = 20.0
+    monitors_max_deadline_sec: float = 604800.0
     agents: dict[str, AgentConfig] = field(default_factory=dict)
 
     @property
@@ -194,13 +222,6 @@ def load(path: str | os.PathLike | None) -> Config:
     if not db_path.is_absolute():
         db_path = data_dir / db_path
 
-    messages_dir = Path(raw.get("messages", {}).get("dir", "messages"))
-    if not messages_dir.is_absolute():
-        messages_dir = data_dir / messages_dir
-    # Created up front: a batch job on another node must be able to write here
-    # without racing to mkdir.
-    messages_dir.mkdir(parents=True, exist_ok=True)
-
     agents: dict[str, AgentConfig] = {}
     for name, a in raw.get("agents", {}).items():
         agents[name] = AgentConfig(
@@ -214,11 +235,14 @@ def load(path: str | os.PathLike | None) -> Config:
             timeout_sec=int(a.get("timeout_sec", 0)),
             max_sessions_in_index=int(a.get("max_sessions_in_index", 40)),
             models=_load_models(a.get("models", []), name),
+            steering=bool(a.get("steering", True)),
+            server_url=str(a.get("server_url", "")).rstrip("/"),
         )
 
     cl = raw.get("cluster", {})
     fl = raw.get("files", {})
     nt = raw.get("notes", {})
+    mn = raw.get("monitors", {})
     notes_path = Path(nt.get("path", "gateway.md")).expanduser()
     if not notes_path.is_absolute():
         notes_path = data_dir / notes_path
@@ -229,10 +253,8 @@ def load(path: str | os.PathLike | None) -> Config:
         token=token,
         concurrency=int(raw["worker"]["concurrency"]),
         cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
-        report_timeout_sec=float(
-            raw["worker"].get("report_timeout_sec", 86400)),
+        report_wait_sec=float(raw["worker"].get("report_wait_sec", 1800)),
         db_path=str(db_path),
-        messages_dir=str(messages_dir),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),
         cluster_probe_timeout=int(cl.get("probe_timeout_sec", 15)),
@@ -243,6 +265,12 @@ def load(path: str | os.PathLike | None) -> Config:
         files_max_request_mb=int(fl.get("max_request_mb", 512)),
         notes_path=str(notes_path),
         notes_max_bytes=int(nt.get("max_bytes", 65536)),
+        monitors_enabled=bool(mn.get("enabled", True)),
+        monitors_max_active=int(mn.get("max_active", 32)),
+        monitors_default_interval_sec=float(mn.get("default_interval_sec", 300)),
+        monitors_min_interval_sec=float(mn.get("min_interval_sec", 30)),
+        monitors_poll_timeout_sec=float(mn.get("poll_timeout_sec", 20)),
+        monitors_max_deadline_sec=float(mn.get("max_deadline_sec", 604800)),
         agents=agents,
     )
 

@@ -17,7 +17,7 @@ sys.path.insert(0, _CLIENT_DIR)
 sys.path.insert(0, os.path.dirname(_CLIENT_DIR))
 from abclient import (  # noqa: E402
     AWAIT_SESSION_TIMEOUT, CLIENT_VERSION, EVENT_TYPES, PROBE_TIMEOUT, TERMINAL,
-    WAIT_FOR, Client, ConfigError, GatewayError, load_gateways,
+    Client, ConfigError, GatewayError, client_capabilities, load_gateways,
 )
 
 EXIT_LOCAL = 1
@@ -160,7 +160,6 @@ def _submission(args) -> dict:
                 session=args.session, permission_mode=args.permission_mode,
                 files=args.file, upload=uploads, title=args.title,
                 fork=args.fork, include_thinking=args.include_thinking,
-                expect_report=getattr(args, "expect_report", True),
                 idempotency_key=args.idempotency_key)
 
 
@@ -233,11 +232,6 @@ def cmd_agents(args):
     _emit(args, data, human)
 
 
-def cmd_capabilities(args):
-    _emit(args, _client(args).capabilities(),
-          lambda value: print(json.dumps(value, indent=2)))
-
-
 def cmd_help(args):
     if args.remote:
         client = load_gateways(args.config).client(args.gateway, require_token=False)
@@ -247,7 +241,7 @@ def cmd_help(args):
         if _mode(args) == "human":
             build_parser().print_help()
         else:
-            _emit(args, _local_capabilities(), lambda _value: None)
+            _emit(args, client_capabilities(), lambda _value: None)
 
 
 def cmd_info(args):
@@ -377,12 +371,15 @@ def cmd_run(args):
 def cmd_submit(args):
     client = _client(args)
     job = client.submit(_resolve_prompt(args), **_submission(args))
-    # Wait for the session id by default: it is what makes the *next* call
-    # possible (a follow-up, a steer, a fork), and without it every caller pays
-    # a discover-the-session round trip it almost always wants. This waits for
-    # the id only, not for the work. `--no-wait` opts out.
-    if args.await_session:
-        job = client.await_session(job, timeout=args.await_timeout)
+    # Always wait for the session id. It is what makes the *next* call possible
+    # (a follow-up, a steer, a fork), and without it every caller pays a
+    # discover-the-session round trip it almost always wants.
+    #
+    # This waits for the id only, never for the work -- that is `ab run` -- and
+    # exceeding `--await-timeout` is not an error: the job keeps running and the
+    # row says `session: pending`. So there is no case in which waiting costs
+    # more than the timeout, which is why the opt-out went (design/08).
+    job = client.await_session(job, timeout=args.await_timeout)
 
     def human(value):
         # The bare id stays the whole of stdout: `id=$(ab submit -F t.md)` is a
@@ -454,6 +451,70 @@ def cmd_job(args):
         _remote_exit(job)
     elif args.fail_on_job_failure and job.get("status") in {"failed", "canceled"}:
         raise SystemExit(EXIT_REMOTE)
+
+
+def cmd_monitors(args):
+    data = _client(args).list_monitors(
+        job=args.job, status=args.status,
+        active=None if args.all else True,
+        limit=args.limit, cursor=args.cursor)
+
+    def human(value):
+        rows = value.get("monitors", [])
+        if not rows:
+            print("nothing being watched" if args.all else
+                  "nothing being watched right now (--all includes finished)")
+            return
+        print(f"{'ID':<36} {'STATUS':<9} {'EVERY':>6}  LABEL / LAST READ")
+        for row in rows:
+            label = row.get("label") or ""
+            detail = _line(row.get("detail") or "")
+            text = f"{label}  {detail}".strip()
+            if not args.full:
+                text = _clip(text, 46)
+            print(f"{row['id']:<36} {row.get('status',''):<9} "
+                  f"{int(row.get('interval_sec') or 0):>5}s  {text}")
+        if value.get("next_cursor"):
+            print(f"next_cursor: {value['next_cursor']}")
+    _emit(args, data, human)
+
+
+def cmd_monitor(args):
+    client = _client(args)
+    if args.cancel:
+        row = client.cancel_monitor(args.id)
+    elif args.wait:
+        row = client.wait_monitor(args.id, timeout=args.timeout)
+    else:
+        row = client.get_monitor(args.id)
+
+    def human(value):
+        print(f"status: {value['status']}")
+        if value.get("label"):
+            print(f"label: {value['label']}")
+        print(f"poll: {value['poll_cmd']}")
+        print(f"every: {int(value.get('interval_sec') or 0)}s")
+        if value.get("job_id"):
+            print(f"job: {value['job_id']}")
+        if value.get("last_poll_at"):
+            print(f"last read: {_ts(value['last_poll_at'])}")
+        if value.get("detail"):
+            print(f"read: {value['detail']}")
+        for path in value.get("result_paths") or ():
+            print(f"result: {path}")
+        if value.get("note"):
+            print(f"note: {value['note']}")
+        if value.get("timed_out_waiting"):
+            print(f"timeout: watch {value.get('id')} continues")
+    _emit(args, row, human,
+          kind="timeout" if row.get("timed_out_waiting") else "result")
+    if args.wait:
+        if row.get("timed_out_waiting"):
+            raise SystemExit(EXIT_TIMEOUT)
+        # `expired` is the gateway giving up on the watch rather than the work
+        # failing, but a caller who waited for an answer did not get one.
+        if row.get("status") in {"failed", "expired", "canceled"}:
+            raise SystemExit(EXIT_REMOTE)
 
 
 def cmd_wait(args):
@@ -620,17 +681,6 @@ def _positive_float(value: str) -> float:
     return number
 
 
-def _local_capabilities() -> dict:
-    return {"version": CLIENT_VERSION,
-            "output_modes": ["human", "json", "jsonl"],
-            "exit_codes": {"success": 0, "local_error": 1, "invocation": 2,
-                           "remote_failure": 3, "wait_timeout": 4},
-            "operations": ["gateways", "health", "agents", "capabilities",
-                           "help", "info", "models", "sessions", "run",
-                           "submit", "jobs", "job", "wait", "events", "cancel",
-                           "steer", "upload", "download", "ls"]}
-
-
 def _add_globals(parser, *, child=False):
     default = argparse.SUPPRESS if child else None
     parser.add_argument("--gateway", "-g", default=default,
@@ -682,10 +732,6 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--permission-mode", dest="permission_mode")
         sp.add_argument("--include-thinking", action="store_true",
                         help="retain reasoning events")
-        sp.add_argument("--no-expect-report", dest="expect_report",
-                        action="store_false", default=True,
-                        help="finish the job when the turn ends, instead of "
-                             "waiting for an ab-notify finished/failed report")
         sp.add_argument("--upload", action="append", metavar="LOCAL",
                         help="attach a local regular file (repeatable)")
         sp.add_argument("--upload-as", action="append", default=[],
@@ -706,7 +752,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_gateways)
     command("health", "probe one gateway's liveness and version").set_defaults(func=cmd_health)
     command("agents", "list configured agent backends and capabilities").set_defaults(func=cmd_agents)
-    command("capabilities", "print the structured client/server contract").set_defaults(func=cmd_capabilities)
     sp = command("help", "show local or live gateway help")
     sp.add_argument("--remote", action="store_true", help="fetch /v1/help")
     sp.set_defaults(func=cmd_help)
@@ -728,8 +773,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_sessions)
 
     sp = command("run", "submit a prompt and wait for completion")
-    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
-                    help="what to wait for: both (default), turn, report")
     prompt_flags(sp); job_flags(sp)
     sp.add_argument("--stream", action="store_true",
                     help="stream human assistant text; JSON remains one document")
@@ -740,10 +783,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = command("submit", "submit a prompt, waiting only for its session id")
     prompt_flags(sp); job_flags(sp)
-    sp.add_argument("--no-wait", dest="await_session", action="store_false",
-                    default=True,
-                    help="return as soon as the job is queued, without waiting "
-                         "for the session id (session_state stays 'pending')")
     sp.add_argument("--await-timeout", type=_positive_float,
                     default=AWAIT_SESSION_TIMEOUT, metavar="SECONDS",
                     help=f"how long to wait for the session id "
@@ -755,6 +794,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=_positive_int, default=50)
     sp.add_argument("--cursor", help="opaque next_cursor from a prior page")
     sp.set_defaults(func=cmd_jobs)
+
+    sp = command("monitors", "list watches on work that outlives a turn")
+    sp.add_argument("--job", metavar="REF", help="only watches for this job")
+    sp.add_argument("--status", help="queued|running|finished|failed|expired|canceled")
+    sp.add_argument("--all", action="store_true",
+                    help="include watches that already resolved")
+    sp.add_argument("--limit", type=_positive_int, default=50)
+    sp.add_argument("--cursor", help="opaque next_cursor from a prior page")
+    sp.set_defaults(func=cmd_monitors)
+
+    sp = command("monitor", "show one watch, or stop it")
+    sp.add_argument("id", metavar="ID", help="monitor id from `ab monitors`")
+    sp.add_argument("--cancel", action="store_true",
+                    help="stop watching; the work itself keeps running")
+    sp.add_argument("--wait", action="store_true",
+                    help="block until the watch resolves (exit 3 if it ends "
+                         "failed/expired/canceled, 4 on timeout)")
+    sp.add_argument("--timeout", type=_positive_float, default=900.0)
+    sp.set_defaults(func=cmd_monitor)
 
     reference = "full UUID, unique id prefix, or title"
     sp = command("job", "get one job status/result")
@@ -769,10 +827,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("id", metavar="REF", help=reference)
     sp.add_argument("--timeout", type=_positive_float, default=900.0)
     sp.add_argument("--cancel-on-timeout", action="store_true")
-    sp.add_argument("--for", dest="wait_for", choices=WAIT_FOR, default="both",
-                    help="what to wait for: both (default, the job is done), "
-                         "turn (the agent stopped talking), report (an "
-                         "ab-notify finished/failed)")
     sp.set_defaults(func=cmd_wait)
 
     sp = command("events", "read or follow a job event stream")

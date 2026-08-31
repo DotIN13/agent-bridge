@@ -47,8 +47,6 @@ def gateway(tmp_path):
     allowed.mkdir()
     files = tmp_path / "files"
     files.mkdir()
-    messages = tmp_path / "messages"
-    messages.mkdir()
     agent = AgentConfig(
         name="claude", bin="claude", dispatch_mode="direct",
         permission_mode="bypassPermissions", model="claude-test",
@@ -57,8 +55,7 @@ def gateway(tmp_path):
         models=("claude-test",))
     cfg = Config(
         host="127.0.0.1", port=8787, token="test-token", concurrency=1,
-        db_path=str(tmp_path / "gateway.db"), data_dir=str(tmp_path),
-        messages_dir=str(messages), files_dir=str(files),
+        db_path=str(tmp_path / "gateway.db"), data_dir=str(tmp_path), files_dir=str(files),
         files_enabled=True, cluster_enabled=False, agents={"claude": agent},
         notes_path=str(tmp_path / "gateway.md"))
     gw = SimpleNamespace(

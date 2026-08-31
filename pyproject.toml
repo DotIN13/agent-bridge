@@ -12,7 +12,9 @@ dependencies = [
 [project.scripts]
 ab = "client.ab:main"
 agent-bridge = "gateway.__main__:main"
-ab-notify = "client.ab_notify:main"
+ab-notify = "worker.notify:main"
+ab-monitor = "worker.monitor:main"
+ab-serve = "gateway.serve:main"
 
 [project.optional-dependencies]
 test = [
@@ -24,10 +26,11 @@ test = [
 py-modules = ["agent_bridge_version"]
 
 [tool.setuptools.packages.find]
-include = ["gateway*", "client*"]
+include = ["gateway*", "client*", "worker*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "client._version.__version__"}
 
-# The gateway needs the dependencies above. The client modules remain stdlib
-# only at runtime and can still be copied/invoked directly without installing.
+# The gateway needs the dependencies above. `client/` (the caller's side) and
+# `worker/` (the delegate's own tools) remain stdlib only at runtime and can
+# still be copied or invoked directly without installing.

@@ -15,7 +15,7 @@ laptop: ab
 FastAPI gateway ── bounded workers ── Claude Code / opencode
        │
        ├── SQLite jobs + one monotonic event stream per job
-       └── files + shared ab-notify fallback
+       └── files, per-job report dirs, gateway-polled monitors
 ```
 
 ## Install and run
@@ -26,14 +26,38 @@ cp config.example.toml config.toml   # edit allowed_dirs and agents
 agent-bridge --config config.toml
 ```
 
+On a login node, `bin/ab-serve` is the shorter path and does the setup itself —
+it seeds `config.toml`, installs the gateway's dependencies into `.venv` on the
+first run, and starts the gateway **detached**, so no tmux session has to be kept
+alive for it:
+
+```bash
+git clone https://github.com/DotIN13/agent-bridge && cd agent-bridge
+bin/ab-serve --no-park            # bootstrap, start it, exit
+```
+
 Stable console commands are installed together:
 
 - `agent-bridge` — gateway process
 - `ab` — CLI
-- `ab-notify` — compute/batch reporter
+- `ab-monitor` — register a watch on work that outlives a turn
+- `ab-notify` — report a milestone from inside a job
+- `ab-serve` — ensure the gateway is serving, then hold an ssh connection open
 
-Legacy invocation remains supported: `python -m gateway`,
-`python client/ab.py`, and `bin/ab-notify`.
+**Or clone and put `bin/` on `PATH`** — that is the whole install for the client
+side. `ab`, `ab-notify`, `ab-monitor` and `ab-serve` import nothing outside the
+standard library, so there is no build step to fail on a node with no network:
+
+```bash
+git clone https://github.com/DotIN13/agent-bridge && cd agent-bridge
+export PATH="$PWD/bin:$PATH"
+ab jobs
+```
+
+The gateway is deliberately not shimmed there: it needs FastAPI and uvicorn, so
+it is `pip install -e .` and `agent-bridge`, or `python -m gateway` from a
+checkout — which is what `ab-serve` falls back to when nothing named
+`agent-bridge` is on `PATH`. `python client/ab.py` also still works.
 
 On a laptop, keep one tunnel alive:
 
@@ -44,6 +68,19 @@ ssh -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
 
 Configure gateways in `~/.config/agent-bridge/gateways.json`; see
 `client/gateways.example.json` and [client/README.md](client/README.md).
+
+Or let [`webui/`](webui/README.md) hold the tunnel: a local dashboard that
+supervises the forwards, relays ssh's password and two-factor prompts to a
+dialog, and shows the jobs behind each gateway. It reads the same
+`gateways.json`, so nothing is configured twice.
+
+```bash
+cd webui && npm install && npm run build && npm start
+```
+
+It runs anywhere Node does. On Windows the credential prompt depends on the ssh
+build — some honour `SSH_ASKPASS` and some ignore it — and
+[webui/README.md](webui/README.md#windows) says what to do when it is the latter.
 
 ## Agent-first CLI
 
@@ -64,8 +101,9 @@ Global flags work before or after the command. `--output` modes are:
 - `jsonl` — typed streaming records (`event`, `terminal`, `timeout`,
   `complete`).
 
-New discovery/lifecycle commands include `health`, `agents`, `capabilities`,
-`help --remote`, and `wait`. Follow uses resumable SSE and honors `--after`,
+New discovery/lifecycle commands include `health`, `agents`, `monitors`,
+`help --remote`, and `wait`. `ab help --output json` is the client's own
+contract — version, output modes, exit codes, and every verb it accepts. Follow uses resumable SSE and honors `--after`,
 `--until`, and repeatable `--type` filters.
 
 | Exit | Meaning |
@@ -92,8 +130,10 @@ ab submit -F new.md                              # genuinely fresh subject
 
 `--no-fork` requires an idle session. The gateway refuses a busy target with a
 typed `session_busy` error containing the holding job and steer reference.
-`steer` reaches a running turn at its next tool boundary; accepted delivery is
-not a strict exactly-once model-action guarantee.
+`steer` reaches a running turn — through the child's stdin on claude, and
+through `delivery: "steer"` on the attached server's API on opencode — and the
+`202` carries a `note` saying which. Accepted delivery is not a strict
+exactly-once model-action guarantee.
 
 Use `ab agents --output json` to discover which adapter/mode supports sessions,
 forking, in-place resume, steering, thinking, and attachments. `/v1/models` and
@@ -153,27 +193,133 @@ symlink roots, collisions, and existing files, and publish through atomic
 temporary files. Use `--overwrite` explicitly. `--flatten` is a legacy layout;
 collisions are still errors.
 
-## Batch and external reports
+## Reporting, and work that outlives a turn
 
-An agent turn may finish after submitting Slurm work. Put `ab-notify` in the
-batch script:
+Every job is handed a directory of its own in `$AB_JOB_DIR`
+(`<data_dir>/reports/<job-id>`, created before the agent starts). Two channels,
+and neither needs a job id, a url or a token:
 
 ```bash
-#SBATCH --export=ALL,AB_JOB_ID=<job-uuid>,AB_DATA_DIR=<gateway-data-dir>
-ab-notify --status running  --msg "server up" --report-id run-start
-ab-notify --status finished --report "$RUNS/RESULTS.md" --report-id run-finished
-ab-notify --status failed   --msg-file "$RUNS/error.log" --report-id run-failed
+ab-notify --msg "12/24 sources done" --report-id sources   # progress
+cp "$RUNS/RESULTS.md" "$AB_JOB_DIR/report.md"              # the result
 ```
 
-Delivery tries HTTP, shared `<data_dir>/messages/<job>.jsonl`, then local
-`$TMPDIR`. HTTP URL discovery is `--url`, `$AB_URL`, then
-`gateway-endpoint.json`; token discovery is `--token`, `$AB_TOKEN`, then
-`<data_dir>/.token`.
+`ab-notify` writes the milestone into the job dir for you — naming it so it
+sorts, and refusing anything over 64 KB — and each milestone becomes one
+`message` event, deduplicated by path *and* content, so a retried step
+overwrites its own note instead of piling up duplicates.
 
-These `message` events are **post-terminal annotations**, not a second job
-status machine. The coding-agent SSE closes when the job becomes terminal.
-Reports arriving later are retrieved by reconnecting with the last cursor or
-polling events. `report_id` deduplicates a retried report.
+`report.md` is the **result**: its content is stored in the job row, so
+`ab job <ref>` prints it, and it lands on the event stream as well. A delegate
+therefore states its findings once, in the file, rather than in both the file and
+its closing message — where the two can disagree and only one is kept. It is kept
+whole up to 2 MiB — a document's bound, not a milestone's, because this is the
+text a caller reads back into its own context.
+Compute nodes write here too, which is why the data dir belongs on the shared
+filesystem.
+
+A job goes terminal when its turn does. Work that outlives the turn is a
+**monitor**: its own row, with a poll command the delegate authors, run by the
+gateway on a timer.
+
+```bash
+JOBID=$(sbatch --parsable run.sbatch)
+ab-monitor add --slurm "$JOBID" --label train --interval 15m --deadline 12h \
+  --result "$RUNS/RESULTS.md"
+```
+
+`--slurm` reads `sacct` rather than `squeue`, which forgets a job once it leaves
+the queue. Anything else is `--poll <cmd>`, whose first word of output is the
+status; plain words (`running`/`finished`/`failed`) and Slurm state names are
+both understood, and `--map` covers the rest. `ab-monitor` only writes a
+key-value file into `$AB_JOB_DIR/monitors/`, so a heredoc does the same job when
+it is not on PATH.
+
+Callers read watches with `ab monitors --job <ref>` and `ab monitor <id>
+[--wait]`; transitions also land on the job's `message` stream as post-terminal
+annotations. `[monitors]` bounds how many watches a gateway keeps, the interval
+floor, the poll timeout, and the deadline ceiling.
+
+`ab-notify --msg "12/24 done" [--report-id sources]` is a convenience for the
+milestone write: it names the file so milestones sort the way they happened, and
+a retry under the same `--report-id` overwrites rather than adding a second one.
+It reports progress and nothing else — it has no `--status`, because a job ends
+when its turn ends and long work is a monitor.
+`POST /v1/jobs/{ref}/message` remains for anything that wants immediate delivery
+over HTTP.
+
+**A job is `succeeded` when its turn has ended and it has written
+`$AB_JOB_DIR/report.md`.** Between the two the row is `waiting`: the agent process
+stays alive, remains steerable, and can still write the file. No report within
+`[worker] report_wait_sec` (default 30 minutes) fails the job with
+`report_missing`.
+
+    queued -> running -> waiting -> succeeded | failed | canceled
+
+Short work writes the real report and ends its turn. Work that will run for an
+hour or more registers a monitor and writes a *preliminary* report, so the job
+closes while the watch carries the tail — and the monitor's terminal event is the
+record of how that work actually ended.
+
+## `ab-serve`
+
+The command a laptop's ssh line runs on the login node, so that connecting *is*
+starting the gateway:
+
+```bash
+ssh -L 8787:localhost:8787 midway5 '~/.local/bin/ab-serve'
+```
+
+The dashboard puts it there for you: `"exec": true` on a gateway entry (a switch
+in its config dialog) runs `PATH="${AB_PATH:+$AB_PATH:}$PATH"; exec ab-serve`
+when the tunnel comes up, and a string in the same key runs your own script
+instead. `$AB_PATH` is optional — it puts agent-bridge's script directory first,
+and without it the plain `PATH` lookup is used. See
+[webui/README.md](webui/README.md#starting-the-gateway-on-connect).
+
+It answers the four questions every hand-written version of this has to answer,
+and gets them right in the direction that loses least:
+
+- **Already serving?** Start nothing. A second gateway on the same port is not a
+  spare — it is a bind failure in a log nobody reads.
+- **Port held by something that is not a gateway?** Stop, and do not touch it.
+  Freeing a port this script did not bind is not a launcher's decision to make.
+- **Failed to start?** Exit non-zero, printing the tail of `gateway.log` — over
+  ssh, so the reason lands in whatever is watching the connection rather than on
+  the far side only.
+- **Connection dropped?** The gateway keeps running. It is started in a session
+  of its own, so a closed laptop costs the tunnel and not the jobs: a `waiting`
+  job is an agent still alive on the cluster with an sbatch to report, and
+  killing that to save a socket is the wrong trade. For the opposite — a gateway
+  that dies with the connection — run `ssh -L … host 'exec agent-bridge'`, which
+  needs none of this.
+
+While it holds, it re-checks `/health` and restarts a gateway that has gone,
+giving up after `--max-restarts` (default 3): something that dies four times in
+a row wants a human, not another restart. `--no-park` does the checks and exits,
+which is the form to use from a script or by hand on the login node.
+
+### It also does the setup
+
+In a checkout — a directory with `pyproject.toml` and `requirements.txt` beside
+it — `ab-serve` does what `run.sh` used to, because the launcher is the script
+anybody reliably runs (design/24):
+
+| | |
+|---|---|
+| `config.toml` | seeded from `config.example.toml` when absent, and used even though `ssh host cmd` starts in `$HOME` |
+| `.venv` | created and `requirements.txt` installed when this interpreter cannot `import fastapi` — `uv` if there is one, `venv` + `pip` otherwise. Idempotent: one import check on every later connect |
+| `PATH` | `~/.local/bin` and `~/.opencode/bin` prepended for the gateway, overridable with `--path DIR` (repeatable) |
+
+That last row is the one that bites without it. `bin = "claude"` in `config.toml`
+is resolved from the gateway's own `PATH`, and `ssh host cmd` gets a
+non-interactive shell whose `PATH` is missing what a login shell exports — so the
+gateway starts, answers `/health`, and fails every job with a "not found" that
+looks like nothing to do with the ssh line. Any configured agent that is still
+not findable is named in one line at connect time.
+
+`--no-bootstrap` turns all three off: it then fails with a message instead of
+installing anything, which is the right behaviour for a supervised host.
 
 ## Operator notes
 
@@ -198,16 +344,19 @@ See `config.example.toml`. Important controls:
   compute nodes need direct report HTTP.
 - `[worker] concurrency`, `cancel_grace_sec`.
 - `[files] enabled`, store, per-file and request bounds.
-- `[messages] dir` — shared filesystem fallback.
 - `[agents.<name>] allowed_dirs`, `default_cwd`, `dispatch_mode`, model catalog,
   permission mode, and timeout.
 
-Only the login-node gateway writes SQLite WAL. Compute nodes append JSONL when
-HTTP is unavailable. Scope `allowed_dirs` deliberately; noninteractive
+Only the login-node gateway writes SQLite WAL; nothing else writes the database.
+A job reports by writing files into its own directory under the data dir, so put
+the data dir on a filesystem the compute nodes share if a batch script is going to
+write there too. Scope `allowed_dirs` deliberately; noninteractive
 permission modes let an agent edit and execute within those roots.
 
 A systemd user service example is in `systemd/agent-bridge.service`. Skills for
-both ends of the workflow live under `skills/`.
+both ends of the workflow live under `skills/`. The local dashboard is a separate
+npm package under `webui/` — it never runs on the cluster, only on the machine
+the tunnels start from.
 
 ## Development
 
@@ -221,3 +370,9 @@ Backend tests cover typed OpenAPI/errors, public DTOs, idempotency, monotonic
 cursors, attachment atomicity, restart recovery, bounds, and capabilities.
 Client tests cover parser/output/exit contracts, SSE, safe files, and package
 entry points.
+
+The dashboard has its own suite, which needs no ssh binary and no gateway:
+
+```bash
+cd webui && npm install && npm run typecheck && npm test
+```

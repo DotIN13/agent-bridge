@@ -31,3 +31,6 @@ gateway-endpoint.json
 .opencode/
 .pi-subagents/
 gw-test-*.txt
+
+# Node dependencies (webui)
+node_modules/

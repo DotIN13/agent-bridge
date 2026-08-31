@@ -12,6 +12,8 @@ records refer to them.
 |---|---|---|---|
 | [09](09-steer-vs-resume-is-a-race.md) | Steer-vs-resume is a race the caller has to arbitrate | medium | a design decision |
 | [12](12-fleet-drift-and-self-update.md) | Five deployments drift silently; three have no update path | high | nothing — staged, phase 1 is standalone |
+| [13](13-delegation-techniques-from-claude-code.md) | Delegation techniques from Claude Code: no role axis, no write isolation | medium | nothing — phase 1 shipped as design/15; worktree isolation is next |
+| [14](14-the-prompt-contract-both-ways.md) | The prompt contract, both ways: what a brief must carry, what a report must state, and where that text lives | medium | nothing — client skill done, worker half open |
 
 ## Suggested order
 
@@ -22,6 +24,19 @@ stamp the commit, serve it, and add `ab fleet` — is a day's work, carries no
 operational risk, and is what turns "probably stale" into a number. The
 self-updating parts behind it can wait for that number to say how badly they
 are needed.
+
+**Then 13's phase 2, now that phase 1 has shipped.** The job-id defect is gone —
+a job reports through a directory it is handed
+([design/15](../design/15-reporting-is-a-directory-and-watching-is-a-monitor.md)) —
+but the other defect in that study is untouched: two jobs with the same cwd edit
+one checkout with no isolation and no mutual awareness, because claiming is
+per-session. The profiles work behind it is a design question and can wait.
+
+**14's worker half is what remains there.** The preamble exists now and states
+the facts a delegate cannot otherwise know; what is still only in a skill, on a
+host that may not have it installed, is the report contract — failures in the
+first sentence, a claim of done resting on observed output. Decide whether the
+preamble becomes the authoritative copy before adding a third voice to it.
 
 **09 is blocked on a decision rather than on work.** It is friction and a lost
 race, not corruption; the guards added in

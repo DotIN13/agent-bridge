@@ -3,11 +3,16 @@
   "gateways": {
     "midway5": {
       "base_url": "http://localhost:8787",
-      "token_env": "AGENT_BRIDGE_TOKEN"
+      "token_env": "AGENT_BRIDGE_TOKEN",
+      "ssh": "ssh -L 8787:localhost:8787 midway5",
+      "exec": true
     },
     "midway5-alt": {
       "base_url": "http://localhost:8788",
-      "token_file": "~/.config/agent-bridge/midway5-alt.token"
+      "token_file": "~/.config/agent-bridge/midway5-alt.token",
+      "ssh": "ssh -L 8788:localhost:8788 -J bastion midway5",
+      "exec": "module load python/3.11 && exec ~/.local/bin/ab-serve --interval 30",
+      "autostart": true
     },
     "other-cluster": {
       "base_url": "http://localhost:8789",

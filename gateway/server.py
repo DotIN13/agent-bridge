@@ -7,6 +7,7 @@ import hmac
 import json
 import socket
 import sys
+import time
 import uuid
 import urllib.parse
 from contextlib import asynccontextmanager
@@ -22,13 +23,14 @@ from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from . import __version__, files as filemod
+from . import __version__, files as filemod, jobdir, monitors as monmod
 from .adapters import build as build_adapter, known_agents
 from .adapters.base import SteerError
 from .api_models import (
     ERROR_RESPONSES, EVENT_TYPES, AgentDescription, AgentsResponse,
     CancelResponse, EventsPage, FileItem, FilesPage, JobAccepted, JobCreate,
     JobDetail, JobsPage, MessageRequest, MessageResponse, ModelsResponse,
+    MonitorCreate, MonitorDetail, MonitorPage,
     SessionDirsResponse, SessionsResponse, SteerRequest, SteerResponse,
     UploadResponse, iso_local,
 )
@@ -36,7 +38,7 @@ from .bus import Bus
 from .cluster import ClusterInfo
 from .config import Config
 from .db import (Database, IdempotencyConflict, ReportConflict, TERMINAL,
-                 derive_title)
+                 WAITING, derive_title)
 from .docs import render_llms_txt
 from .files import FileError
 from .notes import NotesStore
@@ -149,18 +151,253 @@ class Gateway:
                     log_level="warning")
 
 
-async def _expire_reports(gw: Gateway, interval: float = 60.0) -> None:
-    """Give up on parked jobs whose report never came.
+class MonitorRefused(ValueError):
+    """A watch the gateway will not take: disabled, or over the active bound."""
 
-    Runs on a timer rather than at read time so a job that nobody polls still
-    reaches a terminal state, and so the deadline survives a restart: the row
-    carries it, this only notices.
+
+def register_monitor(gw: Gateway, spec: dict, *,
+                     monitor_id: str | None = None,
+                     job_id: str | None = None) -> dict | None:
+    """Create one monitor from a validated spec. None if it already existed.
+
+    One path for both doors -- the HTTP route and a file dropped in a job dir --
+    so the bounds, the interval floor and the deadline ceiling cannot be true of
+    one and not the other.
+    """
+    cfg = gw.cfg
+    if not cfg.monitors_enabled:
+        raise MonitorRefused("monitors are disabled on this gateway")
+    if gw.db.count_active_monitors() >= cfg.monitors_max_active:
+        raise MonitorRefused(
+            f"this gateway is already watching {cfg.monitors_max_active} things; "
+            f"cancel one before adding another")
+    poll = spec.get("poll") or monmod.slurm_poll(spec["slurm"])
+    interval = float(spec.get("interval_sec") or cfg.monitors_default_interval_sec)
+    interval = max(interval, cfg.monitors_min_interval_sec)
+    deadline = None
+    requested = spec.get("deadline_sec")
+    ceiling = cfg.monitors_max_deadline_sec
+    if requested or ceiling:
+        span = min(float(requested or ceiling), ceiling) if ceiling else float(requested)
+        deadline = time.time() + span
+    return gw.db.create_monitor(
+        monitor_id=monitor_id or str(uuid.uuid4()),
+        job_id=job_id or spec.get("job"),
+        poll_cmd=poll, interval_sec=interval, deadline=deadline,
+        label=spec.get("label") or "", map_spec=spec.get("map") or "",
+        note=spec.get("note") or "",
+        result_paths=list(spec.get("result_paths") or ()))
+
+
+def _monitor_event(gw: Gateway, row: dict) -> None:
+    """Say what a monitor did, on the stream of the job that created it.
+
+    Post-terminal annotation, exactly as design/07 allows: the job is usually
+    finished by the time its monitor resolves, and `ab events <job> --type
+    message` stays the one progress log rather than growing a second one.
+    """
+    if not row.get("job_id"):
+        return
+    data = {"source": "monitor", "monitor": row["id"],
+            "status": _MONITOR_REPORT_STATUS.get(row["status"], "running"),
+            "monitor_status": row["status"], "msg": monmod.summary(row)}
+    if row.get("result_paths"):
+        data["result_paths"] = row["result_paths"]
+    if row["status"] in monmod.TERMINAL:
+        # The record of how the long task actually ended, on the stream of the
+        # job that started it: what was watched, what it last read, when it
+        # resolved, and where the results are. A caller reading
+        # `ab events <job> --type message` months later has the whole story
+        # without the scheduler's own logs.
+        data["terminal"] = True
+        data["label"] = row.get("label") or ""
+        data["poll_cmd"] = row["poll_cmd"]
+        data["detail"] = row.get("detail") or ""
+        data["finished_at"] = iso_local(row["finished_at"]) \
+            if row.get("finished_at") else None
+        data["watched_for_sec"] = round(
+            (row["finished_at"] or time.time()) - row["created_at"], 1)
+    try:
+        event = gw.db.append_event(row["job_id"], "message", data)
+    except Exception as exc:                          # a deleted job, say
+        print(f"warning: monitor event failed: {exc}", file=sys.stderr)
+        return
+    gw.bus.publish(row["job_id"], event)
+
+
+#: A monitor's status as an `ab-notify`-shaped report status, so a reader that
+#: already filters on `status` sees the same words from both channels. `expired`
+#: reports as `failed` deliberately: to a caller waiting on the work, "we
+#: stopped watching" is not good news, and `monitor_status` keeps the precise
+#: word for anyone who cares.
+_MONITOR_REPORT_STATUS = {"queued": "queued", "running": "running",
+                          "finished": "finished", "failed": "failed",
+                          "expired": "failed", "canceled": "failed"}
+
+
+def _adopt_monitor_drops(gw: Gateway, job_id: str) -> None:
+    """Register monitors a delegate dropped as files in its job dir."""
+    job_dir = jobdir.path_for(gw.cfg.data_dir, job_id)
+    for name, fields in jobdir.monitor_drops(job_dir):
+        spec = {"poll": fields.get("poll"), "slurm": fields.get("slurm"),
+                "label": fields.get("label") or name,
+                "map": fields.get("map"), "note": fields.get("note"),
+                "interval_sec": _as_seconds(fields.get("interval")),
+                "deadline_sec": _as_seconds(fields.get("deadline")),
+                "result_paths": [p for p in (fields.get("result") or "").split(",")
+                                 if p.strip()]}
+        try:
+            row = register_monitor(gw, spec, monitor_id=f"{job_id}:{name}",
+                                   job_id=job_id)
+        except (MonitorRefused, ValueError, KeyError) as exc:
+            # The drop is the delegate's only feedback channel, so a refusal has
+            # to land where it will read it rather than in the gateway's log.
+            gw.db.append_event(job_id, "message", {
+                "source": "monitor", "file": f"monitors/{name}",
+                "error": f"monitor not registered: {exc}"})
+            continue
+        if row:
+            _monitor_event(gw, row)
+
+
+def _as_seconds(value: str | None) -> float | None:
+    """`300`, `90s`, `15m`, `12h`, `2d` -> seconds. Unparseable -> None.
+
+    A batch script writes durations the way a person says them; refusing `12h`
+    and demanding 43200 is the kind of friction that gets a monitor left
+    unregistered.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    scale = units.get(text[-1], 1)
+    number = text[:-1] if text[-1] in units else text
+    try:
+        return float(number) * scale
+    except ValueError:
+        return None
+
+
+def _ingest_and_settle(gw: Gateway, job_id: str) -> list[dict]:
+    """Ingest on a read, and finish a `waiting` job whose report has landed.
+
+    The finish belongs here rather than only in the sweeper because a read is the
+    moment somebody is asking. Ingesting without settling let a `GET /v1/jobs/<id>`
+    return `waiting` in a body whose own event list already carried `report.md` --
+    the response contradicting itself, for up to one sweep interval. Idempotent:
+    the row moves once, from `waiting` only.
+    """
+    rows = _ingest_external(gw, job_id)
+    row = gw.db.get_job(job_id)
+    if row and row.get("status") == WAITING:
+        _finish_if_reported(gw, job_id)
+    return rows
+
+
+def _ingest_external(gw: Gateway, job_id: str) -> list[dict]:
+    """Pull in everything a job reported outside its own event stream.
+
+    One channel: the job dir. Idempotent and keyed, so a second pass inserts
+    nothing, and cheap enough to run on every read. Returns the rows it
+    inserted so a live-stream sweeper can publish them.
+
+    There used to be a second channel here -- a shared-filesystem JSONL drop,
+    for a compute node that could not reach the gateway over HTTP. Nothing has
+    written it since `ab-notify` became a job-dir reporter, and a reader with no
+    writer is worse than nothing: it was a whole ingestion path, with its own
+    bounds and dedup identity, that no test could exercise from the outside.
+    """
+    job_dir = str(jobdir.path_for(gw.cfg.data_dir, job_id))
+    rows = gw.db.ingest_job_dir(job_id, job_dir)
+    if gw.cfg.monitors_enabled:
+        # Here rather than only in the sweeper: a read is the other moment a
+        # pending registration can be noticed, and adoption is idempotent.
+        _adopt_monitor_drops(gw, job_id)
+    return rows
+
+
+def _poll_monitors(gw: Gateway, now: float | None = None) -> None:
+    """One round of every monitor that is due, plus deadline expiry.
+
+    Runs the delegate's command, records the outcome, and emits an event only
+    when the status actually changed -- a five-second sweep must not write an
+    event every five seconds for the eight hours a training run takes.
+
+    `now` is injectable so a test can advance past an interval without either
+    sleeping or reaching into the connection.
+    """
+    for row in gw.db.due_monitors(now):
+        status, detail = monmod.poll(row, gw.cfg.monitors_poll_timeout_sec)
+        changed = gw.db.record_poll(row["id"], status, detail, now=now)
+        if changed:
+            _monitor_event(gw, changed)
+    for expired in gw.db.expire_monitors(now):
+        _monitor_event(gw, expired)
+
+
+def _finish_if_reported(gw: Gateway, job_id: str) -> None:
+    """A `waiting` job whose report has landed is finished, and answered.
+
+    Also what ends the *run*: the agent is still alive with its stdin held open
+    (design/17), so closing that handle is how the worker learns to wind up. A
+    backend whose child already exited has no handle, and the row is all there
+    is to close.
+    """
+    job_dir = jobdir.path_for(gw.cfg.data_dir, job_id)
+    if not jobdir.has_report(job_dir):
+        return
+    # Into the row as well as onto the stream (design/23). Before the status
+    # change, so a reader that sees `succeeded` never sees it without the answer.
+    reported = jobdir.read_report(job_dir)
+    if reported:
+        gw.db.save_result_fields(job_id, {"result": reported})
+    rows = gw.db.finish_reported(job_id)
+    if not rows:
+        return
+    for row in rows:
+        gw.bus.publish(job_id, row)
+    steering = gw.pool.steering(job_id)
+    if steering is not None:
+        try:
+            steering.close()
+        except Exception:                              # already gone
+            pass
+    gw.bus.close(job_id)
+
+
+def _expire_waiting(gw: Gateway) -> None:
+    """Give up on a job that ended its turn and never wrote its report."""
+    for job_id in gw.db.expire_waiting():
+        steering = gw.pool.steering(job_id)
+        if steering is not None:
+            try:
+                steering.close()
+            except Exception:
+                pass
+        gw.bus.close(job_id)
+
+
+async def _sweep_reports(gw: Gateway, interval: float = 5.0) -> None:
+    """Notice what a delegate wrote, and move the monitors along.
+
+    Not read-triggered only: a follower that has been streaming since the turn
+    started never issues another read, so a milestone drop would sit unseen
+    until it reconnected. The job-dir scan is a handful of stats over at most
+    200 rows, so it can run this often -- which is also how quickly a `waiting`
+    job notices its report and finishes.
     """
     while True:
         try:
-            expired = await run_in_threadpool(gw.db.expire_awaiting_reports)
-            for job_id in expired:
-                gw.bus.close(job_id)
+            for row in await run_in_threadpool(gw.db.jobs_with_open_dirs):
+                for event in await run_in_threadpool(
+                        _ingest_external, gw, row["id"]):
+                    gw.bus.publish(row["id"], event)
+                if row.get("status") == WAITING:
+                    await run_in_threadpool(_finish_if_reported, gw, row["id"])
+            await run_in_threadpool(_expire_waiting, gw)
+            if gw.cfg.monitors_enabled:
+                await run_in_threadpool(_poll_monitors, gw)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                       # never kill the loop
@@ -178,7 +415,7 @@ def create_app(gw: Gateway) -> FastAPI:
         await run_in_threadpool(gw.pool.start)
         if gw.cluster:
             gw.cluster.start_async()
-        sweeper = asyncio.create_task(_expire_reports(gw))
+        sweeper = asyncio.create_task(_sweep_reports(gw))
         print(f"agent-bridge {__version__} listening on "
               f"http://{cfg.host}:{cfg.port}  (db: {cfg.db_path})", flush=True)
         yield
@@ -324,13 +561,16 @@ def create_app(gw: Gateway) -> FastAPI:
         other, which is the point: nobody thinks to ask for local conventions
         they do not know exist.
         """
-        if not gw.cluster:
-            raise ApiError(404, "cluster_info_disabled",
-                           "cluster probing is disabled")
-        if refresh:
+        # `[cluster] enabled = false` used to 404 this whole route, which took
+        # the notes with it -- and the notes are the half a probe cannot
+        # produce, configured separately, on a gateway whose operator has
+        # already gone to the trouble of writing them. So probing off means
+        # fewer keys, not a missing document.
+        probed = gw.cluster.get() if gw.cluster else {"cluster_enabled": False}
+        if refresh and gw.cluster:
             gw.cluster.refresh_async()
         doc = gw.notes.read()
-        return {**gw.cluster.get(),
+        return {**probed,
                 # ISO with the offset, like every other timestamp this API
                 # publishes — a bare epoch float has never reached a caller and
                 # should not start here.
@@ -397,6 +637,15 @@ def create_app(gw: Gateway) -> FastAPI:
         except ValidationError as exc:
             raise ApiError(400, "validation_error", "invalid job submission",
                            {"errors": json.loads(exc.json())}) from exc
+        if spec.expect_report:
+            # Refused rather than ignored: a caller asking to be waited for and
+            # silently not being is the substitution design/03 rules out. The
+            # field is still on the DTO so this message can explain itself.
+            raise ApiError(
+                400, "expect_report_removed",
+                "expect_report is gone: a job ends when its turn ends. Watch "
+                "work that outlives the turn with a monitor (POST /v1/monitors, "
+                "or `ab-monitor add` from inside the job) and wait on that.")
         agent_name = spec.agent or cfg.default_agent
         agent_cfg = cfg.agents.get(agent_name)
         if not agent_cfg:
@@ -442,7 +691,6 @@ def create_app(gw: Gateway) -> FastAPI:
                 "id": job_id, "status": "queued", "agent": agent_name,
                 "cwd": cwd, "title": title, "fork": spec.fork,
                 "include_thinking": spec.include_thinking, "files": paths,
-                "expect_report": spec.expect_report,
                 "replayed": False,
                 "session": spec.session,
                 "session_state": "pinned" if spec.session else "pending"}
@@ -451,8 +699,7 @@ def create_app(gw: Gateway) -> FastAPI:
                 session=spec.session,
                 permission_mode=spec.permission_mode, model=spec.model,
                 title=title, fork=spec.fork,
-                include_thinking=spec.include_thinking, files=paths,
-                expect_report=spec.expect_report)
+                include_thinking=spec.include_thinking, files=paths)
             if idempotency_key:
                 try:
                     response, created = gw.db.create_job_idempotent(
@@ -505,17 +752,80 @@ def create_app(gw: Gateway) -> FastAPI:
                 gw.db.add_message, job["id"], data, message.report_id)
         except ReportConflict as exc:
             raise ApiError(409, "report_id_conflict", str(exc)) from exc
-        closing = row.pop("closing_event", None)
         if not row.get("duplicate"):
             gw.bus.publish(job["id"], row)
-        if closing:
-            # This report ended a parked job. Publish the terminal status and
-            # close the stream, so a follow that has been open since the turn
-            # ended sees the finish rather than hanging.
-            gw.bus.publish(job["id"], closing)
-            gw.bus.close(job["id"])
         return {"id": job["id"], "seq": row["seq"],
                 "duplicate": bool(row.get("duplicate"))}
+
+    # -- monitors ---------------------------------------------------------
+    @app.post("/v1/monitors", dependencies=[auth], status_code=201,
+              response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def create_monitor(spec: MonitorCreate):
+        """Watch something that outlives a turn.
+
+        The usual caller is the delegate itself, from the gateway host, right
+        before it ends its turn -- `ab-monitor add`. A client can register one
+        too, which is the path a laptop takes for work it started by hand.
+        """
+        if spec.job:
+            spec.job = resolve_job(spec.job)["id"]
+        try:
+            row = await run_in_threadpool(
+                register_monitor, gw, spec.model_dump(exclude_none=True))
+        except MonitorRefused as exc:
+            raise ApiError(409, "monitors_exhausted", str(exc)) from exc
+        if row is None:                                  # id collision only
+            raise ApiError(409, "monitor_exists", "that monitor id is taken")
+        await run_in_threadpool(_monitor_event, gw, row)
+        return row
+
+    @app.get("/v1/monitors", dependencies=[auth], response_model=MonitorPage,
+             responses=ERROR_RESPONSES)
+    async def list_monitors(job: str | None = Query(None),
+                            status: str | None = Query(None),
+                            active: bool | None = Query(None),
+                            limit: int = Query(50, ge=1, le=200),
+                            cursor: str | None = Query(None)):
+        job_id = resolve_job(job)["id"] if job else None
+        if status and status not in monmod.STATUSES:
+            raise ApiError(400, "invalid_request",
+                           f"unknown status '{status}'; expected one of "
+                           f"{', '.join(monmod.STATUSES)}")
+        try:
+            rows, next_cursor, has_more = gw.db.list_monitors(
+                job_id=job_id, status=status, active=active,
+                limit=limit, cursor=cursor)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_cursor", str(exc)) from exc
+        return {"monitors": rows, "next_cursor": next_cursor,
+                "has_more": has_more}
+
+    def resolve_monitor(monitor_id: str) -> dict:
+        row = gw.db.monitor(monitor_id)
+        if row is None:
+            raise ApiError(404, "not_found", f"no monitor '{monitor_id}'")
+        return row
+
+    @app.get("/v1/monitors/{monitor_id}", dependencies=[auth],
+             response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def get_monitor(monitor_id: str):
+        return resolve_monitor(monitor_id)
+
+    @app.post("/v1/monitors/{monitor_id}/cancel", dependencies=[auth],
+              response_model=MonitorDetail, responses=ERROR_RESPONSES)
+    async def cancel_monitor(monitor_id: str):
+        """Stop watching. Idempotent: cancelling a resolved monitor returns it.
+
+        Cancelling a *watch* says nothing about the work it was watching, which
+        keeps running -- the gateway never had a handle on it to begin with.
+        """
+        row = resolve_monitor(monitor_id)
+        closed = await run_in_threadpool(
+            gw.db.close_monitor, monitor_id, "canceled", "canceled by request")
+        if closed is None:
+            return row
+        await run_in_threadpool(_monitor_event, gw, closed)
+        return closed
 
     @app.post("/v1/jobs/{job_id}/message", dependencies=[auth],
               response_model=MessageResponse, responses=ERROR_RESPONSES)
@@ -552,15 +862,17 @@ def create_app(gw: Gateway) -> FastAPI:
             await run_in_threadpool(handle.send, body.prompt)
         except SteerError as exc:
             raise ApiError(409, "steering_unavailable", str(exc)) from exc
-        return {"id": jid, "delivered": True,
-                "note": "the agent picks this up at its next tool boundary"}
+        # The note is the handle's, not this route's: claude takes a steer at
+        # its next tool boundary, opencode admits it and promotes it into the
+        # running turn, and a response that says the first about the second is
+        # simply wrong.
+        return {"id": jid, "delivered": True, "note": handle.note}
 
     @app.get("/v1/jobs/{job_id}", dependencies=[auth],
              response_model=JobDetail, responses=ERROR_RESPONSES)
     async def get_job(job_id: str):
         job = resolve_job(job_id)
-        await run_in_threadpool(
-            gw.db.ingest_messages, job["id"], cfg.messages_dir)
+        await run_in_threadpool(_ingest_and_settle, gw, job["id"])
         return gw.db.get_job(job["id"])
 
     @app.post("/v1/jobs/{job_id}/cancel", dependencies=[auth],
@@ -606,7 +918,10 @@ def create_app(gw: Gateway) -> FastAPI:
                          legacy: bool = True):
         job = resolve_job(job_id)
         jid = job["id"]
-        await run_in_threadpool(gw.db.ingest_messages, jid, cfg.messages_dir)
+        # Settling here too: this response carries `status` and `terminal`, so a
+        # page that lists `report.md` and calls the job `waiting` is the same
+        # self-contradiction the job read had.
+        await run_in_threadpool(_ingest_and_settle, gw, jid)
         start = _parse_after(after, request.headers.get("last-event-id"))
         if tail is not None and after:
             # Anchoring from both ends at once has no single sensible reading;

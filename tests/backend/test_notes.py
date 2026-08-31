@@ -83,3 +83,25 @@ def test_the_served_document_is_capped(gateway, probing, auth):
     store = NotesStore(gateway.cfg.notes_path, max_bytes=64)
     open(gateway.cfg.notes_path, "w", encoding="utf-8").write("x" * 500)
     assert len(store.read().text) == 64
+
+
+def test_the_notes_survive_cluster_probing_being_disabled(gateway, client, auth):
+    """`[notes]` and `[cluster]` are separate settings, and the notes are the
+    half no probe can produce. The route used to 404 as a whole when probing was
+    off, which hid a document the operator had gone to the trouble of writing —
+    on exactly the deployments that are not clusters."""
+    open(gateway.cfg.notes_path, "w", encoding="utf-8").write(
+        "charge account pi-jevans; /scratch is nearly full\n")
+    assert gateway.cluster is None          # the conftest gateway has it off
+
+    body = client.get("/v1/info", headers=auth)
+
+    assert body.status_code == 200
+    payload = body.json()
+    assert "charge account pi-jevans" in payload["notes"]["text"]
+    assert payload["cluster_enabled"] is False
+    assert "summary" not in payload, "probing is off, so no probed keys"
+
+
+def test_a_refresh_on_a_probe_less_gateway_is_not_an_error(gateway, client, auth):
+    assert client.get("/v1/info?refresh=1", headers=auth).status_code == 200

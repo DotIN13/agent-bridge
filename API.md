@@ -155,25 +155,39 @@ sample.
 sequence; ordering on a timestamp alone would skip or repeat rows whenever two
 share a millisecond.
 
-### Job status and `expect_report`
+### Job status
 
-`POST /v1/jobs` takes `expect_report`, and it **defaults to true**. A job does
-**not** go terminal when its turn succeeds: it enters `awaiting_report`, a
-non-terminal status, and only an `ab-notify --status finished|failed` closes it
-(`finished` → `succeeded`, `failed` → `failed`). Send `expect_report: false`
-(`ab submit --no-expect-report`) for a turn that is the whole of the job.
-Progress reports leave it parked, and a report cannot move a job that was already
-terminal.
+`queued` → `running` → `waiting` → `succeeded` | `failed` | `canceled`.
 
-A parked job is deliberately not `running`: the agent process is gone, so its
-session claim is released, steering it is meaningless, and it survives a gateway
-restart rather than being failed as stale. `finished_at` stays null until the
-work actually finishes. If no report arrives within `worker.report_timeout_sec`
-(default 86400, 0 disables) the gateway fails it with `report_timeout`.
+A job is `succeeded` when **both** halves have happened: its turn has ended and
+`$AB_JOB_DIR/report.md` has been written — and that file's content becomes the
+job's `result`. Between them the row is `waiting`, which
+is non-terminal — the agent process is still alive, can still be steered, and can
+still write the file. The gateway notices the report on the next sweep (5s) *or*
+on the next read of that job or its events, whichever comes first — a response
+that listed `report.md` while calling the job `waiting` would be contradicting
+itself. The row becomes `succeeded` with `reason: report_written`.
 
-Reports close a parked job through either transport — HTTP, or the
-shared-filesystem JSONL, which is the usual path from a compute node that cannot
-reach the gateway.
+A `waiting` job with no report by `worker.report_wait_sec` (default 1800, 0 waits
+indefinitely) fails with `report_missing`. That window is a grace period, not a
+wait: the delegate is meant to write the report *before* ending its turn. The
+turn's last message is kept on the row either way.
+
+A turn that fails or is canceled goes terminal directly — there is no deliverable
+to wait for. A caller that wants to end a job early uses
+`POST /v1/jobs/{ref}/cancel`, which also releases a `waiting` job.
+
+Work that outlives the turn is a **monitor** with its own row and its own
+terminal states — see *Monitors* below, and `ab monitor <id> --wait` to block on
+one.
+
+`expect_report: true` is refused with a typed `400 expect_report_removed` naming
+monitors. It once parked a row in `awaiting_report` until something called in to
+close it; that made a caller's mistake — a brief that never arranged a report —
+indistinguishable from work still running, and cost a day per occurrence at the
+old deadline (design/11, /15, /16). The field stays on the DTO only so the
+refusal can explain itself; `expect_report: false` is accepted and is what every
+job does.
 
 **Both routes list a session only if a human spoke or the agent acted**, and the
 counts match the listings. Three kinds of transcript exist without anything
@@ -243,8 +257,9 @@ Successful submission returns `202`, a `Location: /v1/jobs/<id>` header, and:
 echoed straight back with `session_state: "pinned"`, so continuing a thread
 needs no extra round trip. A fresh or forked run has no id yet — it first
 appears in the agent's init record — so it returns `"pending"`, and the id shows
-up as `session` on the job row once the run starts. `ab submit` waits for it by
-default (`--no-wait` opts out).
+up as `session` on the job row once the run starts. `ab submit` always waits for
+it, bounded by `--await-timeout` (default 30s); exceeding that is not an error,
+and the job keeps running with `session_state: "pending"`.
 
 #### Retry idempotency
 
@@ -290,9 +305,18 @@ does not claim that a vanished process is still live.
 ### `POST /v1/jobs/{ref}/steer`
 
 Body: `{"prompt":"new guidance"}` (legacy `text` is accepted). Returns `202`
-when the live input channel accepts it. Delivery is observed at the next tool
-boundary and later appears as a `steer` event. A `202` is not exactly-once model
-execution. Unsupported adapters/modes and terminal jobs return a typed `409`.
+when the live input channel accepts it, with a `note` describing what that
+backend does with it — the two are not the same mechanism:
+
+| Backend | Channel | Delivery |
+| --- | --- | --- |
+| claude, `direct` | the child's stdin, `--input-format stream-json` | taken at the next tool boundary; the `steer` event is the agent's own echo |
+| opencode, `direct` + `steering` | `POST /api/session/<id>/prompt` on the server the run is attached to, `delivery: "steer"` | admitted synchronously, then promoted into the running turn; the `steer` event carries the receipt (`admitted_seq`, `promoted_seq`) |
+
+A `202` is not exactly-once model execution. Unsupported adapters/modes and
+terminal jobs return a typed `409` whose message says what is missing — an
+opencode job that ran unattached (see `[agents.*] steering` in
+`config.example.toml`) names the reason it did.
 
 ### `POST /v1/jobs/{ref}/cancel`
 
@@ -335,7 +359,7 @@ right, and with repeatable `type=T`, which filters **inside** the window; a
 string in the **gateway's local** time with the UTC offset attached
 (`2026-08-11T14:52:40.572-05:00`) — no bare epoch floats reach a caller. That
 covers job `created_at`/`started_at`/`finished_at`/`last_event_at`, event `ts`,
-session `last_active`, file `mtime`, and the `ts` inside an `ab-notify` report
+session `last_active`, file `mtime`, and the `ts` inside an external report
 payload.
 
 Local rather than UTC because the reader correlating a job against an sbatch log
@@ -375,10 +399,46 @@ may arrive after the agent SSE stream has closed. Fetch them by reconnecting
 with the last cursor or polling an event page. A single already-open SSE request
 does not wait forever for future batch work.
 
-`ab-notify` posts here, then falls back to shared JSONL, then local temporary
-JSONL. Filesystem reports are ingested on job/event reads and receive the same
-monotonic sequence allocation. Use `--report-id`/`$AB_REPORT_ID` for retry
-deduplication.
+Reports also arrive without HTTP: files a delegate writes into its job dir
+(`$AB_JOB_DIR` = `<data_dir>/reports/<job-id>`) are ingested on job/event reads
+and by the gateway's sweeper, and receive the same monotonic sequence allocation.
+Job-dir reports are deduplicated by relative path and content digest; HTTP
+reports use `report_id`. Neither can move a job: a report is an annotation, and
+the turn's end is what ends a job.
+
+`report.md` is the exception to "annotation", in one direction only. Its content
+is written to the job's `result` field as well as arriving as a `message` event,
+so `GET /v1/jobs/<id>` answers with the deliverable rather than with the turn's
+closing text. It still does not move the job — the turn's end does that — but it
+does decide what `result` says once it exists (design/23). A job with no report
+keeps the turn's own answer there, which is what a failed run has. `report.md` is
+read to 2 MiB where every other job-dir file is read to 64 KiB, and the row and
+the event carry the same text; a longer report is truncated with the limit named
+in the event's `error`.
+
+There is no shared-filesystem JSONL channel. It existed for a compute node that
+could not reach the gateway; nothing has written it since `ab-notify` became a
+job-dir reporter, and a reader with no writer was removed.
+
+### Monitors
+
+`POST /v1/monitors` registers a watch on work that outlives a turn: `poll` (a
+command whose first word of output is the status) or `slurm` (sugar for an
+`sacct` read), plus `job`, `label`, `map`, `interval_sec`, `deadline_sec`,
+`note`, and `result_paths`. The gateway polls on a timer, bounded by
+`[monitors]`. `GET /v1/monitors` pages with the same opaque cursor as jobs and
+filters on `job`, `status` and `active`; `GET /v1/monitors/{id}` is the detail;
+`POST /v1/monitors/{id}/cancel` stops watching and is idempotent — it says
+nothing about the work, which keeps running.
+
+A monitor's terminal transition is the **record of how the long task ended**,
+carried on the creating job's stream long after that job closed: `terminal: true`
+plus the label, the poll command, the last output, when it resolved, how long it
+was watched, and the `result_paths`. Monitor statuses are `queued`, `running`,
+`finished`, `failed`, `expired` and `canceled`. `expired` means a deadline passed and the gateway stopped watching,
+which is a weaker claim than the work having failed. Only *transitions* emit
+events, on the creating job's stream, carrying both a report-shaped `status` and
+the precise `monitor_status`.
 
 ## Files
 

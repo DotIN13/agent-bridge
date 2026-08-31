@@ -28,7 +28,6 @@ def make_config(tmp_path) -> Config:
     return Config(
         host="127.0.0.1", port=0, token="x", concurrency=1,
         db_path=str(tmp_path / "gw.db"), data_dir=str(tmp_path),
-        messages_dir=str(tmp_path / "messages"),
         files_dir=str(tmp_path / "files"), cluster_enabled=False,
         agents={"claude": agent})
 
@@ -177,3 +176,50 @@ def test_the_api_serves_a_running_job_s_session(client, auth, gateway):
 
     listed = client.get("/v1/jobs", headers=auth).json()["jobs"]
     assert [j["session"] for j in listed if j["id"] == job] == ["ses_midflight"]
+
+
+def test_the_session_id_is_taken_from_the_result_when_no_init_record_arrived():
+    """The init record is where this normally comes from. A run whose row says
+    null is one the caller cannot follow up with `--session`, and the alignment
+    turn the client skill prescribes depends on reading it back — so take it
+    from whichever record carries it."""
+    from gateway.adapters.base import RunResult
+    from gateway.adapters.claude import ClaudeAdapter
+    from gateway.config import AgentConfig
+
+    adapter = ClaudeAdapter(AgentConfig(
+        name="claude", bin="claude", dispatch_mode="direct",
+        permission_mode="bypassPermissions", model="", default_cwd="/tmp",
+        allowed_dirs=("/tmp",), timeout_sec=0, max_sessions_in_index=5,
+        models=()))
+    res = RunResult(ok=False)
+    adapter._handle_record(
+        {"type": "result", "subtype": "success", "result": "done",
+         "session_id": "aaaaaaaa-0000-0000-0000-000000000000",
+         "is_error": False}, lambda _event: None, res, False)
+    assert res.session == "aaaaaaaa-0000-0000-0000-000000000000"
+
+
+def test_an_init_record_still_wins_over_the_result():
+    """Order matters: init arrives first and is authoritative, so a later
+    result must not overwrite it (a nested run's id would be wrong here)."""
+    from gateway.adapters.base import RunResult
+    from gateway.adapters.claude import ClaudeAdapter
+    from gateway.config import AgentConfig
+
+    adapter = ClaudeAdapter(AgentConfig(
+        name="claude", bin="claude", dispatch_mode="direct",
+        permission_mode="bypassPermissions", model="", default_cwd="/tmp",
+        allowed_dirs=("/tmp",), timeout_sec=0, max_sessions_in_index=5,
+        models=()))
+    res = RunResult(ok=False)
+    events = []
+    adapter._handle_record(
+        {"type": "system", "subtype": "init",
+         "session_id": "11111111-0000-0000-0000-000000000000"},
+        events.append, res, False)
+    adapter._handle_record(
+        {"type": "result", "result": "done",
+         "session_id": "22222222-0000-0000-0000-000000000000"},
+        events.append, res, False)
+    assert res.session == "11111111-0000-0000-0000-000000000000"

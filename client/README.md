@@ -13,13 +13,20 @@ python -m pip install -e .
 ab --version                       # 0.3.0
 ```
 
-Legacy direct invocation remains supported:
+No install is needed, though — the shims in `bin/` are stdlib only, so a clone
+on `PATH` is a working client:
 
 ```bash
-python client/ab.py --version
+export PATH="/path/to/agent-bridge/bin:$PATH"
+ab --version
 ```
 
-The copied `client/` directory remains dependency-free. TOML client config
+Direct invocation also works: `python client/ab.py --version`.
+
+The copied `client/` directory remains dependency-free. The tools a *delegate*
+runs inside a job — `ab-notify`, `ab-monitor` — are not here: they live in
+`worker/`, because they write into `$AB_JOB_DIR` on the far side rather than
+talking to the API (design/25). TOML client config
 requires Python 3.11; JSON works on older supported Python versions.
 
 Configure `~/.config/agent-bridge/gateways.json`:
@@ -40,6 +47,12 @@ Token order: `token`, `token_env`, `token_file`. Config discovery:
 `--config`, `$AGENT_BRIDGE_CLIENT_CONFIG`,
 `~/.config/agent-bridge/gateways.json`, `./gateways.json`.
 
+Three further keys are read by the dashboard in [`webui/`](../webui/README.md)
+and ignored here: `ssh`, the command that makes `base_url` reachable; `exec`,
+what to run on the far side once it is up (`true` for the shipped `ab-serve`, or
+a script of your own); and `autostart`. `ab` never starts a tunnel — it expects
+one to exist — so an entry carrying them works unchanged at the CLI.
+
 ## CLI
 
 Global flags work before or after the command:
@@ -54,8 +67,7 @@ ab jobs --gateway midway5 --output json
 | `gateways [--no-probe]` | every configured gateway: token presence **and** live reachability |
 | `health` | unauthenticated liveness/version probe of one gateway |
 | `agents` | configured backends, models, and capability flags |
-| `capabilities` | structured client/server contract |
-| `help [--remote]` | local CLI help or live `/v1/help` |
+| `help [--remote]` | local CLI help; `--output json` gives the client contract (version, output modes, exit codes, verbs); `--remote` fetches `/v1/help` |
 | `info [--refresh]` | cached host/cluster capabilities |
 | `models [--agent A]` | advertised model ids |
 | `sessions [--cwd D] [--agent A]` | resumable/forkable sessions |

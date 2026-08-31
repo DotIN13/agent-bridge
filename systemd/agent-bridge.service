@@ -17,7 +17,9 @@ Type=simple
 WorkingDirectory=%h/agent-bridge
 Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 Environment=AGENT_BRIDGE_CONFIG=%h/agent-bridge/config.toml
-# uses the venv interpreter (see pyproject.toml / run.sh)
+# The venv interpreter `ab-serve` creates on first run (see pyproject.toml).
+# `PATH` above is what `ab-serve` prepends for the same reason: `bin = "claude"`
+# in config.toml is resolved from the gateway's own PATH.
 ExecStart=%h/agent-bridge/.venv/bin/python -m gateway --config %h/agent-bridge/config.toml
 Restart=on-failure
 RestartSec=10

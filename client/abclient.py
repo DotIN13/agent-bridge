@@ -21,51 +21,21 @@ except ImportError:  # copied client/ directory, without the repository root
     from _version import __version__ as CLIENT_VERSION
 
 TERMINAL = {"succeeded", "failed", "canceled"}
-# Non-terminal: the turn ended but the work it started has not reported.
-AWAITING_REPORT = "awaiting_report"
-WAIT_FOR = ("both", "turn", "report")
-
-
-def _report_is_terminal(event: dict) -> bool:
-    """An ab-notify report that ends the work, as opposed to progress."""
-    if event.get("type") != "message":
-        return False
-    data = event.get("data") or {}
-    return data.get("status") in ("finished", "failed")
+#: A *monitor* is not a job: `expired` means the gateway stopped watching, which
+#: is a weaker claim than the work having failed, and `ab monitor` says which.
+MONITOR_TERMINAL = {"finished", "failed", "expired", "canceled"}
 
 
 def _may_have_ended(event: dict) -> bool:
     """Is this the kind of event that could have moved the job?
 
-    The row is authoritative, but polling it after the stream pauses is far too
-    lazy: a parked job keeps its stream open on purpose, so `--for turn` would
-    sit through the whole read window after the milestone it wanted had already
-    passed. This says "worth re-checking now".
+    The row is authoritative, but polling it only after the stream pauses is far
+    too lazy -- it would sit through the whole read window after the turn had
+    already ended. This says "worth re-checking now".
     """
-    if _report_is_terminal(event):
-        return True
     if event.get("type") != "status":
         return False
-    return (event.get("data") or {}).get("stage") in ("done", "awaiting_report")
-
-
-def _wait_reached(job: dict, saw_report: bool, until: str) -> bool:
-    """Has the milestone the caller asked for actually happened?
-
-    Three, because a job now has two ends and they are hours apart: the
-    agent stops talking, and later the work it started reports. `both` is
-    the default and means the row is done however it got there.
-    """
-    status = job.get("status")
-    terminal = status in TERMINAL
-    if until == "turn":
-        return terminal or status == AWAITING_REPORT
-    if until == "report":
-        # Also stops on a terminal row: a job that failed, was canceled, or
-        # never expected a report is not going to send one, and blocking
-        # until the timeout would report "still running" about a finished job.
-        return saw_report or terminal
-    return terminal
+    return (event.get("data") or {}).get("stage") == "done"
 # Short by design: `ab gateways` probes every configured gateway, so this is
 # the worst case a listing waits on one dead entry, not a request budget.
 PROBE_TIMEOUT = 3.0
@@ -456,6 +426,38 @@ def parse_sse(lines: Iterable[bytes | str], *,
                              include_comments=include_comments)
 
 
+#: Every verb `ab` accepts, in the order the workflow uses them. One list, and
+#: `tests/client/test_cli.py` holds it to the parser: two hand-kept copies had
+#: already drifted -- both missed `monitors`/`monitor` when monitors shipped, and
+#: one missed `help` -- so a caller reading the contract was told a verb it could
+#: use did not exist.
+OPERATIONS = (
+    "gateways", "health", "agents", "help", "info", "models", "sessions",
+    "run", "submit", "jobs", "monitors", "monitor", "job", "wait", "events",
+    "cancel", "steer", "upload", "download", "ls",
+)
+
+
+def client_capabilities() -> dict:
+    """What this client can do, without asking anything.
+
+    This is the whole of `ab help --output json`. There was a third command,
+    `ab capabilities`, that returned this plus the gateway's name plus a
+    verbatim `GET /v1/agents` -- which is to say `ab gateways` and `ab agents`,
+    both of which already existed. It is gone (docs/design/19): one contract in
+    three places is three chances to drift, and the `operations` list had
+    already done so.
+    """
+    return {
+        "version": CLIENT_VERSION,
+        "output_modes": ["human", "json", "jsonl"],
+        "exit_codes": {"success": 0, "local_error": 1, "invocation": 2,
+                       "remote_failure": 3, "wait_timeout": 4},
+        "streaming": "sse",
+        "operations": list(OPERATIONS),
+    }
+
+
 class Client:
     def __init__(self, name: str, base: str, token: str) -> None:
         self.name = name
@@ -515,30 +517,15 @@ class Client:
         query = ("?" + urllib.parse.urlencode({"agent": agent})) if agent else ""
         return self._get("/v1/models" + query)
 
-    def capabilities(self) -> dict:
-        return {
-            "client": {"version": CLIENT_VERSION,
-                       "output_modes": ["human", "json", "jsonl"],
-                       "exit_codes": {"success": 0, "local_error": 1,
-                                      "invocation": 2, "remote_failure": 3,
-                                      "wait_timeout": 4},
-                       "streaming": "sse",
-                       "operations": ["gateways", "health", "agents", "capabilities",
-                                      "info", "models", "sessions", "run", "submit",
-                                      "jobs", "job", "wait", "events", "steer",
-                                      "cancel", "upload", "download", "ls"]},
-            "gateway": self.name,
-            "server": self.agents(),
-        }
 
     # jobs
     def submit(self, prompt: str, *, cwd=None, agent=None, model=None,
                session=None, permission_mode=None, files=None, upload=None,
                upload_names=None, title=None, fork=True, include_thinking=False,
-               expect_report=True, idempotency_key=None) -> dict:
+               idempotency_key=None) -> dict:
         payload = _job_payload(prompt, cwd, agent, model, session,
                                permission_mode, files, title, fork,
-                               include_thinking, expect_report)
+                               include_thinking)
         uploads = _collect_local(upload, None, upload_names)
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         if uploads:
@@ -742,11 +729,16 @@ class Client:
                     raise _unreachable(self.base, path, exc) from exc
 
     def wait(self, job_id: str, *, timeout: float = 900.0, on_event=None,
-             types=None, cancel_on_timeout: bool = False,
-             until: str = "both") -> dict:
+             types=None, cancel_on_timeout: bool = False) -> dict:
+        """Block until the row is terminal, or the timeout passes.
+
+        One end to wait for: the turn is the job. There used to be a `--for`
+        choice, because a job could park after its turn and finish hours later
+        (design/16); work that outlives a turn is a monitor now, and
+        `wait_monitor` is how you block on one.
+        """
         deadline = time.monotonic() + timeout
         after = 0
-        saw_report = False
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -760,7 +752,6 @@ class Client:
                     read_timeout=max(0.1, min(30.0, remaining)), reconnects=2,
                     deadline=deadline):
                 after = max(after, int(event.get("seq", 0)))
-                saw_report = saw_report or _report_is_terminal(event)
                 if on_event:
                     on_event(event)
                 if _may_have_ended(event):
@@ -768,7 +759,7 @@ class Client:
                 if time.monotonic() >= deadline:
                     break
             job = self.get_job(job_id)
-            if _wait_reached(job, saw_report, until):
+            if job.get("status") in TERMINAL:
                 return job
 
     def _poll_terminal(self, job_id: str, timeout: float, on_event=None,
@@ -790,6 +781,57 @@ class Client:
         accepted = self.submit(prompt, **submit_kw)
         return self.wait(accepted["id"], timeout=timeout, on_event=on_event,
                          cancel_on_timeout=cancel_on_timeout)
+
+    # -- monitors ---------------------------------------------------------
+    def list_monitors(self, *, job: str | None = None,
+                      status: str | None = None, active: bool | None = None,
+                      limit: int = 50, cursor: str | None = None) -> dict:
+        query: dict = {"limit": int(limit)}
+        for key, value in (("job", job), ("status", status), ("cursor", cursor)):
+            if value:
+                query[key] = value
+        if active is not None:
+            query["active"] = "true" if active else "false"
+        return self._get("/v1/monitors?" + urllib.parse.urlencode(query))
+
+    def get_monitor(self, monitor_id: str) -> dict:
+        return self._get(f"/v1/monitors/{urllib.parse.quote(monitor_id, safe='')}")
+
+    def create_monitor(self, body: dict) -> dict:
+        code, data = http("POST", self.base, "/v1/monitors", self.token,
+                          body=body)
+        _raise(code, data)
+        return data
+
+    def wait_monitor(self, monitor_id: str, *, timeout: float = 900.0,
+                     poll_interval: float = 5.0) -> dict:
+        """Block until a watch resolves, or the timeout passes.
+
+        Polling rather than streaming: a monitor's whole point is that it moves
+        a handful of times over hours, so there is no stream worth holding open,
+        and its transitions are already on the creating job's event stream for
+        anyone who wants them live.
+
+        A timeout is not a failure and does not stop the watch -- same contract
+        as waiting on a job.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            row = self.get_monitor(monitor_id)
+            if row.get("status") in MONITOR_TERMINAL:
+                return row
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {**row, "timed_out_waiting": True}
+            time.sleep(min(poll_interval, remaining))
+
+    def cancel_monitor(self, monitor_id: str) -> dict:
+        code, data = http(
+            "POST", self.base,
+            f"/v1/monitors/{urllib.parse.quote(monitor_id, safe='')}/cancel",
+            self.token)
+        _raise(code, data)
+        return data
 
     def cancel(self, job_id: str) -> dict:
         code, data = http("POST", self.base,
@@ -850,8 +892,7 @@ class Client:
 
 
 def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
-                 title=None, fork=True, include_thinking=False,
-                 expect_report=True) -> dict:
+                 title=None, fork=True, include_thinking=False) -> dict:
     body = {"prompt": prompt}
     for key, value in (("cwd", cwd), ("agent", agent), ("model", model),
                        ("session", session), ("permission_mode", permission_mode),
@@ -862,9 +903,6 @@ def _job_payload(prompt, cwd, agent, model, session, permission_mode, files,
         body["fork"] = False
     if include_thinking:
         body["include_thinking"] = True
-    if not expect_report:
-        # The server defaults this on, so opting out has to be explicit.
-        body["expect_report"] = False
     if files:
         body["files"] = [{"path": path} for path in files]
     return body

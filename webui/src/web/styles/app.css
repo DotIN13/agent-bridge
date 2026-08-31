@@ -1,0 +1,917 @@
+/**
+ * The shell, in picone's idiom: one rule per `data-slot`, semantic tokens only,
+ * and every text size written as `calc(Npx * var(--font-scale))` so the two
+ * stylesheets stay comparable.
+ */
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+[data-slot="shell"] {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+}
+
+[data-slot="main"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+[data-slot="error-strip"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 6px 10px 6px 12px;
+  background: var(--v2-state-bg-danger);
+  color: var(--v2-state-fg-danger);
+  font-size: calc(12px * var(--font-scale));
+  box-shadow: inset 0 -1px 0 0 var(--v2-state-border-danger);
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────── */
+
+[data-slot="sidebar"] {
+  display: flex;
+  flex-direction: column;
+  width: 280px;
+  flex: none;
+  min-height: 0;
+  background: var(--v2-background-bg-deep);
+  box-shadow: inset -1px 0 0 0 var(--v2-border-border-muted);
+}
+
+[data-slot="sidebar-title"] {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  height: 42px;
+  padding: 0 12px;
+  box-shadow: inset 0 -1px 0 0 var(--v2-border-border-muted);
+}
+
+[data-slot="brand"] {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--v2-text-text-base);
+  font-size: calc(13px * var(--font-scale));
+  font-weight: 560;
+  letter-spacing: -0.1px;
+  cursor: pointer;
+}
+
+/* The local server, not a gateway: the one thing the page cannot ask about,
+   because asking is what is broken when it is down. */
+[data-slot="online-dot"] {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--v2-state-fg-danger);
+}
+[data-slot="online-dot"][data-online] {
+  background: var(--v2-state-fg-success);
+}
+
+[data-slot="sidebar-header"] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  min-height: 32px;
+  padding: 8px 6px 4px 12px;
+}
+
+[data-slot="sidebar-header"] [data-slot="section-title"] {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+[data-slot="section-title"] {
+  font-size: calc(11px * var(--font-scale));
+  font-weight: 530;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--v2-text-text-faint);
+}
+
+[data-slot="sidebar-scroll"] {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding-bottom: 8px;
+  overscroll-behavior: contain;
+}
+
+[data-slot="sidebar-empty"],
+[data-slot="empty"] {
+  padding: 8px 12px;
+  font-size: calc(12px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+  line-height: 1.5;
+}
+
+[data-slot="gateway-list"] {
+  display: flex;
+  flex-direction: column;
+  padding: 0 8px;
+}
+
+[data-slot="gateway-row"] {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding-inline: 4px;
+  border-radius: 5px;
+}
+
+/*
+ * One selector, one element, no transition.
+ *
+ * The highlight and the buttons appeared at different moments before this,
+ * because the highlight came from the row and the buttons from a hover on a
+ * narrower child, and only one of them had a transition on it. Both now hang
+ * off the same `:hover`, so they arrive together.
+ */
+[data-slot="gateway-row"]:hover,
+[data-slot="gateway-row"]:focus-within {
+  background: var(--v2-overlay-simple-overlay-hover);
+}
+
+[data-slot="gateway-row"][data-selected] {
+  background: var(--v2-background-bg-layer-02);
+}
+
+[data-slot="gateway-open"] {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--v2-text-text-base);
+  font-size: calc(12.5px * var(--font-scale));
+  text-align: left;
+  cursor: pointer;
+}
+
+[data-slot="status-dot"] {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--v2-text-text-faint);
+}
+[data-slot="status-dot"][data-status="connected"] {
+  background: var(--v2-state-fg-success);
+}
+[data-slot="status-dot"][data-status="error"],
+[data-slot="status-dot"][data-status="unauthorized"] {
+  background: var(--v2-state-fg-danger);
+}
+[data-slot="status-dot"][data-status="unknown"] {
+  background: var(--v2-state-fg-warning);
+}
+/* A question is waiting: neither working nor broken. */
+[data-slot="status-dot"][data-status="asking"] {
+  background: var(--v2-state-fg-info);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+[data-slot="status-dot"][data-status="disabled"] {
+  background: var(--v2-border-border-strong);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+[data-slot="gateway-default"] {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 3px;
+  border: 1px solid var(--v2-border-border-muted);
+  font-size: calc(9.5px * var(--font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--v2-text-text-faint);
+}
+
+[data-slot="gateway-count"] {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: calc(10.5px * var(--font-scale));
+  font-variant-numeric: tabular-nums;
+}
+[data-slot="gateway-count"][data-tone="running"] {
+  background: var(--v2-state-bg-info);
+  color: var(--v2-state-fg-info);
+}
+[data-slot="gateway-count"][data-tone="waiting"] {
+  background: var(--v2-state-bg-warning);
+  color: var(--v2-state-fg-warning);
+}
+
+[data-slot="gateway-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  flex: none;
+  opacity: 0;
+}
+[data-slot="gateway-row"]:hover [data-slot="gateway-actions"],
+[data-slot="gateway-row"]:focus-within [data-slot="gateway-actions"],
+[data-slot="gateway-row"][data-selected] [data-slot="gateway-actions"] {
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  [data-slot="gateway-actions"] {
+    opacity: 1;
+  }
+}
+
+[data-slot="gateway-hint"] {
+  display: inline-flex;
+  padding: 3px;
+  color: var(--v2-icon-icon-muted);
+}
+
+[data-slot="forward-list"] {
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 4px 18px;
+}
+
+[data-slot="forward-row"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+}
+
+[data-slot="forward-health"] {
+  width: 4px;
+  height: 4px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--v2-text-text-faint);
+}
+[data-slot="forward-row"][data-health="serving"] [data-slot="forward-health"] {
+  background: var(--v2-state-fg-success);
+}
+[data-slot="forward-row"][data-health="reachable"] [data-slot="forward-health"] {
+  background: var(--v2-state-fg-info);
+}
+/* Styled as a warning on purpose: a forward whose far end has died keeps
+   accepting connections and then resets them. */
+[data-slot="forward-row"][data-health="listening"] [data-slot="forward-health"] {
+  background: var(--v2-state-fg-warning);
+}
+[data-slot="forward-row"][data-health="closed"] [data-slot="forward-health"] {
+  background: var(--v2-state-fg-danger);
+}
+
+[data-slot="sidebar-footer"] {
+  flex: none;
+  padding: 8px 12px;
+  box-shadow: inset 0 1px 0 0 var(--v2-border-border-muted);
+}
+
+[data-slot="sidebar-warning"] {
+  font-size: calc(11.5px * var(--font-scale));
+  color: var(--v2-state-fg-warning);
+}
+
+[data-slot="config-path"] {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(10.5px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Page frame ────────────────────────────────────────────────────────── */
+
+[data-slot="page"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+[data-slot="page-header"] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: none;
+  padding: 12px 16px;
+  box-shadow: inset 0 -1px 0 0 var(--v2-border-border-muted);
+}
+
+[data-slot="page-title-row"] {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+[data-slot="page-title"] {
+  font-size: calc(15px * var(--font-scale));
+  font-weight: 560;
+  letter-spacing: -0.15px;
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot="meta"] {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot="page-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+[data-slot="banner"] {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: calc(12px * var(--font-scale));
+  line-height: 1.45;
+  background: var(--v2-state-bg-warning);
+  color: var(--v2-state-fg-warning);
+}
+[data-slot="banner"][data-tone="danger"] {
+  background: var(--v2-state-bg-danger);
+  color: var(--v2-state-fg-danger);
+}
+
+[data-slot="banner-mark"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 1.45em;
+}
+
+[data-slot="page-tools"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+[data-slot="search"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 280px;
+  flex: 1;
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--v2-background-bg-base);
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-base);
+  color: var(--v2-icon-icon-muted);
+}
+[data-slot="search"] input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--v2-text-text-base);
+  font-family: inherit;
+  font-size: calc(12.5px * var(--font-scale));
+  outline: none;
+}
+[data-slot="search"] input::placeholder {
+  color: var(--v2-text-text-faint);
+}
+[data-slot="search"] input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+[data-slot="console-toggle"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 5px;
+  background: var(--v2-background-bg-layer-01);
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-muted);
+  color: var(--v2-text-text-muted);
+  font-family: inherit;
+  font-size: calc(11.5px * var(--font-scale));
+  cursor: pointer;
+}
+[data-slot="console-toggle"]:hover {
+  color: var(--v2-text-text-base);
+}
+
+/* ssh says nothing when it works, so this is empty on a good day — and it is
+   the only place an answer lives on a bad one. */
+[data-slot="console"] {
+  max-height: 200px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--v2-background-bg-layer-01);
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-muted);
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+  color: var(--v2-text-text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+[data-slot="page-scroll"] {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding-bottom: 16px;
+  overscroll-behavior: contain;
+  container-type: inline-size;
+}
+
+/* ── Job table ─────────────────────────────────────────────────────────── */
+
+[data-slot="job-table"] {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: calc(12px * var(--font-scale));
+}
+
+[data-slot="job-table"] th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 10px 4px;
+  text-align: left;
+  font-size: calc(10.5px * var(--font-scale));
+  font-weight: 530;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--v2-text-text-faint);
+  background: var(--v2-background-bg-base);
+  box-shadow: inset 0 -1px 0 0 var(--v2-border-border-muted);
+}
+
+[data-slot="job-table"] td {
+  padding: 5px 10px;
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+[data-slot="job-table"] th:nth-child(1) { width: 10%; }
+[data-slot="job-table"] th:nth-child(2) { width: 24%; }
+/* Wide enough for an agent *and* a model: `claude claude-opus-5` clipped to
+   "claude claude-opus-" at 13%, which reads as a broken cell rather than an
+   abbreviated one. */
+[data-slot="job-table"] th:nth-child(3) { width: 18%; }
+[data-slot="job-table"] th:nth-child(4) { width: 16%; }
+[data-slot="job-table"] th:nth-child(5) { width: 11%; }
+[data-slot="job-table"] th:nth-child(6) { width: 10.5%; }
+[data-slot="job-table"] th:nth-child(7) { width: 10.5%; }
+
+/*
+ * Seven columns do not fit a narrow pane, and a table of ellipses says less
+ * than a table with fewer columns in it. They go in reverse order of how often
+ * they answer a question: the agent is usually the same for every row, a remote
+ * path is the least glanced at, a session id is for correlating rather than
+ * scanning. Status and title never go.
+ */
+@container (max-width: 860px) {
+  [data-slot="job-table"] th:nth-child(3),
+  [data-slot="job-table"] td:nth-child(3) {
+    display: none;
+  }
+}
+@container (max-width: 700px) {
+  [data-slot="job-table"] th:nth-child(4),
+  [data-slot="job-table"] td:nth-child(4) {
+    display: none;
+  }
+}
+@container (max-width: 560px) {
+  [data-slot="job-table"] th:nth-child(5),
+  [data-slot="job-table"] td:nth-child(5),
+  [data-slot="job-table"] th:nth-child(7),
+  [data-slot="job-table"] td:nth-child(7) {
+    display: none;
+  }
+}
+
+[data-slot="job-row"]:hover {
+  background: var(--v2-overlay-simple-overlay-hover);
+  cursor: pointer;
+}
+
+[data-slot="job-path"] {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+}
+
+[data-slot="job-agent"] {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+[data-slot="job-model"] {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(10.5px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+}
+
+[data-slot="copyable"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  margin-inline-start: -4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+}
+[data-slot="copyable"] code {
+  font-family: var(--v2-font-family-mono);
+}
+[data-slot="copyable"] svg {
+  opacity: 0;
+  color: var(--v2-icon-icon-muted);
+}
+[data-slot="copyable"]:hover {
+  background: var(--v2-overlay-simple-overlay-hover);
+}
+[data-slot="copyable"]:hover svg,
+[data-slot="copyable"]:focus-visible svg {
+  opacity: 1;
+}
+
+/* ── Event log ─────────────────────────────────────────────────────────── */
+
+[data-slot="event-log"] {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 12px 0;
+}
+
+[data-slot="event-row"] {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: calc(12px * var(--font-scale));
+}
+[data-slot="event-row"]:hover {
+  background: var(--v2-overlay-simple-overlay-hover);
+}
+[data-slot="event-row"][data-type="error"] {
+  color: var(--v2-state-fg-danger);
+}
+[data-slot="event-row"][data-type="thinking"] {
+  color: var(--v2-text-text-faint);
+  font-style: italic;
+}
+[data-slot="event-row"][data-type="steer"] {
+  color: var(--v2-text-text-accent);
+}
+[data-slot="event-row"][data-type="message"] {
+  background: var(--v2-state-bg-warning);
+}
+
+/* Where in the run, not what the clock said: `+HH:MM:SS` from the job's first
+   event, which is the number worth reading on something four hours old. */
+[data-slot="event-when"] {
+  flex: none;
+  width: 72px;
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(10.5px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-slot="event-body"] {
+  min-width: 0;
+  flex: 1;
+}
+
+[data-slot="event-text"] {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+[data-slot="event-status"],
+[data-slot="event-tool"],
+[data-slot="event-report"] {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+[data-slot="event-status"] code,
+[data-slot="event-tool"] code,
+[data-slot="event-report"] code {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+  min-width: 0;
+}
+
+[data-slot="event-tool-result"] {
+  display: block;
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A message long enough to be a document: collapsed, and bounded when open. */
+[data-slot="event-doc"] {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: calc(12px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+}
+[data-slot="event-doc"] summary {
+  cursor: pointer;
+  color: var(--v2-text-text-faint);
+  font-size: calc(11px * var(--font-scale));
+}
+[data-slot="event-doc"] p {
+  margin-top: 6px;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+[data-slot="steer"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 8px 12px;
+  box-shadow: inset 0 1px 0 0 var(--v2-border-border-muted);
+}
+[data-slot="steer"] input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--v2-border-border-base);
+  border-radius: 6px;
+  background: var(--v2-background-bg-base);
+  color: var(--v2-text-text-base);
+  font-family: inherit;
+  font-size: calc(12.5px * var(--font-scale));
+  outline: none;
+}
+[data-slot="steer"] input:focus {
+  border-color: var(--v2-border-border-focus);
+}
+[data-slot="steer"] input:disabled {
+  color: var(--v2-text-text-faint);
+}
+
+[data-slot="prompt"] {
+  font-size: calc(12px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+}
+[data-slot="prompt"] summary {
+  cursor: pointer;
+  color: var(--v2-text-text-faint);
+  font-size: calc(11px * var(--font-scale));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+[data-slot="prompt"] p {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Home ──────────────────────────────────────────────────────────────── */
+
+[data-slot="home"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+}
+
+[data-slot="home-inner"] {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 52ch;
+}
+
+[data-slot="home-title"] {
+  font-size: calc(20px * var(--font-scale));
+  font-weight: 560;
+  letter-spacing: -0.3px;
+}
+
+[data-slot="home-lede"] {
+  font-size: calc(13px * var(--font-scale));
+  color: var(--v2-text-text-muted);
+  line-height: 1.55;
+}
+
+[data-slot="home-path"] {
+  font-size: calc(11.5px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+}
+[data-slot="home-path"] code,
+[data-slot="home-lede"] code,
+[data-slot="sidebar-empty"] code {
+  font-family: var(--v2-font-family-mono);
+  color: var(--v2-text-text-muted);
+}
+
+/* ── Forms, in the dialogs ─────────────────────────────────────────────── */
+
+[data-slot="form"] {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+[data-slot="form-split"] {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+[data-slot="form-switches"] {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding-top: 2px;
+}
+
+[data-slot="field-hint"] {
+  font-size: calc(11px * var(--font-scale));
+  line-height: 1.5;
+  color: var(--v2-text-text-faint);
+}
+[data-slot="field-hint"] code {
+  font-family: var(--v2-font-family-mono);
+}
+
+/* What the ssh command was read as, before there is a process to argue with. */
+[data-slot="parse"] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: var(--v2-background-bg-layer-01);
+  box-shadow: 0 0 0 0.5px var(--v2-border-border-muted);
+}
+
+[data-slot="parse-row"] {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+[data-slot="parse-row"] [data-slot="field-label"] {
+  width: 68px;
+  flex: none;
+}
+[data-slot="parse-row"] code {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11.5px * var(--font-scale));
+  color: var(--v2-text-text-base);
+}
+
+[data-slot="parse-forwards"] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+[data-slot="parse-problems"] {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: calc(11.5px * var(--font-scale));
+  color: var(--v2-state-fg-warning);
+}
+
+/* ── The ssh prompt ───────────────────────────────────────────────────── */
+
+[data-slot="prompt-body"] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+[data-slot="prompt-question"] {
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(12.5px * var(--font-scale));
+  color: var(--v2-text-text-base);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+[data-slot="secret-field"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--v2-border-border-base);
+  border-radius: 6px;
+  background: var(--v2-background-bg-base);
+}
+[data-slot="secret-field"]:focus-within {
+  border-color: var(--v2-border-border-focus);
+}
+
+/*
+ * Masked, without being a password field.
+ *
+ * `type="password"` invites Chrome's password manager, whose "save password?"
+ * bubble steals the focus — on a two-factor prompt that means the next question
+ * arrives underneath a dialog about the last one. `-webkit-text-security` masks
+ * the characters instead, and is supported everywhere this runs.
+ */
+[data-slot="secret-input"] {
+  flex: 1;
+  min-width: 0;
+  min-height: 30px;
+  border: none;
+  background: transparent;
+  color: var(--v2-text-text-base);
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(13px * var(--font-scale));
+  letter-spacing: 0.06em;
+  outline: none;
+  -webkit-text-security: disc;
+}
+[data-slot="secret-input"][data-reveal] {
+  -webkit-text-security: none;
+  letter-spacing: normal;
+}
+
+[data-slot="prompt-countdown"] {
+  margin-left: auto;
+  font-family: var(--v2-font-family-mono);
+  font-size: calc(11px * var(--font-scale));
+  color: var(--v2-text-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-slot="dialog-footer"] [data-slot="prompt-countdown"] {
+  margin-left: auto;
+}
