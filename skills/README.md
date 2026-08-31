@@ -1,24 +1,32 @@
 # Skills
 
-Two agent skills, one for each end of the connection. They are written to agree
-with each other and are backend-agnostic — they hold whether the gateway runs
-the job through Claude Code or opencode, so install both, or the conventions
-only hold on one side.
+Three agent skills: one for each end of the connection, plus the one that gets
+the connection to exist. The two runtime skills are written to agree with each
+other and are backend-agnostic — they hold whether the gateway runs the job
+through Claude Code or opencode, so install both, or the conventions only hold
+on one side.
 
 | Skill | Install on | Covers |
 |---|---|---|
-| [`agent-bridge-client`](agent-bridge-client/SKILL.md) | the machine you work from | driving the `ab` CLI, session targeting, monitoring, when a job is actually done |
+| [`agent-bridge-client`](agent-bridge-client/SKILL.md) | the machine you work from | driving the `ab` CLI, session targeting, where a session works, monitoring, when a job is actually done |
 | [`agent-bridge-worker`](agent-bridge-worker/SKILL.md) | the gateway host | the remote agent's remit, finishing a turn, submitting batch work, reporting through `$AB_JOB_DIR`, registering a monitor |
+| [`agent-bridge-install-gateway`](agent-bridge-install-gateway/SKILL.md) | whichever machine is doing the installing | standing a gateway up: clone and `PATH`, what `ab-serve` does for you, the three settings worth editing, the token, the laptop's `gateways.json`, and a verification ladder |
 
 ```bash
 mkdir -p ~/.claude/skills
 cp -r skills/agent-bridge-client ~/.claude/skills/     # laptop
 cp -r skills/agent-bridge-worker ~/.claude/skills/     # gateway host
+cp -r skills/agent-bridge-install-gateway ~/.claude/skills/   # wherever you install from
 ```
 
-Neither needs a gateway restart; both take effect on the next session.
+None needs a gateway restart; all take effect on the next session.
 
-## Why two
+`install-gateway` is a one-off where the others are continuous, and it is
+deliberately separate: an agent driving jobs should not be carrying setup
+instructions it will never use, and the install is the moment when the
+`PATH`-under-ssh trap decides whether anything else works.
+
+## Why two at runtime
 
 The division of labour is the point: **the local session plans and reviews with
 a human, the remote agent investigates and executes.** Each skill states the
@@ -42,3 +50,8 @@ whatever else is irrelevant.
 loads, an example env layout) because it is most useful when concrete. Adjust
 the scheduler section for PBS/LSF if that's what you run — the shape is the
 same, only the flag names change.
+
+`agent-bridge-install-gateway` names paths that are conventions rather than
+facts — `~/.bashrc`, `~/.local/bin`, port 8787 — and its verification ladder is
+the part to keep verbatim: each rung exists because the failure it catches is
+indistinguishable from the next one's.

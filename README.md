@@ -353,8 +353,11 @@ the data dir on a filesystem the compute nodes share if a batch script is going 
 write there too. Scope `allowed_dirs` deliberately; noninteractive
 permission modes let an agent edit and execute within those roots.
 
-A systemd user service example is in `systemd/agent-bridge.service`. Skills for
-both ends of the workflow live under `skills/`. The local dashboard is a separate
+A systemd user service example is in `systemd/agent-bridge.service`. Skills live
+under `skills/`: one for each end of the workflow, plus
+`agent-bridge-install-gateway`, which is this section as a procedure — clone and
+`PATH`, what `ab-serve` does for you, the three settings worth editing, and a
+verification ladder that says which half is wrong. The local dashboard is a separate
 npm package under `webui/` — it never runs on the cluster, only on the machine
 the tunnels start from.
 
@@ -363,7 +366,7 @@ the tunnels start from.
 ```bash
 python -m pip install -e '.[test]'
 python -m pytest -q
-python -m compileall -q gateway client tests
+python -m compileall -q gateway client worker tests
 ```
 
 Backend tests cover typed OpenAPI/errors, public DTOs, idempotency, monotonic
