@@ -29,6 +29,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [22](22-connecting-is-starting-the-gateway.md) | `ab-serve`: the ssh line can end in a command, and connecting starts the gateway without owning it | after 0.3.0 |
 | [23](23-the-report-is-the-result.md) | `report.md` is the job's `result`, not one more event; progress is `ab-notify` rather than a path | after 0.3.0 |
 | [24](24-the-launcher-does-the-setup.md) | `run.sh` folded into `ab-serve`: the launcher seeds the config, installs the deps, and fixes the `PATH` the agents are found on | after 0.3.0 |
+| [25](25-the-delegate-s-tools-are-not-the-client.md) | `ab-notify` and `ab-monitor` move out of `client/` into `worker/`: they run in the job, not on the caller's machine | after 0.3.0 |
 
 **20 is missing on purpose.** It recorded the first attempt at a web UI, whose
 four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed

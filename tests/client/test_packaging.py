@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -64,12 +65,44 @@ def test_console_scripts_and_dynamic_version_are_declared():
     assert config["project"]["scripts"] == {
         "ab": "client.ab:main",
         "agent-bridge": "gateway.__main__:main",
-        "ab-notify": "client.ab_notify:main",
-        "ab-monitor": "client.ab_monitor:main",
+        "ab-notify": "worker.notify:main",
+        "ab-monitor": "worker.monitor:main",
         "ab-serve": "gateway.serve:main",
     }
     assert config["tool"]["setuptools"]["dynamic"]["version"]["attr"] == \
         "client._version.__version__"
+
+
+def test_the_client_and_the_worker_import_nothing_but_the_standard_library():
+    """The constraint both packages exist under, and the one an edit breaks
+    silently: it costs nothing here and fails on a compute node with no network.
+
+    Read out of the source rather than by importing, so a module that is only
+    reachable on one platform is still checked.
+    """
+    root = Path(__file__).parents[2]
+    # A copied `client/` is invoked with the directory itself on `sys.path`, so
+    # its own modules are named bare -- `_version`, `abclient` -- and those are
+    # not third-party imports however they read.
+    local = {"client", "worker", "gateway", "abclient", "_version",
+             "agent_bridge_version"}
+    allowed = set(sys.stdlib_module_names) | local | {"__future__"}
+
+    offenders: dict[str, set[str]] = {}
+    for package in ("client", "worker"):
+        for module in sorted((root / package).glob("*.py")):
+            tree = ast.parse(module.read_text())
+            names = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    names |= {alias.name.split(".")[0] for alias in node.names}
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    names.add((node.module or "").split(".")[0])
+            outside = {name for name in names if name and name not in allowed}
+            if outside:
+                offenders[f"{package}/{module.name}"] = outside
+
+    assert offenders == {}, offenders
 
 
 def test_every_shim_in_bin_runs_from_anywhere(tmp_path):
@@ -111,8 +144,9 @@ def test_console_scripts_install_and_run_offline(tmp_path):
         shutil.copy2(root / name, source / name)
     shutil.copytree(root / "client", source / "client",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.copytree(root / "gateway", source / "gateway",
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for package in ("gateway", "worker"):
+        shutil.copytree(root / package, source / package,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     environment = tmp_path / "venv"
     venv.EnvBuilder(with_pip=True, system_site_packages=True).create(environment)
     scripts = environment / ("Scripts" if os.name == "nt" else "bin")

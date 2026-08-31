@@ -23,7 +23,10 @@ ab --version
 
 Direct invocation also works: `python client/ab.py --version`.
 
-The copied `client/` directory remains dependency-free. TOML client config
+The copied `client/` directory remains dependency-free. The tools a *delegate*
+runs inside a job — `ab-notify`, `ab-monitor` — are not here: they live in
+`worker/`, because they write into `$AB_JOB_DIR` on the far side rather than
+talking to the API (design/25). TOML client config
 requires Python 3.11; JSON works on older supported Python versions.
 
 Configure `~/.config/agent-bridge/gateways.json`:

@@ -4,12 +4,17 @@ The asymmetry is the design. The delegate runs on the gateway host and drops a
 registration into the directory it was already handed -- no job id, no url, no
 token, and it works when HTTP does not. The caller is on a laptop and talks to
 the API like everything else.
+
+Both halves stay in one file even though the code is now split across `worker/`
+and `client/`, because the asymmetry *is* the subject: a test for one half that
+cannot see the other stops being able to state it.
 """
 from __future__ import annotations
 
 import pytest
 
-from client import ab, ab_monitor
+from client import ab
+from worker import monitor as ab_monitor
 
 
 def _add(tmp_path, *argv):

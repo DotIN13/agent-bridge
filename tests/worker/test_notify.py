@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from client import ab_notify
+from worker import notify as ab_notify
 
 
 def _run(tmp_path, *argv, expect=0):
