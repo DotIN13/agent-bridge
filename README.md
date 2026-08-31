@@ -355,9 +355,10 @@ permission modes let an agent edit and execute within those roots.
 
 A systemd user service example is in `systemd/agent-bridge.service`. Skills live
 under `skills/`: one for each end of the workflow, plus
-`agent-bridge-install-gateway`, which is this section as a procedure — clone and
-`PATH`, what `ab-serve` does for you, the three settings worth editing, and a
-verification ladder that says which half is wrong. The local dashboard is a separate
+`agent-bridge-install-worker`, which is this section as a procedure for the
+remote host — clone and `PATH` under a non-interactive ssh, what `ab-serve` does
+for you, the three settings worth editing, and the checks that prove it serves
+before you hand over the token. The local dashboard is a separate
 npm package under `webui/` — it never runs on the cluster, only on the machine
 the tunnels start from.
 
