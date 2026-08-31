@@ -88,6 +88,12 @@ bin = "claude"
 dispatch_mode = "direct"
 permission_mode = "bypassPermissions"
 model = ""                 # empty = account default
+# Where a job with no `--cwd` starts. Point this at the project you actually
+# work in, or at a scratch directory -- *not* at this checkout, however
+# convenient it looks: every unqualified job then begins inside the tool that
+# dispatched it, where a delegate greps the wrong repo, runs the wrong tests and
+# can commit into it. Callers should pass `--cwd` regardless; this is what they
+# inherit when they forget, so it is worth being the harmless value.
 default_cwd = "/project/jevans/tzhang3/agent-bridge"
 allowed_dirs = [
     "/project/jevans/tzhang3",
@@ -117,7 +123,7 @@ permission_mode = "auto"
 # Deterministic default for `--agent opencode` with no --model; override per
 # job with --model. Model ids are provider/model (see `opencode models`).
 model = "deepseek/deepseek-v4-flash"
-default_cwd = "/project/jevans/tzhang3/agent-bridge"
+default_cwd = "/project/jevans/tzhang3/agent-bridge"   # see the note above
 allowed_dirs = [
     "/project/jevans/tzhang3",
     "/home/tzhang3",

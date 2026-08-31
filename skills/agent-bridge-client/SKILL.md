@@ -13,12 +13,12 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 ## Workflow
 
 1. **`ab gateways`, `ab health` and `ab info`** — which are configured and which are actually reachable. `ab info` shows you the host as it actually is: CPU/RAM, local GPUs, Slurm partitions and their GPU inventory, allocation balance — and then, under a rule, the **operator notes**: what a person knows and a probe cannot find, like the account to charge, the partition that has the GPUs, the filesystem that is nearly full. Read this *before* writing a plan; half of what you would otherwise guess is stated here, and it costs no agent turn.
-4. **`ab agents --output json`** — which backend you are driving and what it actually supports: sessions, fork, in-place resume, steering, thinking, attachments. A plan that assumes steering on a backend without it is infeasible before it starts.
-5. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
-6. **`ab sessions`**, then **`ab sessions --cwd <dir>`** — which directories have work, then the sessions in that project. Pick one to continue; a new session is a new subject.
-7. **`ab run -F recon.md`** — recommended alignment turns before the real brief, in the session that will do the work. Required for anything needing a full brief; skipped for a lookup. See *Align the plan before you delegate*.
-8. **`ab submit -F brief.md --session <uuid> --no-fork`** — always from a file, never an inline prompt. The brief **must** carry a Verification section naming the check that settles the work, and a Finishing section saying whether to commit, what the report must contain, and — when the work outlives the turn — that the worker registers a monitor and names it. A brief without the check produces a report you cannot tell from a guess. Full template below.
-9. **`ab wait` asynchronously** — Use background bash jobs or Monitor tools to keep the wait in the background. A job is `succeeded` once its turn has ended **and** the worker has written `$AB_JOB_DIR/report.md`; between the two it reads `waiting`. Long running work like batch jobs that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
+2. **`ab agents --output json`** — which backend you are driving and what it actually supports: sessions, fork, in-place resume, steering, thinking, attachments. A plan that assumes steering on a backend without it is infeasible before it starts.
+3. **`ab jobs`** — is this work already running? If so, steer it instead of starting a second one.
+4. **`ab sessions`**, then **`ab sessions --cwd <dir>`** — which directories have work, then the sessions in that project. Pick one to continue; a new session is a new subject.
+5. **`ab run -F recon.md`** — recommended alignment turns before the real brief, in the session that will do the work. Required for anything needing a full brief; skipped for a lookup. See *Align before you delegate*.
+6. **`ab submit -F brief.md --session <uuid> --no-fork --cwd <project dir>`** — always from a file, never an inline prompt, and always in the directory the work belongs to (see *Where the session works*). The brief **must** carry a Verification section naming the check that settles the work, and a Finishing section saying whether to commit, what the report must contain, and — when the work outlives the turn — that the worker registers a monitor and names it. A brief without the check produces a report you cannot tell from a guess. Full template below.
+7. **`ab wait` asynchronously** — Use background bash jobs or Monitor tools to keep the wait in the background. A job is `succeeded` once its turn has ended **and** the worker has written `$AB_JOB_DIR/report.md`; between the two it reads `waiting`. Long running work like batch jobs that outlives the turn is a monitor, and `ab monitor <id> --wait` blocks on that instead.
 
 ## Starting a job
 
@@ -35,6 +35,15 @@ For remote GPUs, schedulers, long jobs, or delegated work on another host. You p
 
 - **Record full UUIDs.** A prefix can later become ambiguous.
 - Always pass prompts with `-F/--prompt-file`, from a temp dir — see the brief template below.
+
+## Where the session works
+
+`--cwd` on the **first** submit into a session decides where the delegate works, and a named session's recorded cwd wins from then on (design/03). One decision, per session, not quietly changeable later — so make it on purpose.
+
+- **The user's project directory**, when there is one. Ask which, or read `ab sessions` — it lists the directories that already have work — rather than assuming anything about where `ab` happens to be running.
+- **Never the agent-bridge checkout.** It is the tool that dispatched the job, not the subject of it. A delegate that starts there greps the wrong repo, runs the wrong tests, and can commit into it. Say nothing and you may well get it: the gateway's per-agent `default_cwd` often points at the checkout, and `ab agents --output json` shows the value you would inherit. That is the reason to pass `--cwd` explicitly even when you think the default is fine.
+- **No project directory? Give the work a scratch one of its own** and name it in the brief, rather than borrowing a repo: `--cwd "$HOME/scratch/ab/<task>-$(date +%m%d)"`. Create it in the recon turn (`mkdir -p`), since the cwd has to exist before the real brief lands.
+- **It must be inside the gateway's `allowed_dirs`** or the submit is refused outright — `cwd … is not under any allowed_dirs`. `ab info` lists them. Note that `/tmp` usually is **not** among them, and the same list sandboxes `ab download`, so a scratch dir under `/tmp` can leave results you cannot fetch; use `/tmp/ab-<task>` only when `allowed_dirs` actually names `/tmp`, and prefer `$HOME` or the cluster's scratch filesystem otherwise.
 
 ## Align before you delegate
 
@@ -82,6 +91,7 @@ Six sections, in this order:
 # Finishing     — commit/push or not, what the report must contain, how to close the job
 ```
 
+* **Name the working directory in `Known`**, as an absolute path, even though `--cwd` already sets it. The delegate reads the brief, not your flags, and a brief that never says where the work lives is how a `cd` back into the tool's own checkout looks reasonable.
 * Make verification concrete: commands, expected outputs, benchmarks, files, or comparison criteria.
 * Require the report to cover completed work, decisions, verification results, assumption outcomes, and absolute paths to important artifacts. It goes in `$AB_JOB_DIR/report.md`, which is what `ab job <ref>` prints — ask for it there and nowhere else, since a brief that also asks for findings in the closing message gets two answers that can disagree.
 * If the work will be long-running (1h+), ask remote to start the background/batch job work, register `ab-monitor`s, and write a preliminary report to signal job finish before the turn ends.
