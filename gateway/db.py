@@ -221,11 +221,30 @@ def _cursor_decode(cursor: str) -> tuple[float, int]:
 class Database:
     def __init__(self, path: str) -> None:
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        try:
+            self._conn = sqlite3.connect(path, check_same_thread=False)
+        except sqlite3.OperationalError as exc:
+            raise RuntimeError(
+                f"cannot open SQLite database at {path!r}: {exc}. "
+                "SQLite does not work on NFS mounts without file locking "
+                "(e.g. /u with local_lock=none); point [db] path at local "
+                "or Lustre storage such as /work or /tmp") from exc
         self._conn.row_factory = sqlite3.Row
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.OperationalError as exc:
+                if "locking protocol" in str(exc):
+                    raise RuntimeError(
+                        f"SQLite cannot lock {path!r}: {exc}. This filesystem "
+                        "does not support the locking SQLite needs "
+                        "(NFS with local_lock=none, e.g. /u). Move the "
+                        "database: set [db] path in config.toml to an "
+                        "absolute path on Lustre (/work/...) or local disk "
+                        "(/tmp/...), copying gateway.db plus its -wal file "
+                        "so uncheckpointed rows survive") from exc
+                raise
             self._conn.executescript(_SCHEMA)
             self._migrate_locked()
             self._conn.commit()
