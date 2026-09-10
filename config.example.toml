@@ -33,6 +33,13 @@ cancel_grace_sec = 15
 # 0 waits indefinitely.
 report_wait_sec = 1800
 
+# At turn end with no report, nudge the still-alive agent once over its steer
+# channel ("are you finished? write report.md"), instead of only waiting for the
+# file. The usual cause is a delegate that did the work and forgot the file, and
+# a live channel reaches it where a `waiting` row cannot. `false` goes straight
+# to `waiting`.
+report_reminder = true
+
 # What this machine's owner knows and no probe can discover: scheduler
 # accounts, full filesystems, which env holds which package. Served beside the
 # probed facts on /v1/info. Edited on the host — by an agent job, by `ab

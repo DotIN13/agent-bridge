@@ -9,10 +9,23 @@ import traceback
 
 from . import jobdir
 from .adapters import build as build_adapter
-from .adapters.base import Cancellation, Event, JobSpec, Steering
+from .adapters.base import (Cancellation, Event, JobSpec, Steering, SteerError)
 from .bus import Bus
 from .config import Config
 from .db import WAITING, Database
+
+
+#: Sent over the steer channel when a turn ends with no report. Deliberately
+#: addresses "did you forget the file", not "do the work": the turn ended, so
+#: the common case is a delegate that already did the work and simply stopped
+#: before writing it. `AB_JOB_DIR` is in the child's environment (see
+#: `child_env`), so the path is stated as the delegate already knows it.
+REPORT_REMINDER = (
+    "Your turn ended, but $AB_JOB_DIR/report.md has not been written. "
+    "Are you finished? If so, write your report there now -- the job is not "
+    "complete until that file exists. If you are not finished, keep working and "
+    "write it when you are."
+)
 
 
 class WorkerPool:
@@ -28,6 +41,10 @@ class WorkerPool:
         self._cancel_requested: set[str] = set()
         self._steers: dict[str, Steering] = {}
         self._claimed: dict[str, str] = {}
+        #: Jobs already sent the one report reminder this pool ever sends. Kept
+        #: per job so a reminder's own turn ending does not trigger a second
+        #: nudge (which would loop for as long as the delegate stayed silent).
+        self._reminded: set[str] = set()
         self._started = False
 
     def start(self) -> None:
@@ -49,6 +66,10 @@ class WorkerPool:
     def report_wait_sec(self) -> float:
         return float(getattr(self.cfg, "report_wait_sec", 0.0) or 0.0)
 
+    @property
+    def report_reminder(self) -> bool:
+        return bool(getattr(self.cfg, "report_reminder", True))
+
     def _on_turn_end(self, job_id: str, spec: JobSpec, fields: dict) -> None:
         """The agent has answered. Whether the job is done is another question.
 
@@ -58,6 +79,12 @@ class WorkerPool:
         agent's stdin and let the run wind up normally. Without it, the row goes
         `waiting` and the process stays alive: it can still be steered, and it
         can still write the file (design/17).
+
+        Since the process is still alive, it can also be *asked*. A delegate that
+        did the work and forgot the file is the common failure, so the first time
+        a turn ends without a report we nudge it once over the same steer channel
+        (design/26). A backend with no channel — or `report_reminder = false` —
+        goes straight to waiting, exactly as before.
         """
         steer = self._steers.get(job_id)
         if not spec.job_dir or jobdir.has_report(spec.job_dir):
@@ -65,11 +92,39 @@ class WorkerPool:
                 steer.close()
             return
         self.db.save_result_fields(job_id, fields)
-        deadline = (time.time() + self.report_wait_sec
-                    if self.report_wait_sec > 0 else None)
-        row = self.db.mark_waiting(job_id, deadline)
-        if row:
-            self.bus.publish(job_id, row)
+        if not self._remind_for_report(job_id, spec, steer):
+            deadline = (time.time() + self.report_wait_sec
+                        if self.report_wait_sec > 0 else None)
+            row = self.db.mark_waiting(job_id, deadline)
+            if row:
+                self.bus.publish(job_id, row)
+
+    def _remind_for_report(self, job_id: str, spec: JobSpec,
+                           steer: Steering | None) -> bool:
+        """Nudge the live agent to write its report. True if the nudge landed.
+
+        Only ever once per job: the reminder starts a new turn, whose own end
+        would otherwise ask again and again. On success the row is left as it is
+        — `running` — because the delegate *is* working again, and the deadline
+        starts when that turn ends. A backend whose channel cannot be reached
+        (opencode closes stdin with its turn) reports False and the ordinary
+        waiting path takes over.
+        """
+        if not self.report_reminder or steer is None or not steer.available:
+            return False
+        if job_id in self._reminded:
+            return False
+        self._reminded.add(job_id)
+        try:
+            steer.send(REPORT_REMINDER)
+        except SteerError as exc:
+            self._emit(job_id, Event("log", {
+                "report_reminder": "failed", "reason": str(exc)}))
+            return False
+        self._emit(job_id, Event("status", {
+            "stage": "reminder",
+            "detail": "turn ended without a report; asked the delegate to write it"}))
+        return True
 
     def submit(self, job_id: str) -> None:
         if self._stop.is_set():
@@ -145,6 +200,7 @@ class WorkerPool:
         """Release per-job state while ``self._lock`` is already held."""
         self._cancels.pop(job_id, None)
         self._steers.pop(job_id, None)
+        self._reminded.discard(job_id)
         self._cancel_requested.discard(job_id)
         for sid in [sid for sid, owner in self._claimed.items()
                     if owner == job_id]:

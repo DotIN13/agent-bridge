@@ -30,6 +30,7 @@ decision that looks arbitrary until you know what it was chosen against.
 | [23](23-the-report-is-the-result.md) | `report.md` is the job's `result`, not one more event; progress is `ab-notify` rather than a path | after 0.3.0 |
 | [24](24-the-launcher-does-the-setup.md) | `run.sh` folded into `ab-serve`: the launcher seeds the config, installs the deps, and fixes the `PATH` the agents are found on | after 0.3.0 |
 | [25](25-the-delegate-s-tools-are-not-the-client.md) | `ab-notify` and `ab-monitor` move out of `client/` into `worker/`: they run in the job, not on the caller's machine | after 0.3.0 |
+| [26](26-wake-the-delegate-for-its-report.md) | A turn that ends without `report.md` gets one nudge over the live channel before the job waits | after 0.3.0 |
 
 **20 is missing on purpose.** It recorded the first attempt at a web UI, whose
 four commits were reverted in `4dae28e`; 21 is the rebuild and says what changed
@@ -99,7 +100,9 @@ definition and adds `waiting` for the gap between the two — a post-turn state
 again, but one that waits on a file in a directory the gateway already scans,
 with the agent still alive and a 30-minute grace window rather than a day. Its
 table comparing `waiting` to 11's `awaiting_report` is the thing to read before
-assuming this is the same mistake twice.
+assuming this is the same mistake twice. **26 is what that liveness was for**: a
+delegate that ends its turn without the file is nudged once, over the channel 17
+kept open, before the job is left to wait.
 
 **16 ends a default that moved three times**, and 11 → 15 → 16 is worth reading
 in order: the turn was the job, then it wasn't and every row waited, then waiting

@@ -444,3 +444,152 @@ def test_the_report_is_a_message_event_as_well_as_the_result(tmp_path):
     assert [r["data"]["file"] for r in rows] == ["report.md"]
     assert "the deliverable" in rows[0]["data"]["msg"]
     db.close()
+
+
+# -- the report reminder (design/26) --------------------------------------
+
+def _fake_steering(monkeypatch, *, available=True):
+    """Replace the pool's Steering with a recording, channel-shaped fake.
+
+    `available` is what a backend reports once its turn ends: claude keeps the
+    stdin pipe open, so a nudge can still land; opencode's child exits with the
+    turn, so there is nothing left to steer.
+    """
+    from gateway.adapters.base import SteerError, Steering
+
+    sent, closed = [], []
+
+    class FakeSteering(Steering):
+        def __init__(self):
+            super().__init__()
+            self._open = available
+
+        def send(self, text):
+            if not available:
+                raise SteerError("no channel")
+            sent.append(text)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr("gateway.worker.Steering", FakeSteering)
+    return sent, closed
+
+
+def _job(db):
+    return db.create_job(agent="claude", prompt="go", cwd=None, session=None,
+                         permission_mode=None, model=None)
+
+
+def test_a_live_channel_gets_one_report_reminder(tmp_path, monkeypatch):
+    """The turn ended with no report and the agent is still alive: ask it once,
+    then keep waiting for the file it was asked for."""
+    from gateway.adapters.base import Event, RunResult
+    from gateway.worker import REPORT_REMINDER
+
+    class Adapter:
+        def run(self, _spec, emit):
+            emit(Event("status", {"stage": "turn_end", "result": "looked done"}))
+            return RunResult(ok=True, result="looked done")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter(), report_wait_sec=1800)
+    sent, _closed = _fake_steering(monkeypatch)
+    job = _job(db)
+
+    pool._run_job(job)
+
+    assert sent == [REPORT_REMINDER], "one nudge, carrying the missing-file ask"
+    stages = [e["data"].get("stage") for e in _events(db, job)]
+    assert "reminder" in stages
+    assert db.get_job(job)["status"] == WAITING
+    db.close()
+
+
+def test_the_reminder_is_sent_once_however_many_turns_end(tmp_path, monkeypatch):
+    """The reminder starts a turn of its own. If that turn also ends without a
+    report, asking again would loop for as long as the delegate stayed silent."""
+    from gateway.adapters.base import Event, RunResult
+
+    class Adapter:
+        def run(self, _spec, emit):
+            emit(Event("status", {"stage": "turn_end", "result": "one"}))
+            emit(Event("status", {"stage": "turn_end", "result": "two"}))
+            return RunResult(ok=True, result="two")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter(), report_wait_sec=1800)
+    sent, _closed = _fake_steering(monkeypatch)
+    job = _job(db)
+
+    pool._run_job(job)
+
+    assert len(sent) == 1, "the second turn end must not ask again"
+    assert db.get_job(job)["status"] == WAITING
+    db.close()
+
+
+def test_a_report_written_after_the_reminder_finishes_the_job(tmp_path,
+                                                              monkeypatch):
+    """The path the feature exists for: nudged, the delegate writes the file, and
+    the report ends the run."""
+    from gateway.adapters.base import Event, RunResult
+    from gateway.worker import REPORT_REMINDER
+
+    class Adapter:
+        def run(self, spec, emit):
+            emit(Event("status", {"stage": "turn_end", "result": "forgot"}))
+            jobdir.publish(jobdir.path_for(tmp_path, spec.job_id) / "report.md",
+                           "the findings")
+            emit(Event("status", {"stage": "turn_end", "result": "done"}))
+            return RunResult(ok=True, result="done")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter(), report_wait_sec=1800)
+    sent, closed = _fake_steering(monkeypatch)
+    job = _job(db)
+
+    pool._run_job(job)
+
+    assert sent == [REPORT_REMINDER]
+    assert closed, "the report ends the held-open run"
+    assert db.get_job(job)["status"] == "succeeded"
+    db.close()
+
+
+def test_report_reminder_can_be_turned_off(tmp_path, monkeypatch):
+    from gateway.adapters.base import Event, RunResult
+
+    class Adapter:
+        def run(self, _spec, emit):
+            emit(Event("status", {"stage": "turn_end", "result": "done"}))
+            return RunResult(ok=True, result="done")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter(),
+                     report_wait_sec=1800, report_reminder=False)
+    sent, _closed = _fake_steering(monkeypatch)
+    job = _job(db)
+
+    pool._run_job(job)
+
+    assert sent == [], "the operator asked for the plain waiting path"
+    assert db.get_job(job)["status"] == WAITING
+    db.close()
+
+
+def test_a_backend_with_no_channel_is_not_reminded(tmp_path, monkeypatch):
+    """opencode's child exits with its turn (design/18): there is nothing to
+    steer, so the worker waits exactly as it did before."""
+    from gateway.adapters.base import Event, RunResult
+
+    class Adapter:
+        def run(self, _spec, emit):
+            emit(Event("status", {"stage": "turn_end", "result": "done"}))
+            return RunResult(ok=True, result="done")
+
+    pool, db = _pool(tmp_path, monkeypatch, Adapter(), report_wait_sec=1800)
+    sent, _closed = _fake_steering(monkeypatch, available=False)
+    job = _job(db)
+
+    pool._run_job(job)
+
+    assert sent == []
+    assert db.get_job(job)["status"] == WAITING
+    db.close()
