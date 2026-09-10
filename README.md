@@ -250,9 +250,12 @@ over HTTP.
 
 **A job is `succeeded` when its turn has ended and it has written
 `$AB_JOB_DIR/report.md`.** Between the two the row is `waiting`: the agent process
-stays alive, remains steerable, and can still write the file. No report within
-`[worker] report_wait_sec` (default 30 minutes) fails the job with
-`report_missing`.
+stays alive, remains steerable, and can still write the file. A turn that ends
+without the file is **nudged once** over that channel — "are you finished? write
+the report" — because the usual cause is a delegate that did the work and stopped
+before writing it. No report within `[worker] report_wait_sec` (default 30
+minutes) fails the job with `report_missing`; `[worker] report_reminder = false`
+skips the nudge.
 
     queued -> running -> waiting -> succeeded | failed | canceled
 

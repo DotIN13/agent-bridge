@@ -22,6 +22,12 @@ _DEFAULTS: dict = {
         # a wait: the delegate is meant to write it *before* ending the turn.
         # 0 waits indefinitely.
         "report_wait_sec": 1800,
+        # At turn end with no report, nudge the still-alive agent once over its
+        # steer channel: "your turn ended and report.md is missing — if you are
+        # done, write it now." The common failure is a delegate that did the work
+        # and simply forgot the file, and a live channel reaches it where a
+        # `waiting` row cannot. Off means go straight to `waiting`.
+        "report_reminder": True,
         # Cancel sends SIGINT first (the ESC equivalent) and only escalates if
         # the agent hasn't wound down within this many seconds.
         "cancel_grace_sec": 15,
@@ -123,6 +129,7 @@ class Config:
     data_dir: str         # absolute
     cancel_grace_sec: float = 15.0
     report_wait_sec: float = 1800.0
+    report_reminder: bool = True
     cluster_enabled: bool = True
     cluster_probe_timeout: int = 15
     cluster_env_presence: tuple[str, ...] = ()
@@ -254,6 +261,7 @@ def load(path: str | os.PathLike | None) -> Config:
         concurrency=int(raw["worker"]["concurrency"]),
         cancel_grace_sec=float(raw["worker"].get("cancel_grace_sec", 15)),
         report_wait_sec=float(raw["worker"].get("report_wait_sec", 1800)),
+        report_reminder=bool(raw["worker"].get("report_reminder", True)),
         db_path=str(db_path),
         data_dir=str(data_dir),
         cluster_enabled=bool(cl.get("enabled", True)),

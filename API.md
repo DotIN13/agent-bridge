@@ -163,7 +163,10 @@ A job is `succeeded` when **both** halves have happened: its turn has ended and
 `$AB_JOB_DIR/report.md` has been written — and that file's content becomes the
 job's `result`. Between them the row is `waiting`, which
 is non-terminal — the agent process is still alive, can still be steered, and can
-still write the file. The gateway notices the report on the next sweep (5s) *or*
+still write the file. A turn that ends without the file is nudged **once** over
+that channel (a `status` event with `stage: reminder`; `worker.report_reminder =
+false` disables it): the delegate is asked whether it is finished and, if so, to
+write the report now. The gateway notices the report on the next sweep (5s) *or*
 on the next read of that job or its events, whichever comes first — a response
 that listed `report.md` while calling the job `waiting` would be contradicting
 itself. The row becomes `succeeded` with `reason: report_written`.
